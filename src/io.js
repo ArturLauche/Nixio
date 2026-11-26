@@ -1,8 +1,17 @@
+const mimeByExtension = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" }
 export const imageTypes = new Set(["image/png", "image/jpeg", "image/webp"])
 const imageExtensions = /\.(png|jpe?g|webp)$/i
 
+export function imageMimeType(name = "", type = "") {
+  const normalized = String(type).split(";", 1)[0].trim().toLowerCase()
+  if (imageTypes.has(normalized)) return normalized
+  const extension = String(name).match(imageExtensions)?.[1].toLowerCase()
+  return mimeByExtension[extension] ?? null
+}
+
 export function isImageFile(file) {
-  return imageTypes.has(file.type) || (!file.type && imageExtensions.test(file.name))
+  const normalized = String(file.type ?? "").split(";", 1)[0].trim().toLowerCase()
+  return imageTypes.has(normalized) || (!normalized && imageExtensions.test(file.name))
 }
 
 function xmlDocument(source) {
@@ -15,8 +24,28 @@ function named(node, name) {
   return Array.from(node.getElementsByTagNameNS("*", name))
 }
 
-function textNodes(node) {
-  return named(node, "t").map((text) => text.textContent).join("")
+export function extractSpreadsheetText(node) {
+  let output = ""
+  for (const child of node.childNodes ?? []) {
+    const name = child.localName
+    if (!name || name === "rPh") continue
+    if (name === "t") output += child.textContent ?? ""
+    else output += extractSpreadsheetText(child)
+  }
+  return output
+}
+
+export function extractParagraphText(node) {
+  let output = ""
+  for (const child of node.childNodes ?? []) {
+    const name = child.localName
+    if (!name || name === "del" || name === "rt") continue
+    if (name === "t") output += child.textContent ?? ""
+    else if (name === "br" || name === "cr") output += "\n"
+    else if (name === "tab") output += " "
+    else output += extractParagraphText(child)
+  }
+  return output
 }
 
 async function zipXml(zip, pathname) {
@@ -37,14 +66,14 @@ async function spreadsheetText(zip) {
   if (!path) throw new Error("Tệp XLSX không có bảng tính.")
   const worksheet = await zipXml(zip, path)
   const strings = zip.file("xl/sharedStrings.xml")
-    ? named(await zipXml(zip, "xl/sharedStrings.xml"), "si").map(textNodes)
+    ? named(await zipXml(zip, "xl/sharedStrings.xml"), "si").map(extractSpreadsheetText)
     : []
   const rows = named(worksheet, "row").map((row) => {
     const values = []
     for (const cell of named(row, "c")) {
       const value = named(cell, "v")[0]?.textContent ?? ""
       const type = cell.getAttribute("t")
-      values[columnIndex(cell) ?? values.length] = (type === "s" ? strings[Number(value)] : type === "inlineStr" ? textNodes(cell) : value) ?? ""
+      values[columnIndex(cell) ?? values.length] = (type === "s" ? strings[Number(value)] : type === "inlineStr" ? extractSpreadsheetText(cell) : value) ?? ""
     }
     return values
   })
@@ -71,7 +100,7 @@ export async function readDialogueFile(file) {
   const { default: JSZip } = await import("jszip")
   const zip = await JSZip.loadAsync(await file.arrayBuffer())
   if (extension === "xlsx") return spreadsheetText(zip)
-  return named(await zipXml(zip, "word/document.xml"), "p").map(textNodes).filter(Boolean).join("\n")
+  return named(await zipXml(zip, "word/document.xml"), "p").map(extractParagraphText).filter(Boolean).join("\n")
 }
 
 export function groupDialogue(source) {
@@ -79,7 +108,7 @@ export function groupDialogue(source) {
   for (const line of source.split(/\r?\n/)) {
     const clean = line.trim()
     if (!clean) continue
-    const heading = clean.match(/^\[(.+)\]$/)?.[1] ?? clean
+    const heading = clean.match(/^\[(.+)\]$/)?.[1].trim() ?? clean
     const numbered = heading.match(/^(?:trang|page)\s+(\d+)\s*:?$/i)
     if (numbered || imageExtensions.test(heading)) {
       groups.push({ reference: numbered ? Number(numbered[1]) - 1 : heading.toLowerCase(), lines: [] })

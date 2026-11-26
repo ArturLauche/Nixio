@@ -1,4 +1,4 @@
-import { filenameStem, imageTypes, normalizedSearch, saveFile } from "./io.js"
+import { filenameStem, imageMimeType, normalizedSearch, saveFile } from "./io.js"
 
 function catalogUrl(value) {
   if (typeof value !== "string" || !value.trim()) throw new Error("URL ảnh không hợp lệ.")
@@ -34,10 +34,7 @@ async function chapterFiles(chapter) {
     const result = await fetch(url, { credentials: "omit", signal: AbortSignal.timeout(25000) })
     if (!result.ok) throw new Error(`Không tải được ảnh trang ${index + 1}.`)
     const bytes = await result.blob()
-    const guessed = new URL(url).pathname.match(/\.(png|jpe?g|webp)$/i)?.[1].toLowerCase()
-    const contentType = imageTypes.has(bytes.type)
-      ? bytes.type
-      : { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" }[guessed]
+    const contentType = imageMimeType(new URL(url).pathname, bytes.type)
     if (!contentType) throw new Error(`Định dạng ảnh ở trang ${index + 1} chưa được hỗ trợ.`)
     const extension = contentType === "image/jpeg" ? "jpg" : contentType.split("/")[1]
     files.push(new File([bytes], `trang-${String(index + 1).padStart(2, "0")}.${extension}`, { type: contentType }))
