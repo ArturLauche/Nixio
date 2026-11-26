@@ -119,6 +119,32 @@ test("invalid masks and preset styles cannot be saved", () => {
   assert.throws(() => writeProject(project), /không hợp lệ/)
 })
 
+test("version 2 persists rich typography styles, shadow, custom font names and retouch strokes", async () => {
+  const project = sampleProject()
+  Object.assign(project.pages[0].boxes[0], {
+    font: "Comic Neue",
+    bold: true,
+    italic: true,
+    uppercase: true,
+    vertical: true,
+    lineHeight: 1.4,
+    strokeWidth: 3,
+    strokeColor: "#00ffaa",
+    shadowBlur: 6,
+    shadowColor: "#222222",
+    fillColor: "#111111",
+    fillShape: "ellipse",
+  })
+  project.pages[0].retouchStrokes = [
+    { mode: "paint", size: .04, color: "#eeeeee", opacity: .8, points: [{ x: .1, y: .1 }, { x: .2, y: .2 }] },
+    { mode: "clone", size: .06, offsetX: -.05, offsetY: .05, points: [{ x: .4, y: .4 }] },
+    { mode: "inpaint", size: .05, points: [{ x: .5, y: .5 }, { x: .55, y: .52 }] },
+  ]
+  const opened = await readProject(writeProject(project))
+  assert.deepEqual(opened.pages[0].boxes[0], project.pages[0].boxes[0])
+  assert.deepEqual(opened.pages[0].retouchStrokes, project.pages[0].retouchStrokes)
+})
+
 test("portable projects retain their recovery identity while older projects can omit it", async () => {
   const project = sampleProject()
   project.projectId = "d26b25ce-44de-4fcb-a04a-9c63d471527a"

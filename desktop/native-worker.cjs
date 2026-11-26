@@ -37,7 +37,11 @@ class NativeWorker extends TextureWorker {
     return result.finally(() => { this.queued-- })
   }
 
-  redraw({ pixels, ...options }) {
+  redraw(sample) {
+    if (!sample || typeof sample !== "object" || !sample.width || !sample.height || !sample.inner || !sample.pixels) {
+      return Promise.resolve(null)
+    }
+    const { pixels, ...options } = sample
     return this.call("redraw", options, pixels).then(({ data }) => data.length ? data : null).catch(() => null)
   }
 

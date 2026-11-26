@@ -6,6 +6,12 @@ import {
   saveDesktopProject,
   openDesktopProject,
 } from "../native.js"
+import {
+  clearWebSnapshot,
+  getWebSnapshotInfo,
+  loadWebSnapshot,
+  saveWebSnapshot,
+} from "../web-storage.js"
 
 export function setupProjects({
   state,
@@ -23,7 +29,9 @@ export function setupProjects({
   projectBusy,
   hasGesture,
   onCapabilities,
-  render,
+  commitLiveForm,
+  registerFontName,
+  renderFontOptions,
 }) {
   const projectFile = byId("project-file")
   let projectName
@@ -50,6 +58,7 @@ export function setupProjects({
 
   byId("save-project").onclick = async () => {
     if (projectBusy()) return
+    commitLiveForm?.()
     try {
       const file = projectBlob()
       const snapshotRevision = revision
@@ -119,15 +128,21 @@ export function setupProjects({
         } catch {
           throw new Error("Không đọc được ảnh trong dự án: " + saved.file.name)
         }
-        page.boxes = saved.boxes.map((box) => ({
-          ...box,
-          id: crypto.randomUUID(),
-        }))
+        page.boxes = saved.boxes.map((box) => {
+          registerFontName?.(box.font)
+          return {
+            ...box,
+            id: crypto.randomUUID(),
+          }
+        })
         page.unplaced = saved.unplaced
+        page.retouchStrokes = saved.retouchStrokes ?? []
         page.translationContext = saved.translationContext
         page.translationJob = saved.translationJob
         loaded.push(page)
       }
+      for (const preset of project.presets) registerFontName?.(preset.style.font)
+      renderFontOptions?.()
       const hasContent =
         state.pages.length ||
         state.presets.length ||
@@ -148,6 +163,7 @@ export function setupProjects({
         project.projectId ?? file.projectId ?? crypto.randomUUID()
       if (nativeReady)
         await desktop.projectActivate(projectId, file.nativeOpenId)
+      commitLiveForm?.()
       revision++
       history.clear()
       state.projectId = projectId
@@ -157,6 +173,8 @@ export function setupProjects({
       state.queue = project.queue
       state.presets = project.presets
       state.fit = project.fit
+      state.zoom = null
+      state.selectedBoxIds?.clear()
       updateFitLabel()
       projectSettings.forEach((field) => {
         field.value = project.settings[field.id]
@@ -259,6 +277,7 @@ export function setupProjects({
   byId("recent-projects-button").onclick = showLibrary
   byId("new-project").onclick = async () => {
     if (projectBusy()) return
+    commitLiveForm?.()
     if (
       (state.pages.length || revision !== diskRevision) &&
       !window.confirm("Tạo dự án mới và thay phiên hiện tại?")
@@ -268,6 +287,8 @@ export function setupProjects({
     state.pages = []
     state.queue = []
     state.presets = []
+    state.zoom = null
+    state.selectedBoxIds?.clear()
     state.projectId = crypto.randomUUID()
     projectName = undefined
     revision = savedRevision = diskRevision = 0
@@ -346,6 +367,75 @@ export function setupProjects({
       })
       .catch((error) => status(error.message, true))
   }
+  let webAutosaving = false
+  async function refreshWebRecovery() {
+    if (desktop?.native) return
+    const info = await getWebSnapshotInfo()
+    const panel = byId("web-recovery")
+    if (!panel) return
+    panel.hidden = !info
+    if (info) {
+      const time = new Date(info.savedAt).toLocaleTimeString("vi-VN")
+      byId("web-autosave-status").textContent =
+        `Bản tự lưu web (${info.pageCount} trang) lúc ${time}.`
+    }
+  }
+  async function webAutosave() {
+    if (
+      desktop?.native ||
+      webAutosaving ||
+      projectBusy() ||
+      hasGesture() ||
+      savedRevision === revision ||
+      !state.pages.length
+    )
+      return
+    webAutosaving = true
+    const snapshotRevision = revision
+    try {
+      const saved = await saveWebSnapshot(projectBlob(), {
+        name: displayName() + projectExtension,
+        pageCount: state.pages.length,
+      })
+      if (saved) {
+        savedRevision = snapshotRevision
+        await refreshWebRecovery()
+      }
+    } catch {
+      // Ignore storage quota or private browsing errors.
+    } finally {
+      webAutosaving = false
+    }
+  }
+  if (!desktop?.native) {
+    refreshWebRecovery()
+    setInterval(webAutosave, 20000)
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") webAutosave()
+    })
+    window.addEventListener("pagehide", () => {
+      webAutosave()
+    })
+  }
+  const recoverWebBtn = byId("recover-web")
+  if (recoverWebBtn) {
+    recoverWebBtn.onclick = async () => {
+      if (projectBusy()) return
+      const file = await loadWebSnapshot()
+      if (!file) return status("Không còn bản lưu tạm trên trình duyệt.", true)
+      file.recovery = true
+      await loadProject(file)
+    }
+  }
+  const clearWebBtn = byId("clear-web-recovery")
+  if (clearWebBtn) {
+    clearWebBtn.onclick = async () => {
+      await clearWebSnapshot()
+      await refreshWebRecovery()
+      status("Đã xóa bản tự lưu trên trình duyệt.")
+    }
+  }
+
   let closing = false
   desktop?.onClose?.(() => {
     if (!nativeReady || savedRevision === revision) {

@@ -1,4 +1,4 @@
-import { clamp, drawPage, makeBox } from "./canvas.js"
+import { autoFitBox, clamp, drawPage, makeBox } from "./canvas.js"
 import { groupDialogue, isImageFile, readDialogueFile } from "./io.js"
 import { setupLibrary } from "./library.js"
 import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
@@ -7,12 +7,16 @@ import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "
 import { copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
+import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
+import { alignBoxes, distributeBoxes, duplicateBox, nudgeBox, reorderBox } from "./tools.js"
 
 import { setupTasks } from "./controllers/tasks.js"
 import { setupProjects } from "./controllers/project.js"
 import { setupTranslation } from "./controllers/translation.js"
 import { setupOcr } from "./controllers/ocr.js"
 import { setupExports } from "./controllers/export.js"
+import { setupDialogs } from "./controllers/dialogs.js"
+import { setupGestures } from "./controllers/gestures.js"
 
 const history = new EditHistory()
 const ownedUrls = new Set()
@@ -20,25 +24,34 @@ const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
 const overlays = byId("overlays")
 const pageCanvas = byId("page-canvas")
+const viewport = byId("viewport")
 const form = byId("box-form")
 const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
-  pages: [], presets: [], pageId: null, boxId: null, queue: [], placing: false, fit: true,
-  exporting: false, importing: false, translating: false, importingScript: false, openingProject: false, processingNative: false, savingProject: false,
+  pages: [], presets: [], pageId: null, boxId: null, selectedBoxIds: new Set(),
+  queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, cloneSource: null,
+  exporting: false, importing: false, translating: false, importingScript: false,
+  openingProject: false, processingNative: false, savingProject: false,
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
-let gesture
-let pendingPaint
 let previewRedraw
 let nativeReady = false
 let nativeLanguages = []
+let formEditSnapshot = null
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
-const boxFields = { text: "box-text", size: "box-size", font: "box-font", color: "box-color", align: "box-align", rotation: "box-rotation" }
+const boxFields = {
+  text: "box-text", size: "box-size", font: "box-font", color: "box-color",
+  align: "box-align", rotation: "box-rotation",
+  lineHeight: "box-line-height", strokeWidth: "box-stroke-width", strokeColor: "box-stroke-color",
+  shadowBlur: "box-shadow-blur", shadowColor: "box-shadow-color",
+  fillShape: "box-fill-shape", fillColor: "box-fill-color",
+}
+const resizeHandleNames = ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 
 function editorSnapshot() {
   return copyEditor({
@@ -46,6 +59,14 @@ function editorSnapshot() {
     pageId: state.pageId, boxId: state.boxId,
     settings: Object.fromEntries(projectSettings.map(({ id, value }) => [id, value])),
   })
+}
+
+function commitLiveFormCheckpoint() {
+  if (!formEditSnapshot) return false
+  const before = formEditSnapshot
+  formEditSnapshot = null
+  checkpoint(before)
+  return true
 }
 
 function releaseUnusedImages() {
@@ -58,35 +79,80 @@ function releaseUnusedImages() {
   }
 }
 
-function checkpoint(snapshot = editorSnapshot()) {
+function checkpoint(snapshot) {
+  if (!snapshot) {
+    if (formEditSnapshot) {
+      const pending = formEditSnapshot
+      formEditSnapshot = null
+      projects.changed()
+      history.record(pending)
+      syncProjectActions()
+      return
+    }
+    snapshot = editorSnapshot()
+  }
   projects.changed()
   history.record(snapshot)
   syncProjectActions()
 }
 
+function syncSelectionAfterRestore() {
+  const page = selectedPage()
+  state.selectedBoxIds.clear()
+  if (page && state.boxId && page.boxes.some((box) => box.id === state.boxId)) {
+    state.selectedBoxIds.add(state.boxId)
+  } else {
+    state.boxId = null
+  }
+}
+
 function restoreHistory(direction) {
-  if (projectBusy() || gesture) return
+  if (projectBusy() || gestures.hasGesture()) return
+  commitLiveFormCheckpoint()
   const snapshot = history[direction](editorSnapshot())
   if (!snapshot) return
   const { settings, ...editor } = snapshot
   projects.changed()
   Object.assign(state, editor, { placing: false })
+  syncSelectionAfterRestore()
   projectSettings.forEach((field) => { field.value = settings[field.id] })
   render()
   releaseUnusedImages()
   status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
 }
 
+function renderFontOptions() {
+  const select = byId("box-font")
+  const current = select.value
+  select.replaceChildren(...allFonts().map((name) => new Option(name, name)))
+  if ([...select.options].some((option) => option.value === current)) select.value = current
+}
+
+byId("font-file").onchange = async (event) => {
+  const file = event.target.files[0]
+  event.target.value = ""
+  if (!file || projectBusy()) return
+  try {
+    const family = await loadCustomFont(file)
+    renderFontOptions()
+    const box = selectedBox()
+    if (box) {
+      commitLiveFormCheckpoint()
+      checkpoint()
+      box.font = family
+      byId("box-font").value = family
+      renderCanvas()
+      renderInspector()
+    }
+    status(`Đã nạp và lưu font "${family}".`)
+  } catch (error) {
+    status(error.message, true)
+  }
+}
+
 byId("undo").onclick = () => restoreHistory("undo")
 byId("redo").onclick = () => restoreHistory("redo")
-document.addEventListener("keydown", (event) => {
-  if (!(event.ctrlKey || event.metaKey) || event.altKey ||
-      event.target.closest("input, textarea, select, [contenteditable]")) return
-  const key = event.key.toLowerCase()
-  if (key !== "z" && key !== "y") return
-  event.preventDefault()
-  restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
-})
+
 for (const field of projectSettings) {
   field.addEventListener("input", () => { projects.changed() })
   let before
@@ -125,15 +191,18 @@ window.addEventListener("hashchange", setView)
 setView()
 
 function selectPage(page) {
-  if (gesture) {
-    const { settings, ...editor } = gesture.before
+  commitLiveFormCheckpoint()
+  const aborted = gestures.abortGesture()
+  if (aborted) {
+    const { settings, ...editor } = aborted
     Object.assign(state, editor)
     page = state.pages.find((item) => item.id === page?.id)
   }
   state.pageId = page?.id ?? null
   state.boxId = null
+  state.selectedBoxIds.clear()
   state.placing = false
-  gesture = undefined
+  state.cloneSource = null
   render()
 }
 
@@ -174,6 +243,7 @@ function syncProjectActions() {
   byId("redo").disabled = projectBusy() || !history.future.length
   byId("open-project").disabled = projectBusy()
   byId("save-project").disabled = projectBusy()
+  byId("new-project").disabled = projectBusy()
   byId("images").disabled = projectBusy()
   byId("script-file").disabled = projectBusy()
 }
@@ -187,6 +257,19 @@ function syncTranslationActions() {
   })
 }
 
+function syncToolControls() {
+  const tool = byId("cleanup-tool").value
+  const page = selectedPage()
+  const hasRetouch = Boolean(page?.retouchStrokes?.length)
+  byId("paint-color-field").hidden = tool !== "paint"
+  byId("paint-opacity-field").hidden = tool !== "paint" && tool !== "clone" && tool !== "inpaint"
+  byId("undo-retouch").hidden = !hasRetouch
+  byId("clear-retouch").hidden = !hasRetouch
+  byId("undo-retouch").disabled = projectBusy() || !hasRetouch
+  byId("clear-retouch").disabled = projectBusy() || !hasRetouch
+  byId("eyedropper-readout").hidden = tool !== "eyedropper" || !byId("eyedropper-readout").textContent
+}
+
 function renderPages() {
   projects.refreshDirty()
   const current = selectedIndex()
@@ -197,14 +280,21 @@ function renderPages() {
   byId("prev-page").disabled = current <= 0
   byId("next-page").disabled = current < 0 || current >= count - 1
   byId("apply-script").disabled = current < 0 || projectBusy()
-  byId("translate").disabled = current < 0 || state.translating || state.openingProject
-  byId("align-script").disabled = current < 0 || state.translating || state.openingProject
-  byId("translate-all").disabled = !count || state.translating || state.openingProject
+  byId("export-script").disabled = !count || projectBusy()
+  byId("translate-boxes").disabled = current < 0 || !(selectedPage()?.boxes.length) || projectBusy()
+  byId("translate").disabled = current < 0 || projectBusy()
+  byId("align-script").disabled = current < 0 || projectBusy()
+  byId("translate-all").disabled = !count || projectBusy()
   byId("fit-page").disabled = current < 0
+  byId("zoom-in").disabled = current < 0
+  byId("zoom-out").disabled = current < 0
+  byId("compare-original").disabled = current < 0
   byId("add-box").disabled = current < 0 || projectBusy()
-  byId("export-all").disabled = !count || state.exporting || state.openingProject
-  exportButtons.forEach((button) => { button.disabled = current < 0 || state.exporting || state.openingProject })
+  byId("autofit-page").disabled = current < 0 || !(selectedPage()?.boxes.length) || projectBusy()
+  byId("export-all").disabled = !count || projectBusy()
+  exportButtons.forEach((button) => { button.disabled = current < 0 || projectBusy() })
   syncProjectActions()
+  syncToolControls()
   byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
   byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
@@ -240,11 +330,13 @@ function rectStyle(element, rect) {
   for (const [name, value] of Object.entries({ left: rect.x, top: rect.y, width: rect.w, height: rect.h })) {
     element.style[name] = value * 100 + "%"
   }
-  if (rect.rotation) element.style.transform = "rotate(" + rect.rotation + "deg)"
+  element.style.transform = rect.rotation ? `rotate(${rect.rotation}deg)` : ""
 }
 
 function paintPreview(page) {
-  const pending = drawPage(pageCanvas, page, { showCleanup: byId("show-cleanup").checked, showText: byId("show-text").checked })
+  const showCleanup = !state.compareOriginal && byId("show-cleanup").checked
+  const showText = !state.compareOriginal && byId("show-text").checked
+  const pending = drawPage(pageCanvas, page, { showCleanup, showText })
   if (!pending || previewRedraw === pending) return
   previewRedraw = pending
   pending.then(() => {
@@ -255,35 +347,68 @@ function paintPreview(page) {
 }
 
 function renderCanvas() {
-  if (pendingPaint) {
-    cancelAnimationFrame(pendingPaint)
-    pendingPaint = undefined
-  }
+  gestures.cancelPendingPaint()
   const page = selectedPage()
+  const tool = byId("cleanup-tool").value
   stage.hidden = !page
   byId("canvas-empty").hidden = Boolean(page)
   byId("add-box").setAttribute("aria-pressed", String(state.placing))
+  byId("compare-original").setAttribute("aria-pressed", String(state.compareOriginal))
   stage.classList.toggle("placing", state.placing)
-  stage.classList.toggle("cleaning", byId("cleanup-tool").value !== "text")
+  stage.classList.toggle("panning", tool === "pan" || gestures.getSpaceHeld())
+  stage.classList.toggle("eyedropper", tool === "eyedropper")
+  stage.classList.toggle("bubble", tool === "bubble")
+  stage.classList.toggle("cleaning", tool !== "text" && tool !== "pan" && tool !== "eyedropper" && tool !== "bubble")
+  gestures.updateZoomDisplay()
   if (!page) {
     overlays.replaceChildren()
     pageCanvas.width = 1
     pageCanvas.height = 1
     return
   }
-  stage.style.width = Math.min(page.image.naturalWidth, state.fit ? 720 : Infinity) + "px"
-  stage.style.maxWidth = state.fit ? "100%" : "none"
-  stage.style.flexShrink = state.fit ? "1" : "0"
+  const stageWidth = state.zoom
+    ? Math.max(120, Math.round(page.image.naturalWidth * state.zoom))
+    : Math.min(page.image.naturalWidth, state.fit ? 720 : Infinity)
+  stage.style.width = stageWidth + "px"
+  stage.style.maxWidth = state.fit && !state.zoom ? "100%" : "none"
+  stage.style.flexShrink = state.fit && !state.zoom ? "1" : "0"
   paintPreview(page)
+
+  const multiCount = state.selectedBoxIds.size
   overlays.replaceChildren(...page.boxes.map((box) => {
-    const outline = listButton("", () => selectBox(box), box.text)
+    const outline = document.createElement("div")
     outline.className = "outline"
+    outline.setAttribute("role", "button")
+    outline.setAttribute("tabindex", "0")
+    outline.setAttribute("aria-label", box.text)
     outline.dataset.box = box.id
-    if (box.id === state.boxId) outline.setAttribute("aria-current", "true")
+    const isPrimary = box.id === state.boxId
+    const isMulti = state.selectedBoxIds.has(box.id)
+    if (isPrimary) outline.setAttribute("aria-current", "true")
+    if (isMulti && multiCount > 1) outline.classList.add("multi-selected")
+    outline.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault()
+        selectBox(box)
+      }
+    })
     rectStyle(outline, box)
+    if (isPrimary && multiCount <= 1 && tool === "text" && !state.placing && !state.compareOriginal) {
+      for (const handle of resizeHandleNames) {
+        const dot = document.createElement("span")
+        dot.className = "resize-handle"
+        dot.dataset.handle = handle
+        outline.append(dot)
+      }
+      const rot = document.createElement("span")
+      rot.className = "rotate-handle"
+      rot.title = "Kéo để xoay (giữ Shift theo nấc 15°)"
+      outline.append(rot)
+    }
     return outline
   }))
   renderCleanupOverlay()
+  gestures.renderCloneMarker()
 }
 
 function freezeCleanup(box) {
@@ -297,13 +422,14 @@ function renderCleanupOverlay() {
   canvas.width = pageCanvas.width
   canvas.height = pageCanvas.height
   const box = selectedBox()
-  if (!box || byId("cleanup-tool").value === "text") return
+  const tool = byId("cleanup-tool").value
+  if (!box || !["region", "erase", "restore"].includes(tool)) return
   const rect = cleanupRectangle(box)
   const left = Math.floor(rect.x * canvas.width)
   const top = Math.floor(rect.y * canvas.height)
   const mask = document.createElement("canvas")
-  mask.width = Math.ceil((rect.x + rect.w) * canvas.width) - left
-  mask.height = Math.ceil((rect.y + rect.h) * canvas.height) - top
+  mask.width = Math.max(1, Math.ceil((rect.x + rect.w) * canvas.width) - left)
+  mask.height = Math.max(1, Math.ceil((rect.y + rect.h) * canvas.height) - top)
   paintCleanupMask(mask, box, selectedPage().image, left, top)
   const context = mask.getContext("2d")
   context.globalCompositeOperation = "source-in"
@@ -332,6 +458,7 @@ byId("save-preset").onclick = () => {
   const name = byId("preset-name").value.trim()
   if (!box || projectBusy()) return
   if (!name) return status("Hãy nhập tên mẫu dàn chữ.", true)
+  commitLiveFormCheckpoint()
   checkpoint()
   const preset = { name, style: projectStyle(box) }
   const index = state.presets.findIndex((item) => item.name === name)
@@ -341,27 +468,44 @@ byId("save-preset").onclick = () => {
   byId("style-preset").value = String(index < 0 ? state.presets.length - 1 : index)
   status("Đã lưu mẫu " + name + ".")
 }
+
 byId("apply-preset").onclick = () => {
   const preset = state.presets[Number(byId("style-preset").value)]
   if (!preset || projectBusy()) return
+  commitLiveFormCheckpoint()
   const scope = byId("preset-scope").value
-  const pages = scope === "chapter" ? state.pages : [selectedPage()].filter(Boolean)
-  const boxes = scope === "box" ? [selectedBox()].filter(Boolean) : pages.flatMap((page) => page.boxes)
+  const page = selectedPage()
+  const boxes = scope === "chapter"
+    ? state.pages.flatMap((p) => p.boxes)
+    : scope === "page"
+      ? (page?.boxes ?? [])
+      : state.selectedBoxIds.size > 1 && page
+        ? page.boxes.filter((b) => state.selectedBoxIds.has(b.id))
+        : [selectedBox()].filter(Boolean)
   if (!boxes.length) return status("Hãy chọn khung để áp dụng mẫu.", true)
   checkpoint()
-  boxes.forEach((box) => Object.assign(box, preset.style))
+  const defaults = {
+    bold: false, italic: false, uppercase: false, vertical: false,
+    lineHeight: 1.15, strokeWidth: 0, strokeColor: "#ffffff",
+    shadowBlur: 0, shadowColor: "#000000",
+    fillColor: "#ffffff", fillShape: "rect",
+  }
+  boxes.forEach((box) => Object.assign(box, defaults, preset.style))
   render()
   status(`Đã áp dụng mẫu cho ${boxes.length} khung.`)
 }
+
 byId("delete-preset").onclick = () => {
   if (projectBusy() || !state.presets.length) return
   checkpoint()
   state.presets.splice(Number(byId("style-preset").value), 1)
   renderPresets()
 }
+
 byId("reset-cleanup").onclick = () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
+  commitLiveFormCheckpoint()
   checkpoint()
   delete box.cleanupRect
   delete box.cleanupStrokes
@@ -369,16 +513,63 @@ byId("reset-cleanup").onclick = () => {
   freezeCleanup(box)
   render()
 }
+
+byId("undo-retouch").onclick = () => {
+  const page = selectedPage()
+  if (!page?.retouchStrokes?.length || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  page.retouchStrokes.pop()
+  render()
+  status("Đã hoàn tác nét cọ gần nhất.")
+}
+
+byId("clear-retouch").onclick = () => {
+  const page = selectedPage()
+  if (!page?.retouchStrokes?.length || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  page.retouchStrokes = []
+  render()
+  status("Đã xóa toàn bộ nét vẽ tay trên trang.")
+}
+
 byId("cleanup-tool").onchange = () => {
   state.placing = false
+  syncToolControls()
   renderCanvas()
-  if (byId("cleanup-tool").value !== "text") status("Chọn khung thoại rồi khoanh vùng hoặc vẽ cọ trên ảnh.")
+  const tool = byId("cleanup-tool").value
+  if (tool === "pan") status("Kéo trên ảnh để di chuyển bản vẽ (hoặc giữ phím Space).")
+  else if (tool === "bubble") status("Bấm vào bên trong một bong bóng thoại sáng để tự động tạo khung khớp viền.")
+  else if (tool === "eyedropper") status("Bấm lên ảnh để hút màu cho cọ vẽ (Shift+bấm để đổi màu chữ).")
+  else if (tool === "paint") status("Kéo cọ trên ảnh để vẽ che chữ theo màu cọ đã chọn.")
+  else if (tool === "clone") status("Giữ Alt + bấm vùng nền mẫu, sau đó kéo cọ để sao chép nền che chữ.")
+  else if (tool === "inpaint") status("Tô cọ lên chữ trên nền tranh phức tạp để tự động tái tạo nền phía sau.")
+  else if (tool !== "text") status("Chọn khung thoại rồi khoanh vùng hoặc vẽ cọ trên ảnh.")
 }
 byId("show-cleanup").onchange = renderCanvas
 byId("show-text").onchange = renderCanvas
 
 function selectBox(box) {
+  commitLiveFormCheckpoint()
   state.boxId = box.id
+  state.selectedBoxIds.clear()
+  state.selectedBoxIds.add(box.id)
+  renderCanvas()
+  renderInspector()
+}
+
+function toggleSelectBox(box) {
+  commitLiveFormCheckpoint()
+  if (state.selectedBoxIds.has(box.id)) {
+    state.selectedBoxIds.delete(box.id)
+    if (state.boxId === box.id) {
+      state.boxId = [...state.selectedBoxIds].at(-1) ?? null
+    }
+  } else {
+    state.selectedBoxIds.add(box.id)
+    state.boxId = box.id
+  }
   renderCanvas()
   renderInspector()
 }
@@ -387,22 +578,63 @@ function renderInspector() {
   const page = selectedPage()
   const box = selectedBox()
   const boxes = page?.boxes ?? []
+  const multiCount = state.selectedBoxIds.size
   renderPresets()
+  syncToolControls()
+  byId("autofit-page").disabled = !boxes.length || projectBusy()
+  byId("translate-boxes").disabled = !boxes.length || projectBusy()
   byId("cleanup-inspector").hidden = !box
   byId("reset-cleanup").disabled = projectBusy()
   byId("box-count").textContent = boxes.length
-  byId("inspector-empty").hidden = Boolean(box)
+
+  const multiPanel = byId("multi-select-panel")
+  multiPanel.hidden = multiCount < 2
+  if (multiCount >= 2) {
+    byId("multi-select-count").textContent = `Đang chọn ${multiCount} khung (Shift+bấm để thêm/bớt).`
+    multiPanel.querySelectorAll("[data-distribute]").forEach((btn) => {
+      btn.disabled = multiCount < 3 || projectBusy()
+    })
+    multiPanel.querySelectorAll("[data-align], #multi-autofit, #multi-delete").forEach((btn) => {
+      btn.disabled = projectBusy()
+    })
+  }
+
+  byId("inspector-empty").hidden = Boolean(box) || multiCount >= 2
   form.hidden = !box
   if (box) {
-    for (const [key, id] of Object.entries(boxFields)) byId(id).value = box[key]
-    byId("cleanup-expand").value = box.cleanupExpand ?? 0
+    registerFontName(box.font)
+    renderFontOptions()
+    byId("box-text").value = box.text
+    byId("box-size").value = box.size
+    byId("box-font").value = box.font
+    byId("box-color").value = box.color
+    byId("box-align").value = box.align
+    byId("box-rotation").value = box.rotation
+    byId("box-bold").checked = Boolean(box.bold)
+    byId("box-italic").checked = Boolean(box.italic)
+    byId("box-uppercase").checked = Boolean(box.uppercase)
+    byId("box-vertical").checked = Boolean(box.vertical)
+    byId("box-line-height").value = box.lineHeight ?? 1.15
+    byId("box-stroke-width").value = box.strokeWidth ?? 0
+    byId("box-stroke-color").value = box.strokeColor ?? "#ffffff"
+    byId("box-shadow-blur").value = box.shadowBlur ?? 0
+    byId("box-shadow-color").value = box.shadowColor ?? "#000000"
     byId("box-fill").checked = box.fill
+    byId("box-fill-shape").value = box.fillShape ?? "rect"
+    byId("box-fill-color").value = box.fillColor ?? "#ffffff"
     byId("box-cleanup").checked = Boolean(box.cleanup)
+    byId("cleanup-expand").value = box.cleanupExpand ?? 0
+    const idx = boxes.findIndex((item) => item.id === box.id)
+    byId("box-layer-down").disabled = idx <= 0 || projectBusy()
+    byId("box-layer-up").disabled = idx < 0 || idx >= boxes.length - 1 || projectBusy()
   }
   byId("boxes").replaceChildren(...boxes.map((item) => {
     const li = document.createElement("li")
-    const button = listButton(item.text, () => selectBox(item))
-    if (box?.id === item.id) button.setAttribute("aria-current", "true")
+    const button = listButton(item.text, (event) => {
+      if (event.shiftKey) toggleSelectBox(item)
+      else selectBox(item)
+    })
+    if (box?.id === item.id || state.selectedBoxIds.has(item.id)) button.setAttribute("aria-current", "true")
     li.append(button)
     return li
   }))
@@ -417,6 +649,7 @@ function renderInspector() {
     const li = document.createElement("li")
     const button = listButton(line.text, () => {
       if (!selectedPage() || projectBusy()) return
+      commitLiveFormCheckpoint()
       checkpoint()
       line.remove()
       addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text, false)
@@ -441,7 +674,7 @@ async function openImage(file) {
   try {
     await image.decode()
     if (image.naturalWidth * image.naturalHeight > 28000000) throw new Error("Ảnh vượt giới hạn kích thước.")
-    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [] }
+    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [], retouchStrokes: [] }
   } catch (error) {
     URL.revokeObjectURL(url)
     ownedUrls.delete(url)
@@ -451,6 +684,7 @@ async function openImage(file) {
 
 async function importPages(files) {
   if (projectBusy()) return []
+  commitLiveFormCheckpoint()
   state.importing = true
   syncProjectActions()
   const loaded = []
@@ -509,10 +743,18 @@ function updateFitLabel() {
   byId("fit-page").textContent = state.fit ? "Vừa trang" : "Kích thước gốc"
 }
 byId("fit-page").onclick = () => {
+  state.zoom = null
   state.fit = !state.fit
   updateFitLabel()
   renderCanvas()
 }
+byId("compare-original").onclick = () => {
+  if (!selectedPage()) return
+  state.compareOriginal = !state.compareOriginal
+  renderCanvas()
+  status(state.compareOriginal ? "Đang xem ảnh gốc (nhấn \\ để quay lại)." : "Đã quay lại bản biên tập.")
+}
+
 byId("script-file").onchange = async (event) => {
   const file = event.target.files[0]
   event.target.value = ""
@@ -558,6 +800,7 @@ byId("apply-script").onclick = () => {
   const groups = groupDialogue(byId("script-text").value)
   if (projectBusy()) return
   if (!current || !groups.length) return status("Hãy thêm ảnh và nhập lời thoại.", true)
+  commitLiveFormCheckpoint()
   checkpoint()
   const unplaced = []
   let placed = 0
@@ -580,12 +823,14 @@ byId("apply-script").onclick = () => {
 
 function addBox(rectangle, line, record = true) {
   const page = selectedPage()
-  if (!page) return
-  if (projectBusy()) return
+  if (!page || projectBusy()) return
+  commitLiveFormCheckpoint()
   if (record) checkpoint()
   const box = makeBox(page, rectangle, line)
   page.boxes.push(box)
   state.boxId = box.id
+  state.selectedBoxIds.clear()
+  state.selectedBoxIds.add(box.id)
   state.placing = false
   renderCanvas()
   renderInspector()
@@ -594,6 +839,7 @@ function addBox(rectangle, line, record = true) {
 
 byId("add-box").onclick = () => {
   byId("cleanup-tool").value = "text"
+  syncToolControls()
   state.placing = !state.placing
   renderCanvas()
   if (state.placing) {
@@ -603,145 +849,170 @@ byId("add-box").onclick = () => {
     status("Đã thoát chế độ đặt khung.")
   }
 }
-function point(event) {
-  const area = pageCanvas.getBoundingClientRect()
-  return { x: clamp((event.clientX - area.left) / area.width, 0, 1), y: clamp((event.clientY - area.top) / area.height, 0, 1) }
+
+function applyFormToBox(box, { requireText = false } = {}) {
+  const trimmed = byId("box-text").value.trim()
+  if (requireText && !trimmed) return false
+  if (trimmed) box.text = trimmed
+  box.font = byId("box-font").value
+  box.size = clamp(Number(byId("box-size").value) || box.size, 8, 400)
+  box.lineHeight = clamp(Number(byId("box-line-height").value) || 1.15, .8, 2.2)
+  box.color = byId("box-color").value
+  box.rotation = clamp(Number(byId("box-rotation").value) || 0, -180, 180)
+  box.align = byId("box-align").value
+  box.bold = byId("box-bold").checked
+  box.italic = byId("box-italic").checked
+  box.uppercase = byId("box-uppercase").checked
+  box.vertical = byId("box-vertical").checked
+  box.strokeWidth = clamp(Number(byId("box-stroke-width").value) || 0, 0, 24)
+  box.strokeColor = byId("box-stroke-color").value
+  box.shadowBlur = clamp(Number(byId("box-shadow-blur").value) || 0, 0, 24)
+  box.shadowColor = byId("box-shadow-color").value
+  box.fill = byId("box-fill").checked
+  box.fillShape = byId("box-fill-shape").value
+  box.fillColor = byId("box-fill-color").value
+  box.cleanup = byId("box-cleanup").checked
+  if (box.cleanup) freezeCleanup(box)
+  return true
 }
 
-function placement(a, b) {
-  const w = Math.abs(a.x - b.x)
-  const h = Math.abs(a.y - b.y)
-  if (w < .015 && h < .015) return { x: clamp(a.x - .17, 0, .66), y: clamp(a.y - .08, 0, .84), w: .34, h: .16 }
-  return { x: Math.min(a.x, b.x, .97), y: Math.min(a.y, b.y, .97), w: Math.max(.03, w), h: Math.max(.03, h) }
+function liveUpdateForm() {
+  const box = selectedBox()
+  const page = selectedPage()
+  if (!box || !page || projectBusy()) return
+  if (!formEditSnapshot) formEditSnapshot = editorSnapshot()
+  applyFormToBox(box)
+  projects.changed()
+  const outline = overlays.querySelector('[aria-current="true"]')
+  if (outline) rectStyle(outline, box)
+  paintPreview(page)
 }
-
-stage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || projectBusy()) return
-  const origin = point(event)
-  const tool = byId("cleanup-tool").value
-  const box = tool === "text" ? selectedPage()?.boxes.find((item) => item.id === event.target.dataset.box) : selectedBox()
-  if (!box && !state.placing) return
-  event.preventDefault()
-  stage.setPointerCapture(event.pointerId)
-  const before = editorSnapshot()
-  if (tool !== "text") {
-    if (!box) return
-    freezeCleanup(box)
-    box.cleanup = true
-    if (tool !== "region") {
-      const size = clamp(Number(byId("brush-size").value) || 20, 1, 200)
-      const stroke = { mode: tool, size: size / Math.min(pageCanvas.width, pageCanvas.height), points: [origin] }
-      box.cleanupStrokes ??= []
-      box.cleanupStrokes.push(stroke)
-      gesture = { pointer: event.pointerId, box, stroke, before }
-      renderCleanupOverlay()
-      return
-    }
-  } else if (box) {
-    selectBox(box)
-    if (box.cleanup) freezeCleanup(box)
-    gesture = { pointer: event.pointerId, box, origin, start: { x: box.x, y: box.y }, before }
-    return
-  }
-  const draft = document.createElement("div")
-  draft.className = "outline draft"
-  overlays.append(draft)
-  gesture = { pointer: event.pointerId, origin, draft, cleanupBox: tool === "region" ? box : null, before }
-})
-
-stage.addEventListener("pointermove", (event) => {
-  if (gesture?.pointer !== event.pointerId) return
-  const cursor = point(event)
-  if (gesture.stroke) {
-    gesture.stroke.points.push(cursor)
-    renderCleanupOverlay()
-  } else if (gesture.box) {
-    const { box, origin, start } = gesture
-    box.x = clamp(start.x + cursor.x - origin.x, 0, 1 - box.w)
-    box.y = clamp(start.y + cursor.y - origin.y, 0, 1 - box.h)
-    const outline = overlays.querySelector('[aria-current="true"]')
-    if (outline) rectStyle(outline, box)
-    pendingPaint ??= requestAnimationFrame(() => {
-      pendingPaint = undefined
-      const page = selectedPage()
-      if (page) paintPreview(page)
-    })
-  } else {
-    rectStyle(gesture.draft, placement(gesture.origin, cursor))
-  }
-})
-
-stage.addEventListener("pointerup", (event) => {
-  if (gesture?.pointer !== event.pointerId) return
-  const completed = gesture
-  gesture = undefined
-  if (completed.draft || completed.stroke || completed.box.x !== completed.start.x || completed.box.y !== completed.start.y) {
-    checkpoint(completed.before)
-  }
-  if (completed.cleanupBox) {
-    completed.cleanupBox.cleanupRect = placement(completed.origin, point(event))
-    completed.cleanupBox.cleanupStrokes = []
-  } else if (completed.draft) {
-    addBox(placement(completed.origin, point(event)), undefined, false)
-  }
-  render()
-})
-stage.addEventListener("pointercancel", (event) => {
-  if (gesture?.pointer !== event.pointerId) return
-  const { before } = gesture
-  gesture = undefined
-  const { settings, ...editor } = before
-  Object.assign(state, editor)
-  render()
-})
-
-stage.addEventListener("keydown", (event) => {
-  if (event.target !== stage) return
-  if (event.key === "Enter") {
-    event.preventDefault()
-    addBox({ x: .33, y: .42, w: .34, h: .16 })
-    byId("box-text").focus()
-  } else if (event.key === "Escape") {
-    state.placing = false
-    renderCanvas()
-  } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-    const rtl = byId("direction").value === "rtl"
-    changePage((event.key === "ArrowLeft") === rtl ? 1 : -1)
-    event.preventDefault()
-  }
-})
+form.addEventListener("input", liveUpdateForm)
+form.addEventListener("change", liveUpdateForm)
 
 form.onsubmit = (event) => {
   event.preventDefault()
   const box = selectedBox()
-  if (!box) return
-  if (projectBusy()) return
+  if (!box || projectBusy()) return
   const text = byId("box-text").value.trim()
   if (!text) return status("Hãy nhập nội dung khung.", true)
-  checkpoint()
-  for (const [key, id] of Object.entries(boxFields)) box[key] = byId(id).value
-  box.text = text
-  box.size = Number(box.size)
-  box.rotation = Number(box.rotation)
-  box.fill = byId("box-fill").checked
-  box.cleanup = byId("box-cleanup").checked
-  if (box.cleanup) freezeCleanup(box)
+  if (!commitLiveFormCheckpoint()) checkpoint()
+  applyFormToBox(box, { requireText: true })
   renderPages()
   renderCanvas()
   renderInspector()
   status("Đã lưu khung.")
 }
 
-byId("delete-box").onclick = () => {
+function deleteSelectedBoxes() {
   const page = selectedPage()
-  if (!page || !state.boxId || projectBusy()) return
+  if (!page || projectBusy()) return
+  const ids = state.selectedBoxIds.size ? new Set(state.selectedBoxIds) : (state.boxId ? new Set([state.boxId]) : null)
+  if (!ids?.size) return
+  commitLiveFormCheckpoint()
   checkpoint()
-  page.boxes = page.boxes.filter((box) => box.id !== state.boxId)
+  const removed = page.boxes.filter((box) => ids.has(box.id)).length
+  page.boxes = page.boxes.filter((box) => !ids.has(box.id))
   state.boxId = null
+  state.selectedBoxIds.clear()
   renderCanvas()
   renderInspector()
-  status("Đã xóa khung.")
+  status(removed > 1 ? `Đã xóa ${removed} khung.` : "Đã xóa khung.")
 }
+
+byId("delete-box").onclick = deleteSelectedBoxes
+byId("multi-delete").onclick = deleteSelectedBoxes
+
+byId("autofit-box").onclick = () => {
+  const page = selectedPage()
+  const box = selectedBox()
+  if (!page || !box || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  const next = autoFitBox(page, box)
+  box.size = next
+  byId("box-size").value = next
+  renderCanvas()
+  renderInspector()
+  status(`Đã tự khớp cỡ chữ ${next} px.`)
+}
+
+byId("autofit-page").onclick = () => {
+  const page = selectedPage()
+  if (!page?.boxes.length || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  page.boxes.forEach((box) => { box.size = autoFitBox(page, box) })
+  render()
+  status(`Đã khớp cỡ chữ cho ${page.boxes.length} khung trên trang.`)
+}
+
+byId("multi-autofit").onclick = () => {
+  const page = selectedPage()
+  if (!page || state.selectedBoxIds.size < 2 || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  const targets = page.boxes.filter((box) => state.selectedBoxIds.has(box.id))
+  targets.forEach((box) => { box.size = autoFitBox(page, box) })
+  render()
+  status(`Đã khớp cỡ chữ cho ${targets.length} khung đã chọn.`)
+}
+
+document.querySelectorAll("[data-align]").forEach((button) => {
+  button.onclick = () => {
+    const page = selectedPage()
+    if (!page || state.selectedBoxIds.size < 2 || projectBusy()) return
+    commitLiveFormCheckpoint()
+    const before = editorSnapshot()
+    if (!alignBoxes(page.boxes, state.selectedBoxIds, button.dataset.align)) return
+    checkpoint(before)
+    render()
+    status("Đã căn hàng các khung đã chọn.")
+  }
+})
+
+document.querySelectorAll("[data-distribute]").forEach((button) => {
+  button.onclick = () => {
+    const page = selectedPage()
+    if (!page || state.selectedBoxIds.size < 3 || projectBusy()) return
+    commitLiveFormCheckpoint()
+    const before = editorSnapshot()
+    if (!distributeBoxes(page.boxes, state.selectedBoxIds, button.dataset.distribute)) return
+    checkpoint(before)
+    render()
+    status("Đã chia đều khoảng cách các khung đã chọn.")
+  }
+})
+
+function duplicateSelectedBox() {
+  const page = selectedPage()
+  const box = selectedBox()
+  if (!page || !box || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  const copy = duplicateBox(box)
+  page.boxes.push(copy)
+  state.boxId = copy.id
+  state.selectedBoxIds.clear()
+  state.selectedBoxIds.add(copy.id)
+  render()
+  status("Đã nhân bản khung.")
+}
+byId("duplicate-box").onclick = duplicateSelectedBox
+
+function moveBoxLayer(delta) {
+  const page = selectedPage()
+  if (!page || !state.boxId || projectBusy()) return
+  commitLiveFormCheckpoint()
+  const result = reorderBox(page.boxes, state.boxId, delta)
+  if (!result.moved) return
+  checkpoint()
+  page.boxes = result.boxes
+  render()
+  status(delta > 0 ? "Đã đưa khung lên lớp trên." : "Đã đưa khung xuống lớp dưới.")
+}
+byId("box-layer-up").onclick = () => moveBoxLayer(1)
+byId("box-layer-down").onclick = () => moveBoxLayer(-1)
 
 function applyTranslation(page, lines) {
   const regions = page.boxes.length ? page.boxes.map((box) => ({ box: toCoordinates(box.originalBox ?? box), existing: box }))
@@ -764,20 +1035,119 @@ function applyTranslation(page, lines) {
 byId("cleanup-expand").onchange = () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
+  commitLiveFormCheckpoint()
   checkpoint()
   box.cleanupExpand = clamp(Math.round(Number(byId("cleanup-expand").value) || 0), -8, 8)
   render()
 }
 
+// Global keyboard shortcuts.
+document.addEventListener("keydown", (event) => {
+  const editingText = Boolean(event.target.closest("input, textarea, select, [contenteditable]"))
+  const key = event.key.toLowerCase()
+  if (event.ctrlKey || event.metaKey) {
+    if (event.altKey) return
+    if ((key === "h" || key === "f") && !event.shiftKey) {
+      event.preventDefault()
+      dialogs.openFind()
+      return
+    }
+    if (editingText) return
+    if (key === "z" || key === "y") {
+      event.preventDefault()
+      restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
+      return
+    }
+    if (key === "d" && selectedBox()) {
+      event.preventDefault()
+      duplicateSelectedBox()
+      return
+    }
+    return
+  }
+  if (editingText) return
+  if (event.key === " " && !event.repeat && selectedPage()) {
+    event.preventDefault()
+    gestures.setSpaceHeld(true)
+    return
+  }
+  if (event.key === "\\" && selectedPage()) {
+    event.preventDefault()
+    state.compareOriginal = !state.compareOriginal
+    renderCanvas()
+    return
+  }
+  if (event.key === "?") {
+    event.preventDefault()
+    dialogs.openShortcuts()
+    return
+  }
+  if ((event.key === "Delete" || event.key === "Backspace") && (state.boxId || state.selectedBoxIds.size)) {
+    event.preventDefault()
+    deleteSelectedBoxes()
+    return
+  }
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && event.target !== stage) {
+    const page = selectedPage()
+    const targets = page && state.selectedBoxIds.size > 1
+      ? page.boxes.filter((item) => state.selectedBoxIds.has(item.id))
+      : [selectedBox()].filter(Boolean)
+    if (!targets.length || projectBusy()) return
+    event.preventDefault()
+    const stepPx = event.shiftKey ? 10 : 1
+    const dx = (event.key === "ArrowRight" ? stepPx : event.key === "ArrowLeft" ? -stepPx : 0) / page.image.naturalWidth
+    const dy = (event.key === "ArrowDown" ? stepPx : event.key === "ArrowUp" ? -stepPx : 0) / page.image.naturalHeight
+    commitLiveFormCheckpoint()
+    checkpoint()
+    for (const item of targets) Object.assign(item, nudgeBox(item, dx, dy))
+    renderCanvas()
+  }
+})
 
-const shared = { state, byId, status, checkpoint, renderPages, renderInspector, renderCanvas, render, selectedPage, selectedBox, projectBusy }
-const translation = setupTranslation({ ...shared, pageForScript, applyTranslation })
+document.addEventListener("keyup", (event) => {
+  if (event.key === " " && gestures.getSpaceHeld()) {
+    gestures.setSpaceHeld(false)
+  }
+})
+window.addEventListener("blur", () => {
+  if (gestures.getSpaceHeld()) gestures.setSpaceHeld(false)
+})
+
+const shared = {
+  state, byId, status, checkpoint, renderPages, renderInspector, renderCanvas, render,
+  selectedPage, selectedBox, projectBusy,
+}
+const gestures = setupGestures({
+  ...shared, stage, overlays, pageCanvas, viewport, editorSnapshot,
+  commitLiveForm: commitLiveFormCheckpoint, selectBox, toggleSelectBox,
+  addBox, freezeCleanup, rectStyle, paintPreview, renderCleanupOverlay, changePage,
+})
+const translation = setupTranslation({ ...shared, pageForScript, applyTranslation, onSettingsChange: syncTranslationActions })
 const projects = setupProjects({
-  ...shared, projectSettings, defaultProjectSettings, history, openImage, selectPage, selectedIndex, updateFitLabel, releaseUnusedImages,
-  hasGesture: () => Boolean(gesture),
+  ...shared, projectSettings, defaultProjectSettings, history, openImage,
+  selectPage, selectedIndex, updateFitLabel, releaseUnusedImages,
+  hasGesture: () => gestures.hasGesture(),
   onCapabilities: (ready, languages) => { nativeReady = ready; nativeLanguages = languages },
+  commitLiveForm: commitLiveFormCheckpoint,
+  registerFontName,
+  renderFontOptions,
+})
+const dialogs = setupDialogs({
+  ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,
 })
 setupTasks(byId)
 setupOcr(shared)
-setupExports({ ...shared, selectPage, selectBox, listButton, readTranslationSettings: translation.settings, isNativeReady: () => projects.ready })
+setupExports({
+  ...shared, selectPage, selectBox, listButton,
+  readTranslationSettings: translation.settings,
+  isNativeReady: () => projects.ready,
+  commitLiveForm: commitLiveFormCheckpoint,
+})
+
+restoreCustomFonts().then((restored) => {
+  if (!restored.length) return
+  renderFontOptions()
+  if (selectedPage()) render()
+})
+
 render()

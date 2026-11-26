@@ -2,6 +2,7 @@ import { copyEditor } from "../history.js"
 import { exportPage, nativePageLayers, textOverflows } from "../canvas.js"
 import { filenameStem, saveFile } from "../io.js"
 import { translationSignature } from "../translation.js"
+import { exportDialogueScript } from "../tools.js"
 import { desktop } from "../native.js"
 
 export function setupExports({
@@ -16,6 +17,7 @@ export function setupExports({
   projectBusy,
   readTranslationSettings,
   isNativeReady,
+  commitLiveForm,
 }) {
   const exportButtons = [...document.querySelectorAll("[data-export]")]
   function extensionFor(format) {
@@ -107,11 +109,15 @@ export function setupExports({
 
   function requestExport(pages, action) {
     if (projectBusy()) return
+    commitLiveForm?.()
     const issues = exportIssues(pages)
     if (issues.length) showPreflight(issues, action)
     else action()
   }
-  byId("check-export").onclick = () => showPreflight(exportIssues(state.pages))
+  byId("check-export").onclick = () => {
+    commitLiveForm?.()
+    showPreflight(exportIssues(state.pages))
+  }
   byId("close-preflight").onclick = () => preflightDialog.close()
   byId("continue-export").onclick = () => {
     const action = pendingExport
@@ -200,4 +206,24 @@ export function setupExports({
       }),
     )
   })
+
+  const exportScriptBtn = byId("export-script")
+  if (exportScriptBtn) {
+    exportScriptBtn.onclick = () => {
+      if (projectBusy() || !state.pages.length) return
+      commitLiveForm?.()
+      const format = byId("export-script-format").value
+      const content = exportDialogueScript(state.pages, format)
+      if (!content) return status("Chưa có lời thoại nào để xuất.", true)
+      const mime =
+        format === "json"
+          ? "application/json;charset=utf-8"
+          : format === "csv"
+            ? "text/csv;charset=utf-8"
+            : "text/plain;charset=utf-8"
+      const stem = filenameStem(state.pages[0]?.name ?? "kich-ban")
+      saveFile(new Blob([content], { type: mime }), `${stem}-kich-ban.${format}`)
+      status(`Đã xuất kịch bản (${format.toUpperCase()}).`)
+    }
+  }
 }

@@ -88,16 +88,23 @@ internal static class LocalOcr
                 var t = Normalize(top, scaledHeight);
                 var r = Normalize(right, scaledWidth);
                 var b = Normalize(bottom, scaledHeight);
-                var coordinates = ((int?)options["rotation"] ?? 0) switch {
-                    90 => new JsonArray(t, 1000 - r, b, 1000 - l),
-                    180 => new JsonArray(1000 - r, 1000 - b, 1000 - l, 1000 - t),
-                    270 => new JsonArray(1000 - b, l, 1000 - t, r),
-                    _ => new JsonArray(l, t, r, b),
+                var (rl, rt, rr, rb) = ((int?)options["rotation"] ?? 0) switch {
+                    90 => (t, 1000 - r, b, 1000 - l),
+                    180 => (1000 - r, 1000 - b, 1000 - l, 1000 - t),
+                    270 => (1000 - b, l, 1000 - t, r),
+                    _ => (l, t, r, b),
                 };
+                var normLeft = Math.Clamp(rl, 0, 999);
+                var normTop = Math.Clamp(rt, 0, 999);
+                var normRight = Math.Clamp(rr, normLeft + 1, 1000);
+                var normBottom = Math.Clamp(rb, normTop + 1, 1000);
+                var joined = language.StartsWith("jpn") || language.StartsWith("chi")
+                    ? string.Join("", words.Select(word => word[11]))
+                    : JoinWords(words.Select(word => word[11]));
                 lines.Add((JsonNode)new JsonObject {
                     ["id"] = "L" + (lines.Count + 1),
-                    ["text"] = string.Join(language.StartsWith("jpn") || language.StartsWith("chi") ? "" : " ", words.Select(word => word[11])),
-                    ["box"] = coordinates,
+                    ["text"] = joined,
+                    ["box"] = new JsonArray(normLeft, normTop, normRight, normBottom),
                     ["confidence"] = words.Average(word => double.Parse(word[10], CultureInfo.InvariantCulture)),
                 });
             }
@@ -105,6 +112,24 @@ internal static class LocalOcr
         }
         finally { File.Delete(path); }
     }
+
+    private static string JoinWords(IEnumerable<string> words)
+    {
+        var builder = new StringBuilder();
+        char? previous = null;
+        foreach (var word in words)
+        {
+            if (string.IsNullOrEmpty(word)) continue;
+            if (previous is { } prev && !(IsCjk(prev) && IsCjk(word[0])))
+                builder.Append(' ');
+            builder.Append(word);
+            previous = word[^1];
+        }
+        return builder.ToString();
+    }
+
+    private static bool IsCjk(char ch) =>
+        ch is (>= '\u3000' and <= '\u9fff') or (>= '\uf900' and <= '\ufaff') or (>= '\uff00' and <= '\uffef');
 
     private static int Normalize(int value, int total) => Math.Clamp((int)Math.Round(value * 1000d / total), 0, 1000);
 }
