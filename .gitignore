@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env*
 .DS_Store
+desktop-dist/
+native/bin/
+native/obj/
+native/out/

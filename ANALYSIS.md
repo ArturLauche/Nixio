@@ -38,3 +38,11 @@ Một lượt Chromium trên cùng ảnh và phản hồi giả lập xác nhậ
 Bản build tách thư viện ZIP và PSD khỏi JavaScript tải lúc mở. Kích thước gzip của JavaScript tải đầu giảm từ khoảng 143 kB xuống 14 kB. Thư viện được tải khi nhập hoặc xuất định dạng cần chúng.
 
 Máy chủ Lilyzono chưa sẵn sàng khi kiểm tra trực tiếp. Dịch Hy-MT2, redraw trên hoa văn và screentone, ghép nghĩa của máy chủ, tìm raw từ nguồn gốc và tiện ích Photoshop vẫn cần đối chứng với dịch vụ gốc. Thuật toán làm sạch nền sáng và ghép nghĩa bằng Gemini của Khung Thoại là các triển khai độc lập.
+
+## Lõi redraw trong app Electron
+
+Bundle Lilyzono gửi tùy chọn giữ screentone cùng ảnh đến máy chủ và nhận ảnh redraw để ghép PSD. Thuật toán phục hồi phía máy chủ vẫn chưa quan sát được. Lõi C# của Khung Thoại dùng các pixel bên ngoài khung chữ để tìm chu kỳ nền. Khi tìm được mẫu lặp đủ tin cậy, lớp redraw chỉ chứa những pixel tối hơn nền dự kiến trong khung. Ứng dụng ghép lớp này với ảnh gốc khi xem trước hoặc xuất tệp.
+
+C# chạy trong tiến trình riêng với dữ liệu RGBA được giới hạn kích thước. Bộ ghép vùng JavaScript dùng chung cho web và desktop. Bản web và nền giấy sáng tiếp tục dùng xử lý cục bộ trên Canvas.
+
+Trên một ảnh thử 480 × 640 có nền chấm lặp và ảnh sạch để đối chiếu, sai số tuyệt đối trung bình tại 1.291 điểm bị mực che giảm từ 216,04 xuống 3,55 trên thang 255. Trung vị của tám lượt gửi vùng 260 × 240 qua Electron IPC sau lượt làm nóng là 5,7 ms trên môi trường thử. Các phép đo dùng dữ liệu tổng hợp. Bản Linux x64 đã được mở để kiểm tra nhập ảnh, xem trước và xuất PNG/PSD. Bản Windows x64 được biên dịch và đóng gói trên Linux.

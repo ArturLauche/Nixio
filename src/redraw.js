@@ -67,7 +67,17 @@ function cleanupPatch(image, rect) {
   const { data } = context.getImageData(0, 0, sampleWidth, sampleHeight)
   const inner = { left: left - sampleX, top: top - sampleY, right: right - sampleX, bottom: bottom - sampleY }
   const paper = estimatePaper(data, sampleWidth, sampleHeight, inner)
-  if (!paper) return null
+  if (!paper) {
+    const redraw = globalThis.khungThoaiDesktop?.redrawTexture
+    if (!redraw || sampleWidth * sampleHeight > 1_600_000) return null
+    return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
+      .then((bytes) => {
+        if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
+        const patch = new ImageData(new Uint8ClampedArray(bytes), width, height)
+        return createPatch(patch, left, top)
+      })
+      .catch(() => null)
+  }
 
   const background = luma(paper, 0)
   const result = context.createImageData(width, height)
@@ -83,22 +93,43 @@ function cleanupPatch(image, rect) {
     }
   }
   if (!changed || changed > width * height * .48) return null
+  return createPatch(result, left, top)
+}
+
+function createPatch(result, left, top) {
   const patch = document.createElement("canvas")
-  patch.width = width
-  patch.height = height
+  patch.width = result.width
+  patch.height = result.height
   patch.getContext("2d").putImageData(result, 0, 0)
   return { patch, left, top }
 }
 
-let cachedRedraw
+const cachedRedraw = new Map()
+const emptyLayout = { patches: [], pending: null }
 
-export function redrawPatches(page) {
+export function redrawLayout(page) {
   const rectangles = page.boxes.filter((box) => box.cleanup).map((box) => box.originalBox ?? box)
+  if (!rectangles.length) return emptyLayout
   const signature = JSON.stringify(rectangles.map(({ x, y, w, h }) => [x, y, w, h]))
-  if (cachedRedraw?.image === page.image && cachedRedraw.signature === signature) return cachedRedraw.patches
-  const patches = rectangles.map((rect) => cleanupPatch(page.image, rect)).filter(Boolean)
-  cachedRedraw = { image: page.image, signature, patches }
-  return patches
+  const cached = cachedRedraw.get(page.image)
+  if (cached?.signature === signature) return cached
+  // Schedule native samples serially and keep the initial canvas paint independent of native I/O.
+  const layout = { signature, patches: [], pending: null }
+  if (globalThis.khungThoaiDesktop) {
+    layout.pending = (async () => {
+      for (const rectangle of rectangles) {
+        const patch = await cleanupPatch(page.image, rectangle)
+        if (patch) layout.patches.push(patch)
+      }
+      layout.pending = null
+    })()
+  } else {
+    layout.patches = rectangles.map((rect) => cleanupPatch(page.image, rect)).filter(Boolean)
+  }
+  cachedRedraw.delete(page.image)
+  cachedRedraw.set(page.image, layout)
+  if (cachedRedraw.size > 2) cachedRedraw.delete(cachedRedraw.keys().next().value)
+  return layout
 }
 
 export function paintRedraw(canvas, patches) {

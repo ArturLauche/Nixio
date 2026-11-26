@@ -15,6 +15,7 @@ const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = { pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true, exporting: false, importing: false, translating: false }
 let gesture
 let pendingPaint
+let previewRedraw
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -116,6 +117,17 @@ function rectStyle(element, rect) {
   if (rect.rotation) element.style.transform = "rotate(" + rect.rotation + "deg)"
 }
 
+function paintPreview(page) {
+  const pending = drawPage(pageCanvas, page)
+  if (!pending || previewRedraw === pending) return
+  previewRedraw = pending
+  pending.then(() => {
+    if (previewRedraw !== pending) return
+    previewRedraw = null
+    if (selectedPage() === page) paintPreview(page)
+  })
+}
+
 function renderCanvas() {
   if (pendingPaint) {
     cancelAnimationFrame(pendingPaint)
@@ -135,7 +147,7 @@ function renderCanvas() {
   stage.style.width = Math.min(page.image.naturalWidth, state.fit ? 720 : Infinity) + "px"
   stage.style.maxWidth = state.fit ? "100%" : "none"
   stage.style.flexShrink = state.fit ? "1" : "0"
-  drawPage(pageCanvas, page)
+  paintPreview(page)
   overlays.replaceChildren(...page.boxes.map((box) => {
     const outline = listButton("", () => selectBox(box), box.text)
     outline.className = "outline"
@@ -391,7 +403,7 @@ stage.addEventListener("pointermove", (event) => {
     pendingPaint ??= requestAnimationFrame(() => {
       pendingPaint = undefined
       const page = selectedPage()
-      if (page) drawPage(pageCanvas, page)
+      if (page) paintPreview(page)
     })
   } else {
     rectStyle(gesture.draft, placement(gesture.origin, cursor))

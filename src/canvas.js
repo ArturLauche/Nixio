@@ -1,4 +1,4 @@
-import { paintRedraw, redrawPatches } from "./redraw.js"
+import { paintRedraw, redrawLayout } from "./redraw.js"
 
 const psdFonts = { Arial: "ArialMT", Georgia: "Georgia", Verdana: "Verdana", "Times New Roman": "TimesNewRomanPSMT" }
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
@@ -98,7 +98,7 @@ function drawBox(canvas, box, {
   context.restore()
 }
 
-export function drawPage(canvas, page) {
+function paintPage(canvas, page, patches) {
   const width = page.image.naturalWidth
   const height = page.image.naturalHeight
   if (canvas.width !== width || canvas.height !== height) {
@@ -108,8 +108,14 @@ export function drawPage(canvas, page) {
   const context = canvas.getContext("2d")
   context.clearRect(0, 0, width, height)
   context.drawImage(page.image, 0, 0)
-  paintRedraw(canvas, redrawPatches(page))
+  paintRedraw(canvas, patches)
   page.boxes.forEach((box) => drawBox(canvas, box))
+}
+
+export function drawPage(canvas, page) {
+  const redraw = redrawLayout(page)
+  paintPage(canvas, page, redraw.patches)
+  return redraw.pending
 }
 
 function croppedLayer({ width, height }, box, options) {
@@ -145,8 +151,10 @@ function psdTextLayer(canvas, box) {
 }
 
 export async function exportPage(page, format) {
+  const redraw = redrawLayout(page)
+  if (redraw.pending) await redraw.pending
   const composite = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
-  drawPage(composite, page)
+  paintPage(composite, page, redraw.patches)
   if (format === "png") {
     const result = await new Promise((resolve) => composite.toBlob(resolve, "image/png"))
     if (!result) throw new Error("Không thể tạo ảnh PNG.")
@@ -155,11 +163,10 @@ export async function exportPage(page, format) {
   const { writePsd } = await import("ag-psd")
   const base = baseCanvas(page)
   const children = [{ name: "Ảnh gốc", canvas: base }]
-  const patches = redrawPatches(page)
-  if (patches.length) {
-    const redraw = makeCanvas(base.width, base.height)
-    paintRedraw(redraw, patches)
-    children.push({ name: "Nền đã xóa chữ", canvas: redraw })
+  if (redraw.patches.length) {
+    const cleaned = makeCanvas(base.width, base.height)
+    paintRedraw(cleaned, redraw.patches)
+    children.push({ name: "Nền đã xóa chữ", canvas: cleaned })
   }
   const dialogue = []
   for (const box of page.boxes) {

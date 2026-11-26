@@ -16,6 +16,24 @@ npm run dev
 
 Mở địa chỉ mà Vite in ra. Dùng `npm run build` để tạo thư mục `dist/` và `npm run preview` để kiểm tra bản build.
 
+## App Electron
+
+Để mở bản desktop từ mã nguồn, cài Node.js 22.12+ và chạy `npm ci` rồi `npm run desktop`. Biên dịch lõi C# bằng .NET 10 SDK trước khi mở app để bật phục hồi nền chấm lặp.
+
+```sh
+npm run desktop:native
+npm run desktop
+```
+
+Để đóng gói app kèm lõi C#, chọn nền tảng đích. Bản đóng gói chứa runtime .NET cần thiết.
+
+```sh
+npm run desktop:package -- linux-x64
+npm run desktop:package -- win-x64
+```
+
+Kết quả nằm trong `desktop-dist/`. Mở `Khung-Thoai` trên Linux hoặc `Khung-Thoai.exe` trên Windows. Các lệnh đóng gói cần kết nối mạng khi chưa có Electron và runtime .NET cho nền tảng đích trong bộ nhớ đệm.
+
 ## Biên tập và xuất tệp
 
 1. Thêm tối đa 50 ảnh PNG, JPEG hoặc WebP. Dùng các nút lên và xuống để sắp xếp trang.
@@ -32,11 +50,11 @@ Mở **Dịch ảnh bằng Gemini**, nhập khóa API, chọn ngôn ngữ rồi 
 
 Nếu đã có bản dịch, nhập kịch bản rồi bấm **Ghép nghĩa kịch bản trang này**. Dịch và ghép nghĩa đều ưu tiên khung có sẵn trên trang. Khi trang trống, chúng dùng khung OCR. Các câu không có tọa độ đáng tin cậy hoặc xung đột được giữ trong **Chưa đặt** để xử lý thủ công.
 
-Tùy chọn **Xóa chữ gốc trên nền sáng** lấy mẫu màu giấy quanh khung. Vùng có nền tối, đường nét hoặc hoa văn quanh khung có thể được giữ nguyên. Kiểm tra ảnh xem trước khi xuất.
+Tùy chọn **Xóa chữ gốc trong khung** lấy mẫu màu giấy quanh khung. App Electron có lõi C# còn có thể nhận diện screentone lặp và phục hồi mẫu nền tại các điểm mực che phủ. Vùng ảnh thiếu mẫu đủ tin cậy được giữ nguyên. Kiểm tra ảnh xem trước khi xuất.
 
 ## Kiểm thử
 
-Chạy `npm test` để kiểm tra tọa độ OCR và quy tắc ghép khung. Xem [kết quả kiểm thử đối chứng](ANALYSIS.md#kiểm-thử-đối-chứng) để biết các hành vi đã được kiểm tra với Lilyzono.
+Chạy `npm test` để kiểm tra tọa độ OCR và quy tắc ghép khung. Sau khi chạy `npm run desktop:native`, bộ test còn kiểm tra phục hồi texture, dữ liệu sai và thứ tự phản hồi từ tiến trình C#. Xem [kết quả kiểm thử đối chứng](ANALYSIS.md#kiểm-thử-đối-chứng) để biết các hành vi đã được kiểm tra với Lilyzono.
 
 ## Thư viện chương
 
