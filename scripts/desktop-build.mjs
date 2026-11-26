@@ -1,3 +1,4 @@
+import { cpSync } from "node:fs"
 import { packager } from "@electron/packager"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
@@ -18,6 +19,10 @@ run(process.env.KHUNG_THOAI_DOTNET ?? "dotnet", [
   "publish", "native/KhungThoai.Redraw.csproj", "-c", "Release", "-r", rid,
   "--self-contained", "-p:PublishSingleFile=true", "-p:PublishTrimmed=true", "-o", worker,
 ])
+
+if (process.env.KHUNG_THOAI_OCR_BUNDLE) {
+  cpSync(process.env.KHUNG_THOAI_OCR_BUNDLE, path.join(worker, "ocr"), { recursive: true })
+}
 
 if (mode === "app") {
   run(process.execPath, [path.join(root, "node_modules", "vite", "bin", "vite.js"), "build"])

@@ -144,3 +144,38 @@ test("native redraw recovers screentone with a brightness gradient", { skip: !av
   for (let i = 0; i < result.length; i++) error = Math.max(error, Math.abs(result[i] - expected[i]))
   assert.ok(error <= 3, "maximum RGBA error: " + error)
 })
+
+test("native redraw restores larger screentone periods", { skip: !available }, async (context) => {
+  const worker = new TextureWorker(executable)
+  context.after(() => worker.close())
+  const source = sample((x, y) => x % 20 < 5 && y % 20 < 5 ? 80 : 240)
+  const original = source.pixels.slice()
+  drawInk(source)
+  const patch = await worker.redraw(source)
+  assert.ok(patch)
+  const restored = cropWithPatch(source, patch)
+  let error = 0
+  for (let y = area.top; y < area.bottom; y++) {
+    for (let x = area.left; x < area.right; x++) {
+      const offset = ((y - area.top) * (area.right - area.left) + x - area.left) * 4
+      error += Math.abs(restored[offset] - original[(y * fixtureSize + x) * 4])
+    }
+  }
+  assert.ok(error / ((area.right - area.left) * (area.bottom - area.top)) < 1)
+})
+
+test("native screentone redraw protects a line connected to drawing outside the region", { skip: !available }, async (context) => {
+  const worker = new TextureWorker(executable)
+  context.after(() => worker.close())
+  const source = sample((x, y) => x % 4 < 2 && y % 4 < 2 ? 100 : 240)
+  for (let y = area.top - 4; y < area.bottom + 4; y++) {
+    for (let x = 49; x < 52; x++) source.pixels.fill(3, (y * fixtureSize + x) * 4, (y * fixtureSize + x) * 4 + 3)
+  }
+  drawInk(source)
+  const patch = await worker.redraw(source)
+  assert.ok(patch)
+  const lineOffset = ((50 - area.top) * (area.right - area.left) + 50 - area.left) * 4
+  assert.equal(patch[lineOffset + 3], 0)
+  const textOffset = ((54 - area.top) * (area.right - area.left) + 60 - area.left) * 4
+  assert.equal(patch[textOffset + 3], 255)
+})

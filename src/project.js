@@ -38,13 +38,14 @@ function projectStroke(stroke) {
 }
 
 function projectBox(box) {
-  const { text, cleanup = false, originalBox, cleanupRect, cleanupStrokes } = box ?? {}
-  if (!isText(text) || typeof cleanup !== "boolean" ||
+  const { text, cleanup = false, originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0 } = box ?? {}
+  if (!isText(text) || typeof cleanup !== "boolean" || !Number.isInteger(cleanupExpand) || Math.abs(cleanupExpand) > 8 ||
       (cleanupStrokes !== undefined && !Array.isArray(cleanupStrokes))) throw invalidProject()
   return {
     ...rectangle(box), ...projectStyle(box), text, cleanup,
     ...(originalBox && { originalBox: rectangle(originalBox) }),
     ...(cleanupRect && { cleanupRect: rectangle(cleanupRect) }),
+    ...(cleanupExpand !== 0 && { cleanupExpand }),
     ...(cleanupStrokes && { cleanupStrokes: cleanupStrokes.map(projectStroke) }),
   }
 }

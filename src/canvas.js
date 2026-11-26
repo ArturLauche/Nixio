@@ -1,3 +1,4 @@
+import { nativeCapabilities } from "./native.js"
 import { paintRedraw, redrawLayout } from "./redraw.js"
 
 const psdFonts = { Arial: "ArialMT", Georgia: "Georgia", Verdana: "Verdana", "Times New Roman": "TimesNewRomanPSMT" }
@@ -150,9 +151,41 @@ function psdTextLayer(canvas, box) {
   }
 }
 
+export async function nativePageLayers(page) {
+  const redraw = redrawLayout(page, { cancellable: false })
+  if (redraw.pending) await redraw.pending
+  const base = baseCanvas(page)
+  const text = makeCanvas(base.width, base.height)
+  page.boxes.forEach((box) => drawBox(text, box))
+  const read = (canvas) => canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data
+  let patches = redraw.patches
+  if (patches.reduce((sum, { patch }) => sum + patch.width * patch.height, 0) > base.width * base.height) {
+    const merged = makeCanvas(base.width, base.height)
+    paintRedraw(merged, patches)
+    patches = [{ patch: merged, left: 0, top: 0 }]
+  }
+  const parts = [read(base), read(text), ...patches.map(({ patch }) => read(patch))]
+  const data = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
+  let offset = 0
+  for (const part of parts) { data.set(part, offset); offset += part.length }
+  return {
+    options: { width: base.width, height: base.height, patches: patches.map(({ patch, left, top }) => ({
+      left, top, width: patch.width, height: patch.height,
+    })) },
+    data,
+  }
+}
+
 export async function exportPage(page, format) {
   const redraw = redrawLayout(page, { cancellable: false })
   if (redraw.pending) await redraw.pending
+  if (format === "png" && globalThis.khungThoaiDesktop?.native) {
+    if (await nativeCapabilities()) {
+      const { options, data } = await nativePageLayers(page)
+      const response = await globalThis.khungThoaiDesktop.native("png", options, data)
+      return new Blob([response.data], { type: "image/png" })
+    }
+  }
   const composite = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
   paintPage(composite, page, redraw.patches)
   if (format === "png") {

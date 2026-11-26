@@ -3,7 +3,7 @@ using System.Numerics;
 internal static partial class RedrawEngine
 {
     private const int TargetSamples = 12_000;
-    private const int MaximumPeriod = 16;
+    private const int MaximumPeriod = 32;
     private const int MinimumPhaseSamples = 4;
 
     private readonly record struct Sample(int X, int Y, byte Red, byte Green, byte Blue, double Luma);
@@ -63,7 +63,9 @@ internal static partial class RedrawEngine
             }
         }
 
-        return changed == 0 || changed > area.Width * area.Height * .48 ? null : patch;
+        if (changed == 0 || changed > area.Width * area.Height * .48) return null;
+        ProtectTextureEdges(pixels, width, height, area, texture, patch);
+        return patch.Any(value => value != 0) ? patch : null;
     }
 
     private static List<Sample> CollectSamples(byte[] pixels, int width, int height, Region area)
@@ -135,6 +137,22 @@ internal static partial class RedrawEngine
             if (phases.Any(phase => phase.Count < MinimumPhaseSamples))
                 continue;
 
+            // Refit phases after excluding sparse ink crossing the sample ring.
+            var robust = new Phase[phases.Length];
+            var accepted = 0;
+            for (var i = 0; i < samples.Count; i++)
+            {
+                var sample = samples[i];
+                var phase = sample.Y % period * period + sample.X % period;
+                var correction = corrections is null ? Vector3.Zero : corrections[i];
+                var prediction = phases[phase].Mean() + correction;
+                if (Math.Abs(sample.Luma - Luma(prediction.X, prediction.Y, prediction.Z)) > 24) continue;
+                robust[phase].Add(sample, correction);
+                accepted++;
+            }
+            if (accepted >= samples.Count * .9 && robust.All(phase => phase.Count >= MinimumPhaseSamples))
+                phases = robust;
+
             var error = 0d;
             var minimum = 255d;
             var maximum = 0d;
@@ -156,6 +174,56 @@ internal static partial class RedrawEngine
             best = new Texture(period, Array.ConvertAll(phases, phase => phase.Mean()), trend);
         }
         return best;
+    }
+
+    private static void ProtectTextureEdges(byte[] pixels, int width, int height, Region area, Texture texture, byte[] patch)
+    {
+        var visited = new bool[area.Width * area.Height];
+        var queue = new Queue<int>();
+        for (var y = 0; y < area.Height; y++)
+        for (var x = 0; x < area.Width; x++)
+        {
+            if (x != 0 && y != 0 && x != area.Width - 1 && y != area.Height - 1) continue;
+            var at = y * area.Width + x;
+            if (patch[at * 4 + 3] == 0) continue;
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                var nx = x + dx;
+                var ny = y + dy;
+                if ((uint)nx < area.Width && (uint)ny < area.Height) continue;
+                if (IsInk(area.Left + nx, area.Top + ny) && !visited[at])
+                {
+                    visited[at] = true;
+                    queue.Enqueue(at);
+                }
+            }
+        }
+        while (queue.TryDequeue(out var at))
+        {
+            patch[at * 4 + 3] = 0;
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                var x = at % area.Width + dx;
+                var y = at / area.Width + dy;
+                if ((uint)x >= area.Width || (uint)y >= area.Height) continue;
+                var next = y * area.Width + x;
+                if (visited[next] || patch[next * 4 + 3] == 0) continue;
+                visited[next] = true;
+                queue.Enqueue(next);
+            }
+        }
+
+        bool IsInk(int x, int y)
+        {
+            if ((uint)x >= width || (uint)y >= height) return false;
+            var at = (y * width + x) * 4;
+            var predicted = texture.Colors[y % texture.Period * texture.Period + x % texture.Period];
+            if (texture.Trend is { } trend) predicted += trend.DeltaAt(x, y);
+            return pixels[at + 3] >= 240 && Luma(predicted.X, predicted.Y, predicted.Z) -
+                Luma(pixels[at], pixels[at + 1], pixels[at + 2]) >= 32;
+        }
     }
 
     private static double Luma(double red, double green, double blue) => (red * 54 + green * 183 + blue * 19) / 256d;

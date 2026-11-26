@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
 
+if (args.Contains("--rpc"))
+    return await NativeRpc.Run();
+
 using var input = Console.OpenStandardInput();
 using var output = Console.OpenStandardOutput();
 var header = new byte[6 * sizeof(int)];

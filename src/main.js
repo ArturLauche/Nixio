@@ -1,13 +1,15 @@
-import { clamp, drawPage, exportPage, makeBox, textOverflows } from "./canvas.js"
+import { clamp, drawPage, exportPage, makeBox, textOverflows, nativePageLayers } from "./canvas.js"
 import { filenameStem, groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
 import { alignScript, translateImage } from "./gemini.js"
 import { setupLibrary } from "./library.js"
-import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
+import { matchDialogue, toCoordinates, toRectangle, overlapScore } from "./placement.js"
 import { projectExtension, projectPageLimit as pageLimit, projectSettingIds, readProject, writeProject, projectStyle } from "./project.js"
 
 import { copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel, translationSignature } from "./translation.js"
+
+import { desktop, nativeCapabilities, saveDesktopProject, openDesktopProject, imagePixels } from "./native.js"
 
 const history = new EditHistory()
 const ownedUrls = new Set()
@@ -20,7 +22,7 @@ const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
   pages: [], presets: [], pageId: null, boxId: null, queue: [], placing: false, fit: true,
-  exporting: false, importing: false, translating: false, importingScript: false, openingProject: false,
+  exporting: false, importing: false, translating: false, importingScript: false, openingProject: false, processingNative: false, savingProject: false,
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
@@ -30,6 +32,11 @@ let gesture
 let pendingPaint
 let previewRedraw
 let translationController
+let nativeReady = false
+let nativeLanguages = []
+let revision = 0
+let savedRevision = 0
+let autosaving = false
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -55,6 +62,7 @@ function releaseUnusedImages() {
 }
 
 function checkpoint(snapshot = editorSnapshot()) {
+  revision++
   history.record(snapshot)
   syncProjectActions()
 }
@@ -64,6 +72,7 @@ function restoreHistory(direction) {
   const snapshot = history[direction](editorSnapshot())
   if (!snapshot) return
   const { settings, ...editor } = snapshot
+  revision++
   Object.assign(state, editor, { placing: false })
   projectSettings.forEach((field) => { field.value = settings[field.id] })
   render()
@@ -82,6 +91,7 @@ document.addEventListener("keydown", (event) => {
   restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
 })
 for (const field of projectSettings) {
+  field.addEventListener("input", () => { revision++ })
   let before
   field.addEventListener("focus", () => { before = editorSnapshot() })
   field.addEventListener("change", () => {
@@ -159,7 +169,7 @@ function removePage(index) {
 }
 
 function projectBusy() {
-  return state.openingProject || state.importing || state.importingScript || state.translating || state.exporting
+  return state.openingProject || state.importing || state.importingScript || state.translating || state.exporting || state.processingNative || state.savingProject
 }
 
 function syncProjectActions() {
@@ -197,12 +207,15 @@ function renderPages() {
   byId("export-all").disabled = !count || state.exporting || state.openingProject
   exportButtons.forEach((button) => { button.disabled = current < 0 || state.exporting || state.openingProject })
   syncProjectActions()
-  byId("box-form").inert = state.translating || state.openingProject
+  byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
   byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, readTranslationSettings()).length
   byId("stop-translation").disabled = !state.translating
   renderPresets()
   byId("check-export").disabled = projectBusy()
+  byId("preview-ocr").disabled = projectBusy() || current < 0 || !nativeReady
+  byId("run-local-ocr").disabled = projectBusy() || current < 0 || !nativeLanguages.length
+  byId("cleanup-expand").disabled = projectBusy()
   byId("pages").replaceChildren(...state.pages.map((page, index) => {
     const li = document.createElement("li")
     const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
@@ -354,6 +367,7 @@ byId("reset-cleanup").onclick = () => {
   checkpoint()
   delete box.cleanupRect
   delete box.cleanupStrokes
+  delete box.cleanupExpand
   freezeCleanup(box)
   render()
 }
@@ -383,6 +397,7 @@ function renderInspector() {
   form.hidden = !box
   if (box) {
     for (const [key, id] of Object.entries(boxFields)) byId(id).value = box[key]
+    byId("cleanup-expand").value = box.cleanupExpand ?? 0
     byId("box-fill").checked = box.fill
     byId("box-cleanup").checked = Boolean(box.cleanup)
   }
@@ -436,26 +451,46 @@ async function openImage(file) {
   }
 }
 
-byId("save-project").onclick = () => {
+function projectBlob() {
+  const settings = Object.fromEntries(projectSettings.map(({ id, value }) => [id, value]))
+  return writeProject({ pages: state.pages, presets: state.presets, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
+}
+
+byId("save-project").onclick = async () => {
   if (projectBusy()) return
   try {
-    const settings = Object.fromEntries(projectSettings.map(({ id, value }) => [id, value]))
-    const file = writeProject({ pages: state.pages, presets: state.presets, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
+    const file = projectBlob()
     const name = projectName ?? filenameStem(state.pages[0]?.name ?? "khung-thoai")
-    saveFile(file, name + projectExtension)
-    status("Đã tạo tệp dự án.")
+    if (nativeReady) {
+      state.savingProject = true
+      renderPages()
+      if (!await saveDesktopProject(file, "project", name + projectExtension)) return
+      status("Đã lưu dự án vào máy.")
+    } else {
+      saveFile(file, name + projectExtension)
+      status("Đã tạo tệp dự án.")
+    }
   } catch (error) {
     status("Không lưu được dự án. " + error.message, true)
+  } finally {
+    state.savingProject = false
+    renderPages()
   }
 }
 
 byId("open-project").onclick = () => {
-  if (!projectBusy()) projectFile.click()
+  if (projectBusy()) return
+  if (nativeReady) openNativeProject("dialog")
+  else projectFile.click()
 }
 
 projectFile.onchange = async () => {
   const file = projectFile.files[0]
   projectFile.value = ""
+  await loadProject(file)
+}
+
+async function loadProject(file) {
   if (!file || projectBusy()) return
   const loaded = []
   state.openingProject = true
@@ -487,6 +522,7 @@ projectFile.onchange = async () => {
       status("Đã hủy mở dự án.")
       return
     }
+    revision++
     history.clear()
     state.pages = loaded
     state.queue = project.queue
@@ -919,6 +955,136 @@ async function performExport(action) {
   }
 }
 
+async function openNativeProject(mode) {
+  if (projectBusy()) return
+  state.openingProject = true
+  renderPages()
+  let file
+  try { file = await openDesktopProject(mode) }
+  catch (error) { status("Không mở được dự án. " + error.message, true) }
+  finally { state.openingProject = false; renderPages() }
+  if (file) await loadProject(file)
+}
+byId("recover-project").onclick = () => openNativeProject("recovery")
+byId("recover-backup").onclick = () => openNativeProject("backup")
+
+async function refreshRecovery() {
+  const info = await desktop.projectStatus()
+  byId("recover-project").hidden = !info.recovery
+  byId("recover-backup").hidden = !info.backup
+}
+
+async function autosave() {
+  if (!nativeReady || autosaving || projectBusy() || gesture || savedRevision === revision) return
+  autosaving = true
+  const snapshotRevision = revision
+  try {
+    await saveDesktopProject(projectBlob(), "autosave", "recovery.khungthoai")
+    savedRevision = snapshotRevision
+    byId("autosave-status").textContent = "Đã tự lưu lúc " + new Date().toLocaleTimeString("vi-VN")
+    await refreshRecovery()
+  } catch (error) {
+    byId("autosave-status").textContent = "Tự lưu thất bại. " + error.message
+  } finally { autosaving = false }
+}
+if (desktop?.native) {
+  byId("local-processing").hidden = false
+  byId("native-status").textContent = "Đang kiểm tra worker C#…"
+  nativeCapabilities().then(async (capabilities) => {
+    nativeReady = Boolean(capabilities)
+    nativeLanguages = capabilities?.languages ?? []
+    byId("native-status").textContent = capabilities ? (capabilities.ocrError ?? "OCR cục bộ sẵn sàng.") : "Chạy npm run desktop:native để bật xử lý C#."
+    byId("local-ocr-language").replaceChildren(...nativeLanguages.map((language) => new Option(language, language)))
+    byId("native-mask-control").hidden = !nativeReady
+    byId("desktop-recovery").hidden = !nativeReady
+    if (nativeReady) {
+      await refreshRecovery()
+      setInterval(autosave, 20000)
+      byId("autosave-status").textContent = "Tự lưu mỗi 20 giây và khi đóng app."
+    }
+    renderPages()
+  }).catch((error) => status(error.message, true))
+}
+let closing = false
+desktop?.onClose?.(() => {
+  if (!nativeReady || savedRevision === revision) {
+    desktop.closeWindow()
+    return
+  }
+  if (closing) return
+  closing = true
+  const finish = async () => {
+    // Let a running snapshot finish, then save the latest edit before closing.
+    while (autosaving) await new Promise((resolve) => setTimeout(resolve, 100))
+    if (projectBusy()) {
+      status("Hãy chờ tác vụ hiện tại hoàn tất trước khi đóng app.", true)
+      closing = false
+      return
+    }
+    await autosave()
+    if (savedRevision === revision || window.confirm("Tự lưu thất bại. Đóng app và bỏ các thay đổi chưa lưu?")) {
+      savedRevision = revision
+      await desktop.closeWindow()
+    }
+    closing = false
+  }
+  finish().catch((error) => { closing = false; status(error.message, true) })
+})
+
+byId("cleanup-expand").onchange = () => {
+  const box = selectedBox()
+  if (!box || projectBusy()) return
+  checkpoint()
+  box.cleanupExpand = clamp(Math.round(Number(byId("cleanup-expand").value) || 0), -8, 8)
+  render()
+}
+
+async function localProcessing(preview) {
+  const page = selectedPage()
+  if (!page || projectBusy()) return
+  const crop = byId("ocr-crop").checked ? selectedBox() : null
+  if (byId("ocr-crop").checked && !crop) return status("Hãy chọn khung để cắt vùng OCR.", true)
+  state.processingNative = true
+  renderPages()
+  status(preview ? "Đang tiền xử lý ảnh…" : "Đang nhận dạng chữ trên máy…")
+  try {
+    const sample = imagePixels(page.image, crop)
+    const options = { width: sample.width, height: sample.height, scale: Number(byId("ocr-scale").value),
+      denoise: byId("ocr-denoise").checked, language: byId("local-ocr-language").value, psm: Number(byId("local-ocr-layout").value) }
+    const { result, data } = await desktop.native(preview ? "preprocess" : "ocr", options, sample.pixels)
+    if (preview) {
+      const canvas = byId("ocr-preview-canvas")
+      canvas.width = result.width
+      canvas.height = result.height
+      canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(data), result.width, result.height), 0, 0)
+      byId("ocr-preview").showModal()
+      status("Đã tạo ảnh tiền xử lý.")
+    } else {
+      checkpoint()
+      for (const line of result.lines) {
+        line.box = [
+          Math.round((sample.left + line.box[0] / 1000 * sample.width) / page.image.naturalWidth * 1000),
+          Math.round((sample.top + line.box[1] / 1000 * sample.height) / page.image.naturalHeight * 1000),
+          Math.round((sample.left + line.box[2] / 1000 * sample.width) / page.image.naturalWidth * 1000),
+          Math.round((sample.top + line.box[3] / 1000 * sample.height) / page.image.naturalHeight * 1000),
+        ]
+        const overlapping = page.boxes.find((box) => overlapScore(toCoordinates(box), line.box) > .5)
+        if (overlapping) {
+          if (overlapping.text !== line.text && !page.unplaced.some((item) => item.text === line.text)) page.unplaced.push(line)
+        } else {
+          const box = makeBox(page, toRectangle(line.box), line.text)
+          box.fill = false
+          page.boxes.push(box)
+        }
+      }
+      status(`Đã nhận dạng ${result.lines.length} dòng. Dòng chồng khung có sẵn được đưa vào Chưa đặt.`)
+    }
+  } catch (error) { status(error.message, true) }
+  finally { state.processingNative = false; render() }
+}
+byId("preview-ocr").onclick = () => localProcessing(true)
+byId("run-local-ocr").onclick = () => localProcessing(false)
+
 const preflightDialog = byId("preflight-dialog")
 let pendingExport
 function exportIssues(pages) {
@@ -996,6 +1162,23 @@ zipDialog.addEventListener("close", () => {
   const format = byId("zip-format").value
   requestExport(state.pages, () => performExport(async () => {
     const pages = copyEditor({ pages: state.pages }).pages
+    if (format === "png" && nativeReady) {
+      const transfer = await desktop.projectBegin("zip", "khung-thoai-png.zip")
+      if (!transfer) return
+      try {
+        for (const [index, page] of pages.entries()) {
+          status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
+          const { options, data } = await nativePageLayers(page)
+          const name = String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name) + ".png"
+          await desktop.projectWrite(transfer.id, "zipPage", { ...options, name }, data)
+        }
+        await desktop.projectWrite(transfer.id, "fileCommit")
+      } catch (error) {
+        await desktop.projectWrite(transfer.id, "fileCancel").catch(() => {})
+        throw error
+      }
+      return
+    }
     const { default: JSZip } = await import("jszip")
     const zip = new JSZip()
     for (const [index, page] of pages.entries()) {
