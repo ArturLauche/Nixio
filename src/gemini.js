@@ -1,3 +1,4 @@
+import { imageMimeType } from "./io.js"
 import { readOcrBox } from "./placement.js"
 
 const modelOptions = {
@@ -24,7 +25,9 @@ function inlineImage(file) {
     const reader = new FileReader()
     reader.onload = () => {
       const [mime, data] = reader.result.split(",", 2)
-      resolve({ inlineData: { mimeType: file.type || mime.slice(5, -7) || "image/png", data } })
+      const detected = mime.startsWith("data:") ? mime.slice(5).split(";", 1)[0] : ""
+      const mimeType = imageMimeType(file.name, file.type) ?? imageMimeType("", detected) ?? "image/png"
+      resolve({ inlineData: { mimeType, data } })
     }
     reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)
@@ -54,7 +57,12 @@ async function requestLines({ key, models, modelIndex, report }, image, prompt, 
       const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
       if (!text) throw new Error("Gemini không trả dữ liệu.")
       const clean = text.trim()
-      const parsed = JSON.parse(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i.exec(clean)?.[1] ?? clean)
+      let parsed
+      try {
+        parsed = JSON.parse(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i.exec(clean)?.[1] ?? clean)
+      } catch {
+        throw new Error("Gemini trả dữ liệu JSON không hợp lệ.")
+      }
       if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
         throw new Error("Gemini trả danh sách thoại sai định dạng.")
       }

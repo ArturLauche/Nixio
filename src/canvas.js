@@ -151,7 +151,7 @@ function psdTextLayer(canvas, box) {
 }
 
 export async function exportPage(page, format) {
-  const redraw = redrawLayout(page)
+  const redraw = redrawLayout(page, { cancellable: false })
   if (redraw.pending) await redraw.pending
   const composite = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
   paintPage(composite, page, redraw.patches)

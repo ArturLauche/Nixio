@@ -67,7 +67,9 @@ function movePage(index, delta) {
   const [page] = state.pages.splice(index, 1)
   state.pages.splice(target, 0, page)
   renderPages()
-  document.getElementById("move-" + page.id + "-" + delta)?.focus()
+  const button = document.getElementById("move-" + page.id + "-" + delta)
+  const fallback = document.getElementById("move-" + page.id + "-" + -delta)
+  ;(button && !button.disabled ? button : fallback)?.focus()
 }
 
 function removePage(index) {
@@ -516,6 +518,8 @@ async function processWithGemini(pages, read, action) {
         context = [...context, ...lines.filter(({ source }) => source).map(({ source, text }) => ({
           source: source.slice(0, 240), text: text.slice(0, 240),
         }))].slice(-8)
+      } else {
+        page.unplaced = []
       }
       page.translationContext = { signature, lines: context }
       completed++

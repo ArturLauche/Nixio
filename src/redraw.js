@@ -46,8 +46,8 @@ function estimatePaper(pixels, width, height, inner) {
 
 function cleanupPatch(image, rect) {
   const { naturalWidth, naturalHeight } = image
-  const left = Math.floor(rect.x * naturalWidth)
-  const top = Math.floor(rect.y * naturalHeight)
+  const left = Math.max(0, Math.floor(rect.x * naturalWidth))
+  const top = Math.max(0, Math.floor(rect.y * naturalHeight))
   const right = Math.min(naturalWidth, Math.ceil((rect.x + rect.w) * naturalWidth))
   const bottom = Math.min(naturalHeight, Math.ceil((rect.y + rect.h) * naturalHeight))
   const width = right - left
@@ -75,7 +75,7 @@ function cleanupPatch(image, rect) {
   return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
     .then((bytes) => {
       if (bytes === undefined) return useCanvas()
-      if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
+      if (!ArrayBuffer.isView(bytes) || bytes.BYTES_PER_ELEMENT !== 1 || bytes.byteLength !== width * height * 4) return null
       return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
     })
     .catch(() => null)
@@ -113,29 +113,46 @@ function createPatch(result, left, top) {
 
 const cachedRedraw = new Map()
 const emptyLayout = { patches: [], pending: null }
+let desktopQueue = Promise.resolve()
 
-export function redrawLayout(page) {
+export function redrawLayout(page, { cancellable = true } = {}) {
   const rectangles = page.boxes.filter((box) => box.cleanup).map((box) => box.originalBox ?? box)
   if (!rectangles.length) return emptyLayout
   const signature = JSON.stringify(rectangles.map(({ x, y, w, h }) => [x, y, w, h]))
   const cached = cachedRedraw.get(page.image)
-  if (cached?.signature === signature) return cached
+  if (cached?.signature === signature) {
+    if (!cancellable) cached.cancellable = false
+    return cached
+  }
+  if (cached?.cancellable && cached.pending) cached.superseded = true
   // Schedule native samples serially and keep the initial canvas paint independent of native I/O.
-  const layout = { signature, patches: [], pending: null }
+  const layout = { signature, patches: [], pending: null, cancellable, superseded: false }
   if (globalThis.khungThoaiDesktop) {
-    layout.pending = (async () => {
-      for (const rectangle of rectangles) {
-        const patch = await cleanupPatch(page.image, rectangle)
-        if (patch) layout.patches.push(patch)
+    const task = desktopQueue.then(async () => {
+      try {
+        for (const rectangle of rectangles) {
+          if (layout.superseded && layout.cancellable) return
+          const patch = await cleanupPatch(page.image, rectangle)
+          if (layout.superseded && layout.cancellable) return
+          if (patch) layout.patches.push(patch)
+        }
+      } finally {
+        layout.pending = null
       }
-      layout.pending = null
-    })()
+    })
+    layout.pending = task
+    desktopQueue = task.catch(() => {})
   } else {
     layout.patches = rectangles.map((rect) => cleanupPatch(page.image, rect)).filter(Boolean)
   }
   cachedRedraw.delete(page.image)
   cachedRedraw.set(page.image, layout)
-  if (cachedRedraw.size > 2) cachedRedraw.delete(cachedRedraw.keys().next().value)
+  if (cachedRedraw.size > 2) {
+    const oldestKey = cachedRedraw.keys().next().value
+    const oldest = cachedRedraw.get(oldestKey)
+    if (oldest?.cancellable && oldest.pending) oldest.superseded = true
+    cachedRedraw.delete(oldestKey)
+  }
   return layout
 }
 
