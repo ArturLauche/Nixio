@@ -100,6 +100,7 @@ summary { font-weight: 650; }
 input[type="color"] { height: 35px; padding: 3px; }
 .choice { display: flex; gap: 5px; font-size: .8rem; align-items: center; }
 .form-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.project-actions { margin-bottom: 10px; }
 .exports h2 { margin-bottom: 10px; }
 .exports button { margin-bottom: 4px; }
 

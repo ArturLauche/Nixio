@@ -3,6 +3,7 @@ import { filenameStem, groupDialogue, isImageFile, readDialogueFile, saveFile } 
 import { alignScript, translateImage } from "./gemini.js"
 import { setupLibrary } from "./library.js"
 import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
+import { projectExtension, projectPageLimit as pageLimit, projectSettingIds, readProject, writeProject } from "./project.js"
 
 const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
@@ -10,9 +11,15 @@ const overlays = byId("overlays")
 const pageCanvas = byId("page-canvas")
 const form = byId("box-form")
 const editorStatus = byId("status")
-const pageLimit = 50
 const exportButtons = [...document.querySelectorAll("[data-export]")]
-const state = { pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true, exporting: false, importing: false, translating: false }
+const state = {
+  pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true,
+  exporting: false, importing: false, translating: false, importingScript: false, openingProject: false,
+}
+const projectSettings = projectSettingIds.map(byId)
+const defaultProjectSettings = projectSettings.map(({ value }) => value)
+const projectFile = byId("project-file")
+let projectName
 let gesture
 let pendingPaint
 let previewRedraw
@@ -81,6 +88,17 @@ function removePage(index) {
   status("Đã bỏ " + page.name + ".")
 }
 
+function projectBusy() {
+  return state.openingProject || state.importing || state.importingScript || state.translating || state.exporting
+}
+
+function syncProjectActions() {
+  byId("open-project").disabled = projectBusy()
+  byId("save-project").disabled = projectBusy()
+  byId("images").disabled = state.importing || state.openingProject
+  byId("script-file").disabled = state.importingScript || state.openingProject
+}
+
 function renderPages() {
   const current = selectedIndex()
   const count = state.pages.length
@@ -89,13 +107,14 @@ function renderPages() {
   byId("prev-page").disabled = current <= 0
   byId("next-page").disabled = current < 0 || current >= count - 1
   byId("apply-script").disabled = current < 0
-  byId("translate").disabled = current < 0 || state.translating
-  byId("align-script").disabled = current < 0 || state.translating
-  byId("translate-all").disabled = !count || state.translating
+  byId("translate").disabled = current < 0 || state.translating || state.openingProject
+  byId("align-script").disabled = current < 0 || state.translating || state.openingProject
+  byId("translate-all").disabled = !count || state.translating || state.openingProject
   byId("fit-page").disabled = current < 0
   byId("add-box").disabled = current < 0
-  byId("export-all").disabled = !count || state.exporting
-  exportButtons.forEach((button) => { button.disabled = current < 0 || state.exporting })
+  byId("export-all").disabled = !count || state.exporting || state.openingProject
+  exportButtons.forEach((button) => { button.disabled = current < 0 || state.exporting || state.openingProject })
+  syncProjectActions()
   byId("pages").replaceChildren(...state.pages.map((page, index) => {
     const li = document.createElement("li")
     const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
@@ -225,10 +244,78 @@ async function openImage(file) {
   }
 }
 
+byId("save-project").onclick = () => {
+  if (projectBusy()) return
+  try {
+    const settings = Object.fromEntries(projectSettings.map(({ id, value }) => [id, value]))
+    const file = writeProject({ pages: state.pages, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
+    const name = projectName ?? filenameStem(state.pages[0]?.name ?? "khung-thoai")
+    saveFile(file, name + projectExtension)
+    status("Đã tạo tệp dự án.")
+  } catch (error) {
+    status("Không lưu được dự án. " + error.message, true)
+  }
+}
+
+byId("open-project").onclick = () => {
+  if (!projectBusy()) projectFile.click()
+}
+
+projectFile.onchange = async () => {
+  const file = projectFile.files[0]
+  projectFile.value = ""
+  if (!file || projectBusy()) return
+  const loaded = []
+  state.openingProject = true
+  renderPages()
+  status("Đang mở dự án…")
+  try {
+    const project = await readProject(file)
+    for (const field of projectSettings) {
+      if (field.options && ![...field.options].some(({ value }) => value === project.settings[field.id])) {
+        throw new Error("Tệp dự án chứa thiết lập chưa được hỗ trợ.")
+      }
+    }
+    for (const saved of project.pages) {
+      let page
+      try {
+        page = await openImage(saved.file)
+      } catch {
+        throw new Error("Không đọc được ảnh trong dự án: " + saved.file.name)
+      }
+      page.boxes = saved.boxes.map((box) => ({ ...box, id: crypto.randomUUID() }))
+      page.unplaced = saved.unplaced
+      page.translationContext = saved.translationContext
+      loaded.push(page)
+    }
+    const hasContent = state.pages.length || state.queue.length ||
+      projectSettings.some(({ value }, index) => value !== defaultProjectSettings[index])
+    if (hasContent && !window.confirm("Mở dự án này sẽ thay thế phiên biên tập hiện tại. Tiếp tục?")) {
+      status("Đã hủy mở dự án.")
+      return
+    }
+    state.pages.forEach(({ url }) => URL.revokeObjectURL(url))
+    state.pages = loaded
+    state.queue = project.queue
+    state.fit = project.fit
+    updateFitLabel()
+    projectSettings.forEach((field) => { field.value = project.settings[field.id] })
+    projectName = filenameStem(file.name)
+    selectPage(loaded[project.currentPage])
+    status(`Đã mở dự án với ${loaded.length} trang.`)
+  } catch (error) {
+    status("Không mở được dự án. " + error.message, true)
+  } finally {
+    if (state.pages !== loaded) loaded.forEach(({ url }) => URL.revokeObjectURL(url))
+    state.openingProject = false
+    renderPages()
+  }
+}
+
 async function importPages(files) {
-  if (state.importing) return []
+  if (state.importing || state.openingProject) return []
   state.importing = true
-  byId("images").disabled = true
+  syncProjectActions()
   const loaded = []
   const rejected = []
   try {
@@ -254,7 +341,7 @@ async function importPages(files) {
     return loaded
   } finally {
     state.importing = false
-    byId("images").disabled = false
+    syncProjectActions()
     byId("images").value = ""
   }
 }
@@ -279,21 +366,28 @@ setupLibrary(async (files) => {
 
 byId("prev-page").onclick = () => changePage(-1)
 byId("next-page").onclick = () => changePage(1)
+function updateFitLabel() {
+  byId("fit-page").textContent = state.fit ? "Vừa trang" : "Kích thước gốc"
+}
 byId("fit-page").onclick = () => {
   state.fit = !state.fit
-  byId("fit-page").textContent = state.fit ? "Vừa trang" : "Kích thước gốc"
+  updateFitLabel()
   renderCanvas()
 }
 byId("script-file").onchange = async (event) => {
   const file = event.target.files[0]
-  if (!file) return
+  event.target.value = ""
+  if (!file || state.importingScript || state.openingProject) return
+  state.importingScript = true
+  syncProjectActions()
   try {
     byId("script-text").value = await readDialogueFile(file)
     status("Đã đọc " + file.name + ".")
   } catch (error) {
     status("Không nhập được kịch bản. " + error.message, true)
   } finally {
-    event.target.value = ""
+    state.importingScript = false
+    syncProjectActions()
   }
 }
 
@@ -488,7 +582,7 @@ function applyTranslation(page, lines) {
 
 async function processWithGemini(pages, read, action) {
   const key = byId("gemini-key").value.trim()
-  if (state.translating || !pages.length) return
+  if (state.translating || state.openingProject || !pages.length) return
   if (!key) return status("Hãy nhập khóa API Gemini.", true)
   const settings = {
     key,
@@ -553,7 +647,7 @@ function extensionFor(format) {
 }
 
 async function performExport(action) {
-  if (state.exporting) return
+  if (state.exporting || state.openingProject) return
   state.exporting = true
   renderPages()
   try {
