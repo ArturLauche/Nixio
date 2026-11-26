@@ -1,5 +1,3 @@
-import JSZip from "jszip"
-
 export const imageTypes = new Set(["image/png", "image/jpeg", "image/webp"])
 const imageExtensions = /\.(png|jpe?g|webp)$/i
 
@@ -70,6 +68,7 @@ export async function readDialogueFile(file) {
   const extension = file.name.split(".").pop()?.toLowerCase()
   if (extension === "txt") return file.text()
   if (extension !== "docx" && extension !== "xlsx") throw new Error("Chọn một tệp TXT, DOCX hoặc XLSX.")
+  const { default: JSZip } = await import("jszip")
   const zip = await JSZip.loadAsync(await file.arrayBuffer())
   if (extension === "xlsx") return spreadsheetText(zip)
   return named(await zipXml(zip, "word/document.xml"), "p").map(textNodes).filter(Boolean).join("\n")

@@ -22,13 +22,21 @@ Mở địa chỉ mà Vite in ra. Dùng `npm run build` để tạo thư mục `
 2. Dán kịch bản hoặc nhập TXT UTF-8, DOCX, XLSX tối đa 2 MB. Mỗi câu nằm trên một dòng. Dùng tiêu đề như `Trang 1` hoặc `[anh-01.png]` để chỉ trang. Với XLSX, hàng đầu có thể dùng cột `Page` và `Translation`.
 3. Bấm **Dàn thoại lên ảnh**. Ứng dụng xếp các câu thành lưới theo hướng đọc đã chọn. Câu có chỉ dẫn trang không khớp hoặc vượt số ô tự động xuất hiện trong **Chưa đặt**.
 4. Bấm **+ Khung chữ** rồi kéo hoặc bấm trên ảnh. Khi ảnh được lấy tiêu điểm, Enter đặt một khung ở giữa. Kéo khung đã có để di chuyển. Chọn khung để chỉnh nội dung, font, cỡ chữ, màu, canh, góc xoay và nền.
-5. Xuất PNG, PSD chứa lớp chữ chỉnh sửa được, PSD tách các khung thành lớp ảnh, hoặc ZIP chứa cả lượt. Photoshop có thể hỏi cập nhật lớp chữ khi mở PSD. [Tài liệu ag-psd](https://github.com/Agamnentzar/ag-psd#updating-text-layers)
+5. Xuất PNG, PSD chứa lớp chữ chỉnh sửa được, PSD tách các khung thành lớp ảnh, hoặc ZIP chứa cả lượt. PSD có thể chứa riêng ảnh gốc, phần nền đã xóa chữ và nhóm thoại. Photoshop có thể hỏi cập nhật lớp chữ khi mở PSD. [Tài liệu ag-psd](https://github.com/Agamnentzar/ag-psd#updating-text-layers)
 
 Ảnh và thao tác biên tập được giữ trong phiên mở trang. Tải tệp xuất trước khi làm mới hoặc đóng tab.
 
 ## Dịch bằng Gemini
 
-Mở **Dịch ảnh bằng Gemini**, nhập khóa API của bạn, chọn ngôn ngữ và bấm **Dịch trang đang mở**. Trình duyệt gửi ảnh và ghi chú trực tiếp đến Google Generative Language API. Ứng dụng giữ khóa trong trường nhập của phiên hiện tại. Kết quả gồm câu dịch và vị trí gợi ý để bạn chỉnh lại trên ảnh. [Tài liệu Gemini](https://ai.google.dev/api/generate-content)
+Mở **Dịch ảnh bằng Gemini**, nhập khóa API, chọn ngôn ngữ rồi bấm **Dịch trang đang mở** hoặc **Dịch cả lượt**. Gemini đọc chữ và khung trước, sau đó dịch theo mã thoại. Khi dịch nhiều trang, câu dịch gần nhất được dùng làm ngữ cảnh cho trang sau. Trình duyệt gửi ảnh và ghi chú trực tiếp đến Google Generative Language API. Ứng dụng giữ khóa trong trường nhập của phiên hiện tại. [Tài liệu Gemini](https://ai.google.dev/api/generate-content)
+
+Nếu đã có bản dịch, nhập kịch bản rồi bấm **Ghép nghĩa kịch bản trang này**. Dịch và ghép nghĩa đều ưu tiên khung có sẵn trên trang. Khi trang trống, chúng dùng khung OCR. Các câu không có tọa độ đáng tin cậy hoặc xung đột được giữ trong **Chưa đặt** để xử lý thủ công.
+
+Tùy chọn **Xóa chữ gốc trên nền sáng** lấy mẫu màu giấy quanh khung. Vùng có nền tối, đường nét hoặc hoa văn quanh khung có thể được giữ nguyên. Kiểm tra ảnh xem trước khi xuất.
+
+## Kiểm thử
+
+Chạy `npm test` để kiểm tra tọa độ OCR và quy tắc ghép khung. Xem [kết quả kiểm thử đối chứng](ANALYSIS.md#kiểm-thử-đối-chứng) để biết các hành vi đã được kiểm tra với Lilyzono.
 
 ## Thư viện chương
 

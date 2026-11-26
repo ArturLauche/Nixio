@@ -20,11 +20,21 @@ REA 6.10.1 chạy `inspect-web-page` và `analyze-web-bundle` trên bản phát 
 | Khu vực | Hành vi quan sát trên Lilyzono | Bản dựng Khung Thoại |
 |---|---|---|
 | Chuẩn bị | Tải nhiều ảnh, chọn bản dịch hoặc dán thoại, chọn hướng đọc | Tải ảnh, đổi thứ tự và nhập TXT, DOCX, XLSX hoặc thoại dán. Ghép theo chỉ dẫn trang và đặt câu vào lưới. |
-| Dịch | Giao diện cung cấp Hy-MT2 Manga và Gemini, với ghi chú thuật ngữ | Dùng Gemini bằng khóa của người dùng. Phản hồi JSON gồm thoại và vùng gợi ý. |
+| Dịch | Giao diện cung cấp Hy-MT2 Manga và Gemini, với ghi chú thuật ngữ | Dùng Gemini bằng khóa của người dùng. Một lượt OCR cung cấp khung và mã câu. Lượt tiếp theo dịch theo mã hoặc ghép với bản dịch nhập sẵn. |
 | Chỉnh thoại | Chuyển trang, chèn và chỉnh vùng chữ, hiển thị câu chưa gán | Di chuyển và chỉnh từng khung. Có danh sách câu chờ đặt cho tiêu đề trang không khớp. |
-| Xuất | PNG, PSD lớp chữ, PSD lớp ảnh và ZIP | Xuất từ Canvas và ag-psd, với cả tệp theo trang và ZIP theo lượt. |
+| Xuất | PNG, PSD lớp chữ, PSD lớp ảnh và ZIP | Xuất từ Canvas và ag-psd, với cả tệp theo trang và ZIP theo lượt. PSD chữ có thể gồm ảnh gốc, lớp xóa chữ nền sáng và nhóm thoại. |
 | Đọc raw | Ô tìm truyện, chọn chương, đọc và tải ZIP | Tìm trong danh mục JSON do người dùng cung cấp. Có trình đọc, chuyển ảnh vào biên tập và tải ZIP. |
 
 ### Phạm vi xác minh
 
 Lilyzono báo chưa kết nối được máy chủ lúc khảo sát. Chất lượng dịch Hy-MT2, ghép nghĩa Nhật–Việt, dữ liệu nguồn truyện và hành vi của tiện ích Photoshop vẫn chưa được xác minh. Tiện ích Photoshop xuất hiện dưới dạng liên kết tải riêng. Kết quả REA bao quát bundle chính trong lần phát lại đã giới hạn nguồn.
+
+## Kiểm thử đối chứng
+
+Ngày 26/11/2026, đối chứng hàm ghép vùng trong bundle Lilyzono với `src/placement.js` trên 1.208 bộ khung sinh tự động. Kết quả đặt câu và thứ tự câu chờ đặt trùng khớp ở tất cả các bộ. Trong lần đo 8 bộ có 180 câu và 180 vùng chồng lấp, bản gốc mất khoảng 106 ms và bản dựng mất khoảng 29 ms. Số đo phản ánh riêng bộ ghép khung.
+
+Một lượt Chromium trên cùng ảnh và phản hồi giả lập xác nhận hai giao diện chạy OCR rồi dịch, đặt cùng một câu, giữ cùng ba câu mơ hồ và xuất PSD có ảnh gốc, nền đã xóa chữ và nhóm thoại. Kiểm thử bản dựng còn bao gồm tiếp tục dịch sau lỗi, ngữ cảnh qua trang, ghép nghĩa kịch bản, xóa chữ trên nền sáng, giữ nguyên mẫu nền chấm thử, lớp ảnh, PNG và ZIP PSD.
+
+Bản build tách thư viện ZIP và PSD khỏi JavaScript tải lúc mở. Kích thước gzip của JavaScript tải đầu giảm từ khoảng 143 kB xuống 14 kB. Thư viện được tải khi nhập hoặc xuất định dạng cần chúng.
+
+Máy chủ Lilyzono chưa sẵn sàng khi kiểm tra trực tiếp. Dịch Hy-MT2, redraw trên hoa văn và screentone, ghép nghĩa của máy chủ, tìm raw từ nguồn gốc và tiện ích Photoshop vẫn cần đối chứng với dịch vụ gốc. Thuật toán làm sạch nền sáng và ghép nghĩa bằng Gemini của Khung Thoại là các triển khai độc lập.

@@ -1,8 +1,8 @@
-import JSZip from "jszip"
 import { clamp, drawPage, exportPage, makeBox } from "./canvas.js"
 import { filenameStem, groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
-import { translateImage } from "./gemini.js"
+import { alignScript, translateImage } from "./gemini.js"
 import { setupLibrary } from "./library.js"
+import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
 
 const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
@@ -12,8 +12,9 @@ const form = byId("box-form")
 const editorStatus = byId("status")
 const pageLimit = 50
 const exportButtons = [...document.querySelectorAll("[data-export]")]
-const state = { pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true, exporting: false, importing: false }
+const state = { pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true, exporting: false, importing: false, translating: false }
 let gesture
+let pendingPaint
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -85,7 +86,9 @@ function renderPages() {
   byId("prev-page").disabled = current <= 0
   byId("next-page").disabled = current < 0 || current >= count - 1
   byId("apply-script").disabled = current < 0
-  byId("translate").disabled = current < 0 || byId("translate").dataset.busy === "true"
+  byId("translate").disabled = current < 0 || state.translating
+  byId("align-script").disabled = current < 0 || state.translating
+  byId("translate-all").disabled = !count || state.translating
   byId("fit-page").disabled = current < 0
   byId("add-box").disabled = current < 0
   byId("export-all").disabled = !count || state.exporting
@@ -114,6 +117,10 @@ function rectStyle(element, rect) {
 }
 
 function renderCanvas() {
+  if (pendingPaint) {
+    cancelAnimationFrame(pendingPaint)
+    pendingPaint = undefined
+  }
   const page = selectedPage()
   stage.hidden = !page
   byId("canvas-empty").hidden = Boolean(page)
@@ -155,6 +162,7 @@ function renderInspector() {
   if (box) {
     for (const [key, id] of Object.entries(boxFields)) byId(id).value = box[key]
     byId("box-fill").checked = box.fill
+    byId("box-cleanup").checked = Boolean(box.cleanup)
   }
   byId("boxes").replaceChildren(...boxes.map((item) => {
     const li = document.createElement("li")
@@ -163,14 +171,19 @@ function renderInspector() {
     li.append(button)
     return li
   }))
-  byId("queue-section").hidden = !state.queue.length
-  byId("queue").replaceChildren(...state.queue.map((line, index) => {
+  const queue = [
+    ...state.queue.map((text, index) => ({ text, remove: () => state.queue.splice(index, 1) })),
+    ...(page?.unplaced ?? []).map((line, index) => ({
+      ...line, remove: () => page.unplaced.splice(index, 1),
+    })),
+  ]
+  byId("queue-section").hidden = !queue.length
+  byId("queue").replaceChildren(...queue.map((line) => {
     const li = document.createElement("li")
-    const button = listButton(line, () => {
+    const button = listButton(line.text, () => {
       if (!selectedPage()) return
-      addBox({ x: .32, y: .4, w: .36, h: .16 }, line)
-      state.queue.splice(index, 1)
-      renderInspector()
+      line.remove()
+      addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text)
     })
     button.disabled = !page
     li.append(button)
@@ -191,7 +204,7 @@ async function openImage(file) {
   try {
     await image.decode()
     if (image.naturalWidth * image.naturalHeight > 28000000) throw new Error("Ảnh vượt giới hạn kích thước.")
-    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [] }
+    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [] }
   } catch (error) {
     URL.revokeObjectURL(url)
     throw error
@@ -285,6 +298,12 @@ function distribute(page, lines, direction) {
   })
 }
 
+function pageForScript(reference, current) {
+  if (reference === null) return current
+  if (typeof reference === "number") return state.pages[reference]
+  return state.pages.find((page) => page.name.toLowerCase() === reference)
+}
+
 byId("apply-script").onclick = () => {
   const current = selectedPage()
   const groups = groupDialogue(byId("script-text").value)
@@ -292,9 +311,7 @@ byId("apply-script").onclick = () => {
   const unplaced = []
   let placed = 0
   for (const { reference, lines } of groups) {
-    const page = typeof reference === "number" ? state.pages[reference]
-      : reference === null ? current
-      : state.pages.find((item) => item.name.toLowerCase() === reference)
+    const page = pageForScript(reference, current)
     if (!page) {
       unplaced.push(...lines)
       continue
@@ -369,7 +386,13 @@ stage.addEventListener("pointermove", (event) => {
     const { box, origin, start } = gesture
     box.x = clamp(start.x + cursor.x - origin.x, 0, 1 - box.w)
     box.y = clamp(start.y + cursor.y - origin.y, 0, 1 - box.h)
-    renderCanvas()
+    const outline = overlays.querySelector('[aria-current="true"]')
+    if (outline) rectStyle(outline, box)
+    pendingPaint ??= requestAnimationFrame(() => {
+      pendingPaint = undefined
+      const page = selectedPage()
+      if (page) drawPage(pageCanvas, page)
+    })
   } else {
     rectStyle(gesture.draft, placement(gesture.origin, cursor))
   }
@@ -415,6 +438,7 @@ form.onsubmit = (event) => {
   box.size = Number(box.size)
   box.rotation = Number(box.rotation)
   box.fill = byId("box-fill").checked
+  box.cleanup = byId("box-cleanup").checked
   renderCanvas()
   renderInspector()
   status("Đã lưu khung.")
@@ -430,33 +454,82 @@ byId("delete-box").onclick = () => {
   status("Đã xóa khung.")
 }
 
-byId("translate").onclick = async () => {
-  const page = selectedPage()
+function applyTranslation(page, lines) {
+  const regions = page.boxes.length ? page.boxes.map((box) => ({ box: toCoordinates(box.originalBox ?? box), existing: box }))
+    : lines.filter((line) => line.box).map((line) => ({ box: line.box }))
+  const { placed, unplaced } = matchDialogue(lines, regions)
+  for (const { line, region } of placed) {
+    const box = region.existing ?? makeBox(page, toRectangle(region.box), line.text)
+    box.text = line.text
+    box.originalBox = toRectangle(line.box)
+    if (!region.existing) {
+      box.fill = false
+      box.cleanup = true
+      page.boxes.push(box)
+    }
+  }
+  page.unplaced = unplaced
+  return placed.length
+}
+
+async function processWithGemini(pages, read, action) {
   const key = byId("gemini-key").value.trim()
-  const button = byId("translate")
-  if (!key || !page) return status("Hãy chọn trang và nhập khóa API Gemini.", true)
-  button.dataset.busy = "true"
+  if (state.translating || !pages.length) return
+  if (!key) return status("Hãy nhập khóa API Gemini.", true)
+  const settings = {
+    key,
+    model: byId("gemini-model").value,
+    source: byId("source-language").value,
+    target: byId("target-language").value,
+    notes: byId("translation-notes").value.trim(),
+    direction: byId("direction").value,
+  }
+  const signature = JSON.stringify([settings.source, settings.target, settings.notes, settings.direction])
+  const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
+  let context = previousPage?.translationContext?.signature === signature ? previousPage.translationContext.lines : []
+  let completed = 0
+  let placed = 0
+  let skipped = 0
+  state.translating = true
   renderPages()
-  status("Đang dịch " + page.name + "…")
   try {
-    const boxes = await translateImage(page, {
-      key,
-      source: byId("source-language").value,
-      target: byId("target-language").value,
-      notes: byId("translation-notes").value.trim(),
-      direction: byId("direction").value,
-    })
-    if (!state.pages.includes(page)) return status("Trang đã bị bỏ trước khi có bản dịch.")
-    page.boxes.push(...boxes)
-    renderCanvas()
-    renderInspector()
-    status(boxes.length ? `Đã thêm ${boxes.length} khung từ Gemini vào ${page.name}.` : "Gemini không phát hiện lời thoại.")
+    for (const page of pages) {
+      if (!state.pages.includes(page)) continue
+      const report = (message) => status(page.name + " · " + message)
+      const lines = await read(page, { ...settings, context, report })
+      if (!state.pages.includes(page)) continue
+      if (lines.length) {
+        placed += applyTranslation(page, lines)
+        skipped += page.unplaced.length
+        context = [...context, ...lines.filter(({ source }) => source).map(({ source, text }) => ({
+          source: source.slice(0, 240), text: text.slice(0, 240),
+        }))].slice(-8)
+      }
+      page.translationContext = { signature, lines: context }
+      completed++
+      if (selectedPage() === page) {
+        renderCanvas()
+        renderInspector()
+      }
+    }
+    status(`Đã ${action} ${completed}/${pages.length} trang. ${placed} câu đã đặt và ${skipped} câu chờ đặt.`)
   } catch (error) {
-    status("Dịch thất bại. " + error.message, true)
+    status(`Đã ${action} ${completed}/${pages.length} trang. ${error.message}`, true)
   } finally {
-    delete button.dataset.busy
+    state.translating = false
     renderPages()
   }
+}
+byId("translate").onclick = () => processWithGemini([selectedPage()].filter(Boolean), translateImage, "dịch")
+byId("translate-all").onclick = () => processWithGemini([...state.pages], translateImage, "dịch")
+byId("align-script").onclick = () => {
+  const page = selectedPage()
+  if (!page) return
+  const lines = groupDialogue(byId("script-text").value)
+    .filter(({ reference }) => pageForScript(reference, page) === page)
+    .flatMap(({ lines }) => lines)
+  if (!lines.length) return status("Hãy nhập kịch bản cho trang này.", true)
+  processWithGemini([page], (selected, settings) => alignScript(selected, settings, lines), "ghép")
 }
 
 function extensionFor(format) {
@@ -500,6 +573,7 @@ zipDialog.addEventListener("close", () => {
   const pages = state.pages.map((page) => ({ ...page, boxes: page.boxes.map((box) => ({ ...box })) }))
   const format = byId("zip-format").value
   performExport(async () => {
+    const { default: JSZip } = await import("jszip")
     const zip = new JSZip()
     for (const [index, page] of pages.entries()) {
       status(`Đang xuất trang ${index + 1} / ${pages.length}…`)

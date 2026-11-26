@@ -94,6 +94,7 @@ textarea, select, input:not([type="file"],[type="checkbox"]) {
 textarea { resize: vertical; }
 details { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 13px; font-size: .82rem; }
 summary { font-weight: 650; }
+.translation .button + .button { margin-top: 6px; }
 .two-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .two-fields .field { margin-top: 0; }
 input[type="color"] { height: 35px; padding: 3px; }

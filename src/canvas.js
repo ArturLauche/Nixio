@@ -1,4 +1,4 @@
-import { writePsd } from "ag-psd"
+import { paintRedraw, redrawPatches } from "./redraw.js"
 
 const psdFonts = { Arial: "ArialMT", Georgia: "Georgia", Verdana: "Verdana", "Times New Roman": "TimesNewRomanPSMT" }
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
@@ -74,11 +74,13 @@ function geometry(context, box, width, height) {
   }
 }
 
-function drawBox(canvas, box, { background = true, text = true } = {}) {
+function drawBox(canvas, box, {
+  background = true, text = true, width = canvas.width, height = canvas.height, left = 0, top = 0,
+} = {}) {
   const context = canvas.getContext("2d")
   context.save()
-  const g = geometry(context, box, canvas.width, canvas.height)
-  context.translate(g.cx, g.cy)
+  const g = geometry(context, box, width, height)
+  context.translate(g.cx - left, g.cy - top)
   context.rotate(g.angle)
   context.beginPath()
   context.rect(-g.w / 2, -g.h / 2, g.w, g.h)
@@ -106,11 +108,11 @@ export function drawPage(canvas, page) {
   const context = canvas.getContext("2d")
   context.clearRect(0, 0, width, height)
   context.drawImage(page.image, 0, 0)
+  paintRedraw(canvas, redrawPatches(page))
   page.boxes.forEach((box) => drawBox(canvas, box))
 }
 
-function croppedLayer(canvas, box) {
-  const { width, height } = canvas
+function croppedLayer({ width, height }, box, options) {
   const angle = box.rotation * Math.PI / 180
   const halfWidth = (Math.abs(Math.cos(angle)) * box.w * width + Math.abs(Math.sin(angle)) * box.h * height) / 2
   const halfHeight = (Math.abs(Math.sin(angle)) * box.w * width + Math.abs(Math.cos(angle)) * box.h * height) / 2
@@ -121,7 +123,7 @@ function croppedLayer(canvas, box) {
   const right = Math.min(width, Math.ceil(cx + halfWidth))
   const bottom = Math.min(height, Math.ceil(cy + halfHeight))
   const crop = makeCanvas(right - left, bottom - top)
-  crop.getContext("2d").drawImage(canvas, -left, -top)
+  drawBox(crop, box, { width, height, left, top, ...options })
   return { canvas: crop, left, top }
 }
 
@@ -143,33 +145,35 @@ function psdTextLayer(canvas, box) {
 }
 
 export async function exportPage(page, format) {
-  const base = baseCanvas(page)
-  const composite = baseCanvas(page)
-  page.boxes.forEach((box) => drawBox(composite, box))
+  const composite = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
+  drawPage(composite, page)
   if (format === "png") {
     const result = await new Promise((resolve) => composite.toBlob(resolve, "image/png"))
     if (!result) throw new Error("Không thể tạo ảnh PNG.")
     return result
   }
-  const layerSurface = makeCanvas(base.width, base.height)
-  const layerContext = layerSurface.getContext("2d")
+  const { writePsd } = await import("ag-psd")
+  const base = baseCanvas(page)
   const children = [{ name: "Ảnh gốc", canvas: base }]
+  const patches = redrawPatches(page)
+  if (patches.length) {
+    const redraw = makeCanvas(base.width, base.height)
+    paintRedraw(redraw, patches)
+    children.push({ name: "Nền đã xóa chữ", canvas: redraw })
+  }
+  const dialogue = []
   for (const box of page.boxes) {
     const title = box.text.split(/\r?\n/)[0].slice(0, 72)
-    layerContext.clearRect(0, 0, base.width, base.height)
     if (format === "raster") {
-      drawBox(layerSurface, box)
-      children.push({ name: title, ...croppedLayer(layerSurface, box) })
+      children.push({ name: title, ...croppedLayer(base, box) })
       continue
     }
     if (box.fill) {
-      drawBox(layerSurface, box, { text: false })
-      children.push({ name: "Nền / " + title, ...croppedLayer(layerSurface, box) })
-      layerContext.clearRect(0, 0, base.width, base.height)
+      dialogue.push({ name: "Nền / " + title, ...croppedLayer(base, box, { text: false }) })
     }
-    drawBox(layerSurface, box, { background: false })
-    children.push({ ...psdTextLayer(layerSurface, box), ...croppedLayer(layerSurface, box) })
+    dialogue.push({ ...psdTextLayer(composite, box), ...croppedLayer(base, box, { background: false }) })
   }
+  if (dialogue.length) children.push({ name: "Thoại", opened: true, children: dialogue })
   const psd = writePsd({ width: base.width, height: base.height, canvas: composite, children }, { invalidateTextLayers: format === "psd" })
   return new Blob([psd], { type: "image/vnd.adobe.photoshop" })
 }

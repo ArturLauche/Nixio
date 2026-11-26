@@ -1,4 +1,3 @@
-import JSZip from "jszip"
 import { filenameStem, imageTypes, normalizedSearch, saveFile } from "./io.js"
 
 function catalogUrl(value) {
@@ -142,6 +141,7 @@ export function setupLibrary(importPages) {
   for (const [id, run] of [
     ["import-chapter", async (files) => importPages(files)],
     ["download-chapter", async (files, name) => {
+      const { default: JSZip } = await import("jszip")
       const zip = new JSZip()
       files.forEach((file) => zip.file(file.name, file))
       saveFile(await zip.generateAsync({ type: "blob" }), name + ".zip")

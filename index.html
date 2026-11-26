@@ -47,6 +47,13 @@
           <label class="field" for="gemini-key">Khóa API
             <input id="gemini-key" type="password" autocomplete="off">
           </label>
+          <label class="field" for="gemini-model">Model
+            <select id="gemini-model">
+              <option value="auto">Tự động</option>
+              <option value="gemini-3.1-flash-lite">3.1 Flash-Lite</option>
+              <option value="gemini-3.5-flash-lite">3.5 Flash-Lite</option>
+            </select>
+          </label>
           <label class="field" for="source-language">Ngôn ngữ gốc
             <select id="source-language">
               <option value="Japanese">Tiếng Nhật</option><option value="Korean">Tiếng Hàn</option>
@@ -62,6 +69,8 @@
             <textarea id="translation-notes" rows="2"></textarea>
           </label>
           <button type="button" class="button full" id="translate">Dịch trang đang mở</button>
+          <button type="button" class="button full" id="translate-all">Dịch cả lượt</button>
+          <button type="button" class="button full" id="align-script">Ghép nghĩa kịch bản trang này</button>
         </details>
       </section>
     </aside>
@@ -118,6 +127,7 @@
             <label class="field" for="box-rotation">Góc (°)<input id="box-rotation" type="number" min="-180" max="180" required></label>
           </div>
           <label class="choice"><input id="box-fill" type="checkbox"> Nền trắng dưới thoại</label>
+          <label class="choice"><input id="box-cleanup" type="checkbox"> Xóa chữ gốc trên nền sáng</label>
           <div class="form-actions">
             <button type="submit" class="button primary">Lưu khung</button>
             <button type="button" id="delete-box" class="button danger">Xóa</button>
