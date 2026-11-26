@@ -163,3 +163,21 @@ dialog::backdrop { background: #16352dae; }
   .inspector { flex-wrap: wrap; }
   .inspector .side-section { flex: 1 1 170px; }
 }
+
+.canvas-toolbar, .canvas-actions { flex-wrap: wrap; }
+.cleanup-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 13px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.cleanup-toolbar > label { display: flex; gap: 6px; align-items: center; font-size: .8rem; }
+.cleanup-toolbar select { width: auto; }
+#brush-size { width: 68px; }
+#cleanup-overlay { position: absolute; inset: 0; pointer-events: none; opacity: .35; }
+.stage.cleaning { cursor: crosshair; }
+.stage.cleaning .outline { pointer-events: none; }
+.outline.cleanup-region { border: 2px dashed #b45309; background: transparent; pointer-events: none; }
+.page-list li { flex-wrap: wrap; }
+.page-list .page-name { flex: 1; }
+.page-job { flex-basis: 100%; color: var(--quiet); padding-left: 5px; font-size: .7rem; overflow-wrap: anywhere; }
+.page-job[data-state="error"] { color: #9c383e; }
+#preflight-dialog { width: min(560px, 94vw); }
+#preflight-issues { max-height: 50dvh; overflow: auto; margin: 12px 0; }
+#preflight-issues button { white-space: normal; }
+#cleanup-inspector .button { margin-top: 10px; }

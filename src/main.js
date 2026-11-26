@@ -1,10 +1,16 @@
-import { clamp, drawPage, exportPage, makeBox } from "./canvas.js"
+import { clamp, drawPage, exportPage, makeBox, textOverflows } from "./canvas.js"
 import { filenameStem, groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
 import { alignScript, translateImage } from "./gemini.js"
 import { setupLibrary } from "./library.js"
 import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
-import { projectExtension, projectPageLimit as pageLimit, projectSettingIds, readProject, writeProject } from "./project.js"
+import { projectExtension, projectPageLimit as pageLimit, projectSettingIds, readProject, writeProject, projectStyle } from "./project.js"
 
+import { copyEditor, EditHistory } from "./history.js"
+import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
+import { remainingTranslations, translationLabel, translationSignature } from "./translation.js"
+
+const history = new EditHistory()
+const ownedUrls = new Set()
 const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
 const overlays = byId("overlays")
@@ -13,7 +19,7 @@ const form = byId("box-form")
 const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
-  pages: [], pageId: null, boxId: null, queue: [], placing: false, fit: true,
+  pages: [], presets: [], pageId: null, boxId: null, queue: [], placing: false, fit: true,
   exporting: false, importing: false, translating: false, importingScript: false, openingProject: false,
 }
 const projectSettings = projectSettingIds.map(byId)
@@ -23,11 +29,67 @@ let projectName
 let gesture
 let pendingPaint
 let previewRedraw
+let translationController
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
 const boxFields = { text: "box-text", size: "box-size", font: "box-font", color: "box-color", align: "box-align", rotation: "box-rotation" }
+
+function editorSnapshot() {
+  return copyEditor({
+    pages: state.pages, queue: state.queue, presets: state.presets,
+    pageId: state.pageId, boxId: state.boxId,
+    settings: Object.fromEntries(projectSettings.map(({ id, value }) => [id, value])),
+  })
+}
+
+function releaseUnusedImages() {
+  const snapshots = [state, ...history.past, ...history.future]
+  const used = new Set(snapshots.flatMap(({ pages }) => pages.map(({ url }) => url)))
+  for (const url of ownedUrls) {
+    if (used.has(url)) continue
+    URL.revokeObjectURL(url)
+    ownedUrls.delete(url)
+  }
+}
+
+function checkpoint(snapshot = editorSnapshot()) {
+  history.record(snapshot)
+  syncProjectActions()
+}
+
+function restoreHistory(direction) {
+  if (projectBusy() || gesture) return
+  const snapshot = history[direction](editorSnapshot())
+  if (!snapshot) return
+  const { settings, ...editor } = snapshot
+  Object.assign(state, editor, { placing: false })
+  projectSettings.forEach((field) => { field.value = settings[field.id] })
+  render()
+  releaseUnusedImages()
+  status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
+}
+
+byId("undo").onclick = () => restoreHistory("undo")
+byId("redo").onclick = () => restoreHistory("redo")
+document.addEventListener("keydown", (event) => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey ||
+      event.target.closest("input, textarea, select, [contenteditable]")) return
+  const key = event.key.toLowerCase()
+  if (key !== "z" && key !== "y") return
+  event.preventDefault()
+  restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
+})
+for (const field of projectSettings) {
+  let before
+  field.addEventListener("focus", () => { before = editorSnapshot() })
+  field.addEventListener("change", () => {
+    if (before && before.settings[field.id] !== field.value) checkpoint(before)
+    before = editorSnapshot()
+    syncTranslationActions()
+  })
+}
 
 function status(message, error = false) {
   editorStatus.textContent = message
@@ -56,6 +118,11 @@ window.addEventListener("hashchange", setView)
 setView()
 
 function selectPage(page) {
+  if (gesture) {
+    const { settings, ...editor } = gesture.before
+    Object.assign(state, editor)
+    page = state.pages.find((item) => item.id === page?.id)
+  }
   state.pageId = page?.id ?? null
   state.boxId = null
   state.placing = false
@@ -69,8 +136,10 @@ function changePage(delta) {
 }
 
 function movePage(index, delta) {
+  if (projectBusy()) return
   const target = index + delta
   if (target < 0 || target >= state.pages.length) return
+  checkpoint()
   const [page] = state.pages.splice(index, 1)
   state.pages.splice(target, 0, page)
   renderPages()
@@ -80,9 +149,10 @@ function movePage(index, delta) {
 }
 
 function removePage(index) {
+  if (projectBusy()) return
+  checkpoint()
   const [page] = state.pages.splice(index, 1)
   if (!page) return
-  URL.revokeObjectURL(page.url)
   if (page.id === state.pageId) selectPage(state.pages[Math.min(index, state.pages.length - 1)])
   else renderPages()
   status("Đã bỏ " + page.name + ".")
@@ -93,40 +163,64 @@ function projectBusy() {
 }
 
 function syncProjectActions() {
+  byId("undo").disabled = projectBusy() || !history.past.length
+  byId("redo").disabled = projectBusy() || !history.future.length
   byId("open-project").disabled = projectBusy()
   byId("save-project").disabled = projectBusy()
-  byId("images").disabled = state.importing || state.openingProject
-  byId("script-file").disabled = state.importingScript || state.openingProject
+  byId("images").disabled = projectBusy()
+  byId("script-file").disabled = projectBusy()
+}
+
+function syncTranslationActions() {
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, readTranslationSettings()).length
+  byId("pages").querySelectorAll(".page-job").forEach((element, index) => {
+    const page = state.pages[index]
+    element.dataset.state = page.translationJob?.state ?? "pending"
+    element.textContent = translationLabel(page, readTranslationSettings())
+  })
 }
 
 function renderPages() {
   const current = selectedIndex()
   const count = state.pages.length
+  if (!state.importing && !state.openingProject) releaseUnusedImages()
   byId("page-count").textContent = count + " / " + pageLimit
   byId("page-indicator").textContent = current === -1 ? "Chưa có trang" : `Trang ${current + 1} / ${count}`
   byId("prev-page").disabled = current <= 0
   byId("next-page").disabled = current < 0 || current >= count - 1
-  byId("apply-script").disabled = current < 0
+  byId("apply-script").disabled = current < 0 || projectBusy()
   byId("translate").disabled = current < 0 || state.translating || state.openingProject
   byId("align-script").disabled = current < 0 || state.translating || state.openingProject
   byId("translate-all").disabled = !count || state.translating || state.openingProject
   byId("fit-page").disabled = current < 0
-  byId("add-box").disabled = current < 0
+  byId("add-box").disabled = current < 0 || projectBusy()
   byId("export-all").disabled = !count || state.exporting || state.openingProject
   exportButtons.forEach((button) => { button.disabled = current < 0 || state.exporting || state.openingProject })
   syncProjectActions()
+  byId("box-form").inert = state.translating || state.openingProject
+  projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, readTranslationSettings()).length
+  byId("stop-translation").disabled = !state.translating
+  renderPresets()
+  byId("check-export").disabled = projectBusy()
   byId("pages").replaceChildren(...state.pages.map((page, index) => {
     const li = document.createElement("li")
     const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
     button.className = "page-name"
     if (current === index) button.setAttribute("aria-current", "true")
     const up = listButton("↑", () => movePage(index, -1), "Đưa lên " + page.name)
-    up.disabled = index === 0
+    up.disabled = index === 0 || projectBusy()
     up.id = "move-" + page.id + "--1"
     const down = listButton("↓", () => movePage(index, 1), "Đưa xuống " + page.name)
-    down.disabled = index === count - 1
+    down.disabled = index === count - 1 || projectBusy()
     down.id = "move-" + page.id + "-1"
-    li.append(button, up, down, listButton("×", () => removePage(index), "Bỏ " + page.name))
+    const remove = listButton("×", () => removePage(index), "Bỏ " + page.name)
+    remove.disabled = projectBusy()
+    const job = document.createElement("span")
+    job.className = "page-job"
+    job.dataset.state = page.translationJob?.state ?? "pending"
+    job.textContent = translationLabel(page, readTranslationSettings())
+    li.append(button, up, down, remove, job)
     return li
   }))
 }
@@ -139,7 +233,7 @@ function rectStyle(element, rect) {
 }
 
 function paintPreview(page) {
-  const pending = drawPage(pageCanvas, page)
+  const pending = drawPage(pageCanvas, page, { showCleanup: byId("show-cleanup").checked, showText: byId("show-text").checked })
   if (!pending || previewRedraw === pending) return
   previewRedraw = pending
   pending.then(() => {
@@ -159,6 +253,7 @@ function renderCanvas() {
   byId("canvas-empty").hidden = Boolean(page)
   byId("add-box").setAttribute("aria-pressed", String(state.placing))
   stage.classList.toggle("placing", state.placing)
+  stage.classList.toggle("cleaning", byId("cleanup-tool").value !== "text")
   if (!page) {
     overlays.replaceChildren()
     pageCanvas.width = 1
@@ -177,7 +272,98 @@ function renderCanvas() {
     rectStyle(outline, box)
     return outline
   }))
+  renderCleanupOverlay()
 }
+
+function freezeCleanup(box) {
+  if (box.cleanupRect) return
+  const { x, y, w, h } = cleanupRectangle(box)
+  box.cleanupRect = { x, y, w, h }
+}
+
+function renderCleanupOverlay() {
+  const canvas = byId("cleanup-overlay")
+  canvas.width = pageCanvas.width
+  canvas.height = pageCanvas.height
+  const box = selectedBox()
+  if (!box || byId("cleanup-tool").value === "text") return
+  const rect = cleanupRectangle(box)
+  const left = Math.floor(rect.x * canvas.width)
+  const top = Math.floor(rect.y * canvas.height)
+  const mask = document.createElement("canvas")
+  mask.width = Math.ceil((rect.x + rect.w) * canvas.width) - left
+  mask.height = Math.ceil((rect.y + rect.h) * canvas.height) - top
+  paintCleanupMask(mask, box, selectedPage().image, left, top)
+  const context = mask.getContext("2d")
+  context.globalCompositeOperation = "source-in"
+  context.fillStyle = "#ed9f24"
+  context.fillRect(0, 0, mask.width, mask.height)
+  canvas.getContext("2d").drawImage(mask, left, top)
+  const outline = document.createElement("div")
+  outline.className = "outline cleanup-region"
+  rectStyle(outline, rect)
+  overlays.querySelector(".cleanup-region")?.remove()
+  overlays.append(outline)
+}
+
+function renderPresets() {
+  const select = byId("style-preset")
+  const value = select.value
+  select.replaceChildren(...state.presets.map((preset, index) => new Option(preset.name, index)))
+  if (state.presets[Number(value)]) select.value = value
+  byId("save-preset").disabled = !selectedBox() || projectBusy()
+  byId("apply-preset").disabled = !state.presets.length || !state.pages.length || projectBusy()
+  byId("delete-preset").disabled = !state.presets.length || projectBusy()
+}
+
+byId("save-preset").onclick = () => {
+  const box = selectedBox()
+  const name = byId("preset-name").value.trim()
+  if (!box || projectBusy()) return
+  if (!name) return status("Hãy nhập tên mẫu dàn chữ.", true)
+  checkpoint()
+  const preset = { name, style: projectStyle(box) }
+  const index = state.presets.findIndex((item) => item.name === name)
+  if (index < 0) state.presets.push(preset)
+  else state.presets[index] = preset
+  renderPresets()
+  byId("style-preset").value = String(index < 0 ? state.presets.length - 1 : index)
+  status("Đã lưu mẫu " + name + ".")
+}
+byId("apply-preset").onclick = () => {
+  const preset = state.presets[Number(byId("style-preset").value)]
+  if (!preset || projectBusy()) return
+  const scope = byId("preset-scope").value
+  const pages = scope === "chapter" ? state.pages : [selectedPage()].filter(Boolean)
+  const boxes = scope === "box" ? [selectedBox()].filter(Boolean) : pages.flatMap((page) => page.boxes)
+  if (!boxes.length) return status("Hãy chọn khung để áp dụng mẫu.", true)
+  checkpoint()
+  boxes.forEach((box) => Object.assign(box, preset.style))
+  render()
+  status(`Đã áp dụng mẫu cho ${boxes.length} khung.`)
+}
+byId("delete-preset").onclick = () => {
+  if (projectBusy() || !state.presets.length) return
+  checkpoint()
+  state.presets.splice(Number(byId("style-preset").value), 1)
+  renderPresets()
+}
+byId("reset-cleanup").onclick = () => {
+  const box = selectedBox()
+  if (!box || projectBusy()) return
+  checkpoint()
+  delete box.cleanupRect
+  delete box.cleanupStrokes
+  freezeCleanup(box)
+  render()
+}
+byId("cleanup-tool").onchange = () => {
+  state.placing = false
+  renderCanvas()
+  if (byId("cleanup-tool").value !== "text") status("Chọn khung thoại rồi khoanh vùng hoặc vẽ cọ trên ảnh.")
+}
+byId("show-cleanup").onchange = renderCanvas
+byId("show-text").onchange = renderCanvas
 
 function selectBox(box) {
   state.boxId = box.id
@@ -189,6 +375,9 @@ function renderInspector() {
   const page = selectedPage()
   const box = selectedBox()
   const boxes = page?.boxes ?? []
+  renderPresets()
+  byId("cleanup-inspector").hidden = !box
+  byId("reset-cleanup").disabled = projectBusy()
   byId("box-count").textContent = boxes.length
   byId("inspector-empty").hidden = Boolean(box)
   form.hidden = !box
@@ -214,11 +403,12 @@ function renderInspector() {
   byId("queue").replaceChildren(...queue.map((line) => {
     const li = document.createElement("li")
     const button = listButton(line.text, () => {
-      if (!selectedPage()) return
+      if (!selectedPage() || projectBusy()) return
+      checkpoint()
       line.remove()
-      addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text)
+      addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text, false)
     })
-    button.disabled = !page
+    button.disabled = !page || projectBusy()
     li.append(button)
     return li
   }))
@@ -232,6 +422,7 @@ function render() {
 
 async function openImage(file) {
   const url = URL.createObjectURL(file)
+  ownedUrls.add(url)
   const image = new Image()
   image.src = url
   try {
@@ -240,6 +431,7 @@ async function openImage(file) {
     return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [] }
   } catch (error) {
     URL.revokeObjectURL(url)
+    ownedUrls.delete(url)
     throw error
   }
 }
@@ -248,7 +440,7 @@ byId("save-project").onclick = () => {
   if (projectBusy()) return
   try {
     const settings = Object.fromEntries(projectSettings.map(({ id, value }) => [id, value]))
-    const file = writeProject({ pages: state.pages, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
+    const file = writeProject({ pages: state.pages, presets: state.presets, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
     const name = projectName ?? filenameStem(state.pages[0]?.name ?? "khung-thoai")
     saveFile(file, name + projectExtension)
     status("Đã tạo tệp dự án.")
@@ -286,17 +478,19 @@ projectFile.onchange = async () => {
       page.boxes = saved.boxes.map((box) => ({ ...box, id: crypto.randomUUID() }))
       page.unplaced = saved.unplaced
       page.translationContext = saved.translationContext
+      page.translationJob = saved.translationJob
       loaded.push(page)
     }
-    const hasContent = state.pages.length || state.queue.length ||
+    const hasContent = state.pages.length || state.presets.length || state.queue.length ||
       projectSettings.some(({ value }, index) => value !== defaultProjectSettings[index])
     if (hasContent && !window.confirm("Mở dự án này sẽ thay thế phiên biên tập hiện tại. Tiếp tục?")) {
       status("Đã hủy mở dự án.")
       return
     }
-    state.pages.forEach(({ url }) => URL.revokeObjectURL(url))
+    history.clear()
     state.pages = loaded
     state.queue = project.queue
+    state.presets = project.presets
     state.fit = project.fit
     updateFitLabel()
     projectSettings.forEach((field) => { field.value = project.settings[field.id] })
@@ -306,14 +500,14 @@ projectFile.onchange = async () => {
   } catch (error) {
     status("Không mở được dự án. " + error.message, true)
   } finally {
-    if (state.pages !== loaded) loaded.forEach(({ url }) => URL.revokeObjectURL(url))
+    releaseUnusedImages()
     state.openingProject = false
     renderPages()
   }
 }
 
 async function importPages(files) {
-  if (state.importing || state.openingProject) return []
+  if (projectBusy()) return []
   state.importing = true
   syncProjectActions()
   const loaded = []
@@ -330,6 +524,7 @@ async function importPages(files) {
         rejected.push(file.name)
       }
     }
+    if (loaded.length) checkpoint()
     state.pages.push(...loaded)
     if (loaded.length && !selectedPage()) selectPage(loaded[0])
     else render()
@@ -341,7 +536,8 @@ async function importPages(files) {
     return loaded
   } finally {
     state.importing = false
-    syncProjectActions()
+    renderPages()
+    releaseUnusedImages()
     byId("images").value = ""
   }
 }
@@ -377,17 +573,19 @@ byId("fit-page").onclick = () => {
 byId("script-file").onchange = async (event) => {
   const file = event.target.files[0]
   event.target.value = ""
-  if (!file || state.importingScript || state.openingProject) return
+  if (!file || projectBusy()) return
   state.importingScript = true
   syncProjectActions()
   try {
-    byId("script-text").value = await readDialogueFile(file)
+    const script = await readDialogueFile(file)
+    checkpoint()
+    byId("script-text").value = script
     status("Đã đọc " + file.name + ".")
   } catch (error) {
     status("Không nhập được kịch bản. " + error.message, true)
   } finally {
     state.importingScript = false
-    syncProjectActions()
+    renderPages()
   }
 }
 
@@ -415,7 +613,9 @@ function pageForScript(reference, current) {
 byId("apply-script").onclick = () => {
   const current = selectedPage()
   const groups = groupDialogue(byId("script-text").value)
+  if (projectBusy()) return
   if (!current || !groups.length) return status("Hãy thêm ảnh và nhập lời thoại.", true)
+  checkpoint()
   const unplaced = []
   let placed = 0
   for (const { reference, lines } of groups) {
@@ -435,9 +635,11 @@ byId("apply-script").onclick = () => {
   status(`Đã đặt ${placed} câu. ${unplaced.length} câu chờ đặt thủ công.`)
 }
 
-function addBox(rectangle, line) {
+function addBox(rectangle, line, record = true) {
   const page = selectedPage()
   if (!page) return
+  if (projectBusy()) return
+  if (record) checkpoint()
   const box = makeBox(page, rectangle, line)
   page.boxes.push(box)
   state.boxId = box.id
@@ -448,6 +650,7 @@ function addBox(rectangle, line) {
 }
 
 byId("add-box").onclick = () => {
+  byId("cleanup-tool").value = "text"
   state.placing = !state.placing
   renderCanvas()
   if (state.placing) {
@@ -470,27 +673,46 @@ function placement(a, b) {
 }
 
 stage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) return
+  if (event.button !== 0 || projectBusy()) return
   const origin = point(event)
-  const box = selectedPage()?.boxes.find((item) => item.id === event.target.dataset.box)
+  const tool = byId("cleanup-tool").value
+  const box = tool === "text" ? selectedPage()?.boxes.find((item) => item.id === event.target.dataset.box) : selectedBox()
   if (!box && !state.placing) return
   event.preventDefault()
   stage.setPointerCapture(event.pointerId)
-  if (box) {
+  const before = editorSnapshot()
+  if (tool !== "text") {
+    if (!box) return
+    freezeCleanup(box)
+    box.cleanup = true
+    if (tool !== "region") {
+      const size = clamp(Number(byId("brush-size").value) || 20, 1, 200)
+      const stroke = { mode: tool, size: size / Math.min(pageCanvas.width, pageCanvas.height), points: [origin] }
+      box.cleanupStrokes ??= []
+      box.cleanupStrokes.push(stroke)
+      gesture = { pointer: event.pointerId, box, stroke, before }
+      renderCleanupOverlay()
+      return
+    }
+  } else if (box) {
     selectBox(box)
-    gesture = { pointer: event.pointerId, box, origin, start: { x: box.x, y: box.y } }
+    if (box.cleanup) freezeCleanup(box)
+    gesture = { pointer: event.pointerId, box, origin, start: { x: box.x, y: box.y }, before }
     return
   }
   const draft = document.createElement("div")
   draft.className = "outline draft"
   overlays.append(draft)
-  gesture = { pointer: event.pointerId, origin, draft }
+  gesture = { pointer: event.pointerId, origin, draft, cleanupBox: tool === "region" ? box : null, before }
 })
 
 stage.addEventListener("pointermove", (event) => {
   if (gesture?.pointer !== event.pointerId) return
   const cursor = point(event)
-  if (gesture.box) {
+  if (gesture.stroke) {
+    gesture.stroke.points.push(cursor)
+    renderCleanupOverlay()
+  } else if (gesture.box) {
     const { box, origin, start } = gesture
     box.x = clamp(start.x + cursor.x - origin.x, 0, 1 - box.w)
     box.y = clamp(start.y + cursor.y - origin.y, 0, 1 - box.h)
@@ -510,13 +732,24 @@ stage.addEventListener("pointerup", (event) => {
   if (gesture?.pointer !== event.pointerId) return
   const completed = gesture
   gesture = undefined
-  if (completed.draft) addBox(placement(completed.origin, point(event)))
+  if (completed.draft || completed.stroke || completed.box.x !== completed.start.x || completed.box.y !== completed.start.y) {
+    checkpoint(completed.before)
+  }
+  if (completed.cleanupBox) {
+    completed.cleanupBox.cleanupRect = placement(completed.origin, point(event))
+    completed.cleanupBox.cleanupStrokes = []
+  } else if (completed.draft) {
+    addBox(placement(completed.origin, point(event)), undefined, false)
+  }
+  render()
 })
 stage.addEventListener("pointercancel", (event) => {
   if (gesture?.pointer !== event.pointerId) return
-  if (gesture.box) Object.assign(gesture.box, gesture.start)
+  const { before } = gesture
   gesture = undefined
-  renderCanvas()
+  const { settings, ...editor } = before
+  Object.assign(state, editor)
+  render()
 })
 
 stage.addEventListener("keydown", (event) => {
@@ -539,14 +772,18 @@ form.onsubmit = (event) => {
   event.preventDefault()
   const box = selectedBox()
   if (!box) return
+  if (projectBusy()) return
   const text = byId("box-text").value.trim()
   if (!text) return status("Hãy nhập nội dung khung.", true)
+  checkpoint()
   for (const [key, id] of Object.entries(boxFields)) box[key] = byId(id).value
   box.text = text
   box.size = Number(box.size)
   box.rotation = Number(box.rotation)
   box.fill = byId("box-fill").checked
   box.cleanup = byId("box-cleanup").checked
+  if (box.cleanup) freezeCleanup(box)
+  renderPages()
   renderCanvas()
   renderInspector()
   status("Đã lưu khung.")
@@ -554,7 +791,8 @@ form.onsubmit = (event) => {
 
 byId("delete-box").onclick = () => {
   const page = selectedPage()
-  if (!page || !state.boxId) return
+  if (!page || !state.boxId || projectBusy()) return
+  checkpoint()
   page.boxes = page.boxes.filter((box) => box.id !== state.boxId)
   state.boxId = null
   renderCanvas()
@@ -580,32 +818,43 @@ function applyTranslation(page, lines) {
   return placed.length
 }
 
-async function processWithGemini(pages, read, action) {
-  const key = byId("gemini-key").value.trim()
-  if (state.translating || state.openingProject || !pages.length) return
-  if (!key) return status("Hãy nhập khóa API Gemini.", true)
-  const settings = {
-    key,
+function readTranslationSettings() {
+  return {
     model: byId("gemini-model").value,
     source: byId("source-language").value,
     target: byId("target-language").value,
     notes: byId("translation-notes").value.trim(),
     direction: byId("direction").value,
+    glossary: byId("translation-glossary").value.trim(),
   }
-  const signature = JSON.stringify([settings.source, settings.target, settings.notes, settings.direction])
+}
+
+async function processWithGemini(pages, read, action, kind = "translate") {
+  const key = byId("gemini-key").value.trim()
+  if (projectBusy() || !pages.length) return
+  if (!key) return status("Hãy nhập khóa API Gemini.", true)
+  const settings = { ...readTranslationSettings(), key }
+  const signature = translationSignature(settings)
   const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
   let context = previousPage?.translationContext?.signature === signature ? previousPage.translationContext.lines : []
   let completed = 0
   let placed = 0
   let skipped = 0
+  checkpoint()
+  translationController = new AbortController()
   state.translating = true
+  for (const page of pages) page.translationJob = { kind, signature, state: "pending" }
   renderPages()
+  renderInspector()
+  let activePage
   try {
     for (const page of pages) {
-      if (!state.pages.includes(page)) continue
+      activePage = page
+      page.translationJob = { kind, signature, state: "running" }
+      renderPages()
       const report = (message) => status(page.name + " · " + message)
-      const lines = await read(page, { ...settings, context, report })
-      if (!state.pages.includes(page)) continue
+      const lines = await read(page, { ...settings, context, report, signal: translationController.signal })
+      translationController.signal.throwIfAborted()
       if (lines.length) {
         placed += applyTranslation(page, lines)
         skipped += page.unplaced.length
@@ -616,6 +865,7 @@ async function processWithGemini(pages, read, action) {
         page.unplaced = []
       }
       page.translationContext = { signature, lines: context }
+      page.translationJob = { kind, signature, state: "done" }
       completed++
       if (selectedPage() === page) {
         renderCanvas()
@@ -624,14 +874,22 @@ async function processWithGemini(pages, read, action) {
     }
     status(`Đã ${action} ${completed}/${pages.length} trang. ${placed} câu đã đặt và ${skipped} câu chờ đặt.`)
   } catch (error) {
-    status(`Đã ${action} ${completed}/${pages.length} trang. ${error.message}`, true)
+    const stopped = translationController.signal.aborted
+    if (activePage) activePage.translationJob = {
+      kind, signature, state: stopped ? "pending" : "error", error: stopped ? undefined : error.message,
+    }
+    status(stopped ? `Đã dừng sau ${completed} trang. Có thể tiếp tục dịch chương.` :
+      `Đã ${action} ${completed}/${pages.length} trang. ${error.message}`, !stopped)
   } finally {
     state.translating = false
-    renderPages()
+    translationController = null
+    render()
   }
 }
 byId("translate").onclick = () => processWithGemini([selectedPage()].filter(Boolean), translateImage, "dịch")
 byId("translate-all").onclick = () => processWithGemini([...state.pages], translateImage, "dịch")
+byId("resume-translation").onclick = () => processWithGemini(remainingTranslations(state.pages, readTranslationSettings()), translateImage, "dịch")
+byId("stop-translation").onclick = () => translationController?.abort()
 byId("align-script").onclick = () => {
   const page = selectedPage()
   if (!page) return
@@ -639,7 +897,7 @@ byId("align-script").onclick = () => {
     .filter(({ reference }) => pageForScript(reference, page) === page)
     .flatMap(({ lines }) => lines)
   if (!lines.length) return status("Hãy nhập kịch bản cho trang này.", true)
-  processWithGemini([page], (selected, settings) => alignScript(selected, settings, lines), "ghép")
+  processWithGemini([page], (selected, settings) => alignScript(selected, settings, lines), "ghép", "align")
 }
 
 function extensionFor(format) {
@@ -661,15 +919,70 @@ async function performExport(action) {
   }
 }
 
+const preflightDialog = byId("preflight-dialog")
+let pendingExport
+function exportIssues(pages) {
+  const issues = []
+  if (state.queue.length) issues.push({ text: `${state.queue.length} câu chưa đặt trong chương.` })
+  for (const page of pages) {
+    const prefix = page.name + " · "
+    if (page.unplaced.length) issues.push({ page, text: prefix + `${page.unplaced.length} câu chưa đặt.` })
+    if (page.translationJob?.state === "error") issues.push({ page, text: prefix + "Lỗi dịch. " + page.translationJob.error })
+    if (page.translationJob?.state === "pending") issues.push({ page, text: prefix + "Chưa xử lý xong lượt dịch." })
+    if (page.translationJob?.state === "done" && page.translationJob.signature !== translationSignature(readTranslationSettings())) {
+      issues.push({ page, text: prefix + "Thiết lập dịch đã đổi sau lần xử lý gần nhất." })
+    }
+    for (const box of page.boxes) {
+      if (textOverflows(page, box)) issues.push({ page, box, text: prefix + "Chữ tràn khung · " + box.text.slice(0, 70) })
+    }
+  }
+  return issues
+}
+
+function showPreflight(issues, action) {
+  pendingExport = action
+  byId("continue-export").hidden = !action
+  byId("preflight-summary").textContent = issues.length ? `Có ${issues.length} mục cần kiểm tra.` : "Các trang đã sẵn sàng để xuất."
+  byId("preflight-issues").replaceChildren(...issues.map((issue) => {
+    const li = document.createElement("li")
+    li.append(listButton(issue.text, () => {
+      preflightDialog.close()
+      location.hash = "editor"
+      if (issue.page) selectPage(issue.page)
+      if (issue.box) selectBox(issue.box)
+      if (!issue.page) byId("queue-section").scrollIntoView({ block: "nearest" })
+      status(issue.text)
+    }))
+    return li
+  }))
+  preflightDialog.showModal()
+}
+
+function requestExport(pages, action) {
+  if (projectBusy()) return
+  const issues = exportIssues(pages)
+  if (issues.length) showPreflight(issues, action)
+  else action()
+}
+byId("check-export").onclick = () => showPreflight(exportIssues(state.pages))
+byId("close-preflight").onclick = () => preflightDialog.close()
+byId("continue-export").onclick = () => {
+  const action = pendingExport
+  preflightDialog.close()
+  action?.()
+}
+preflightDialog.addEventListener("close", () => { pendingExport = null })
+
 for (const button of exportButtons) {
   button.onclick = () => {
     const page = selectedPage()
     const format = button.dataset.export
     if (!page) return
-    performExport(async () => {
+    requestExport([page], () => performExport(async () => {
       status("Đang xuất trang…")
-      saveFile(await exportPage(page, format), filenameStem(page.name) + "." + extensionFor(format))
-    })
+      const snapshot = copyEditor({ pages: [page] }).pages[0]
+      saveFile(await exportPage(snapshot, format), filenameStem(page.name) + "." + extensionFor(format))
+    }))
   }
 }
 
@@ -680,9 +993,9 @@ byId("export-all").onclick = () => {
 }
 zipDialog.addEventListener("close", () => {
   if (zipDialog.returnValue !== "export") return
-  const pages = state.pages.map((page) => ({ ...page, boxes: page.boxes.map((box) => ({ ...box })) }))
   const format = byId("zip-format").value
-  performExport(async () => {
+  requestExport(state.pages, () => performExport(async () => {
+    const pages = copyEditor({ pages: state.pages }).pages
     const { default: JSZip } = await import("jszip")
     const zip = new JSZip()
     for (const [index, page] of pages.entries()) {
@@ -691,7 +1004,7 @@ zipDialog.addEventListener("close", () => {
       zip.file(name + "." + extensionFor(format), await exportPage(page, format))
     }
     saveFile(await zip.generateAsync({ type: "blob" }), "khung-thoai-" + format + ".zip")
-  })
+  }))
 })
 
 render()

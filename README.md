@@ -42,11 +42,29 @@ Kết quả nằm trong `desktop-dist/`. Mở `Khung-Thoai` trên Linux hoặc `
 4. Bấm **+ Khung chữ** rồi kéo hoặc bấm trên ảnh. Khi ảnh được lấy tiêu điểm, Enter đặt một khung ở giữa. Kéo khung đã có để di chuyển. Chọn khung để chỉnh nội dung, font, cỡ chữ, màu, canh, góc xoay và nền.
 5. Xuất PNG, PSD chứa lớp chữ chỉnh sửa được, PSD tách các khung thành lớp ảnh, hoặc ZIP chứa cả lượt. PSD có thể chứa riêng ảnh gốc, phần nền đã xóa chữ và nhóm thoại. Photoshop có thể hỏi cập nhật lớp chữ khi mở PSD. [Tài liệu ag-psd](https://github.com/Agamnentzar/ag-psd#updating-text-layers)
 
-Bấm **Lưu dự án** để tải tệp `.khungthoai` chứa ảnh gốc, thứ tự trang, kịch bản, khung thoại, câu chưa đặt và thiết lập dịch. Dùng **Mở dự án** trên web hoặc Electron để tiếp tục từ trang đang làm. Khóa API Gemini chỉ giữ trong phiên. Các chỉnh sửa sau lần lưu gần nhất cần được lưu lại trước khi đóng app hoặc tải lại trang.
+Bấm **Lưu dự án** để tải tệp `.khungthoai` chứa ảnh gốc, thứ tự trang, kịch bản, khung thoại, câu chưa đặt và thiết lập dịch. Dùng **Mở dự án** trên web hoặc Electron để tiếp tục từ trang đang làm. Tệp v2 lưu thêm mẫu chữ, vùng xóa, nét cọ, bảng thuật ngữ và tiến độ dịch. Ứng dụng tiếp tục đọc tệp v1. Khóa API Gemini chỉ giữ trong phiên. Các chỉnh sửa sau lần lưu gần nhất cần được lưu lại trước khi đóng app hoặc tải lại trang.
+
+## Hoàn tác và mẫu dàn chữ
+
+Dùng **Hoàn tác** / **Làm lại** hoặc Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z (Ctrl+Y cũng được). Lịch sử giữ tối đa 40 thao tác trong phiên, gồm thêm/bỏ trang, sắp xếp, dàn thoại, sửa/kéo/xóa khung, đặt câu chờ, áp dụng mẫu, vẽ cọ và dịch. Trong ô nhập, phím tắt dùng lịch sử nhập văn bản của trình duyệt. Mở dự án khác sẽ bắt đầu lịch sử mới.
+
+Chọn và lưu một khung, nhập tên trong **Mẫu dàn chữ** rồi bấm **Lưu kiểu khung đang chọn**. Mẫu chứa font, cỡ, màu, canh, góc xoay và nền trắng. Áp dụng mẫu cho khung đang chọn, mọi khung trên trang hoặc cả chương. Lưu cùng tên sẽ cập nhật mẫu đó. Mẫu được giữ trong tệp dự án.
+
+## Chỉnh vùng xóa chữ
+
+Chọn khung thoại rồi chọn **Khoanh vùng xóa** và kéo trên ảnh. Vùng này giữ nguyên khi di chuyển chữ. **Cọ giữ nền gốc** loại phần nét vẽ cần giữ khỏi vùng xóa, **Cọ thêm vùng xóa** đưa phần đã loại trở lại. Cỡ cọ tính theo pixel ảnh gốc và chỉ tác động trong vùng đã khoanh. **Đặt lại vùng xóa** bỏ các nét cọ và dùng vùng OCR nếu có, hoặc khung chữ hiện tại.
+
+Bật/tắt **Hiện redraw** và **Hiện chữ** để so sánh với ảnh gốc. Các nút này chỉ điều khiển xem trước. PNG và PSD luôn xuất đầy đủ lớp đang biên tập, bao gồm mặt nạ cọ. Redraw tiếp tục phục hồi các pixel đủ tin cậy bằng thuật toán nền sáng trên web hoặc lõi C# trên desktop.
+
+## Rà trước khi xuất
+
+**Rà trước khi xuất** liệt kê câu chưa đặt, chữ tràn khung, trang dịch lỗi, lượt dịch chưa xong và thiết lập dịch đã đổi. Bấm vào một mục để đến trang hoặc khung tương ứng. Khi xuất PNG, PSD hoặc ZIP có các mục này, ứng dụng mở bảng kiểm tra và cho phép **Vẫn xuất** sau khi xem lại.
 
 ## Dịch bằng Gemini
 
-Mở **Dịch ảnh bằng Gemini**, nhập khóa API, chọn ngôn ngữ rồi bấm **Dịch trang đang mở** hoặc **Dịch cả lượt**. Gemini đọc chữ và khung trước, sau đó dịch theo mã thoại. Khi dịch nhiều trang, câu dịch gần nhất được dùng làm ngữ cảnh cho trang sau. Trình duyệt gửi ảnh và ghi chú trực tiếp đến Google Generative Language API. Ứng dụng giữ khóa trong trường nhập của phiên hiện tại. [Tài liệu Gemini](https://ai.google.dev/api/generate-content)
+Mở **Dịch ảnh bằng Gemini**, nhập khóa API, chọn ngôn ngữ rồi bấm **Dịch trang đang mở** hoặc **Dịch cả lượt**. Gemini đọc chữ và khung trước, sau đó dịch theo mã thoại. Khi dịch nhiều trang, câu dịch gần nhất được dùng làm ngữ cảnh cho trang sau. Nhập bảng thuật ngữ theo dạng `từ gốc = từ dịch`, mỗi mục một dòng, để Gemini dùng nhất quán trong chương. Ghi chú và bảng thuật ngữ được lưu theo dự án.
+
+Trạng thái từng trang hiện dưới tên ảnh. Nếu một trang lỗi, các trang đã dịch vẫn giữ kết quả. **Tiếp tục dịch chương** bắt đầu từ trang đầu chưa hoàn tất theo thiết lập hiện tại và xử lý các trang phía sau với ngữ cảnh nối tiếp. Nút **Dừng dịch** hủy yêu cầu đang chạy, giữ các trang đã xong. Có thể lưu dự án rồi mở lại để tiếp tục. Đổi model, ngôn ngữ, hướng đọc, ghi chú hoặc bảng thuật ngữ sẽ yêu cầu xử lý lại các trang theo thiết lập mới. Trình duyệt gửi ảnh và ghi chú trực tiếp đến Google Generative Language API. Ứng dụng giữ khóa trong trường nhập của phiên hiện tại. [Tài liệu Gemini](https://ai.google.dev/api/generate-content)
 
 Nếu đã có bản dịch, nhập kịch bản rồi bấm **Ghép nghĩa kịch bản trang này**. Dịch và ghép nghĩa đều ưu tiên khung có sẵn trên trang. Khi trang trống, chúng dùng khung OCR. Các câu không có tọa độ đáng tin cậy hoặc xung đột được giữ trong **Chưa đặt** để xử lý thủ công.
 

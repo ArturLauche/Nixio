@@ -30,6 +30,7 @@ function sampleProject() {
       "source-language": "Japanese",
       "target-language": "Vietnamese",
       "translation-notes": "Giữ nguyên tên riêng",
+      "translation-glossary": "",
       "gemini-key": "never-store-this-key",
     },
     currentPage: 1,
@@ -68,10 +69,51 @@ test("a script-only project round-trips without a selected page", async () => {
 test("project reader rejects unknown versions, malformed metadata and incomplete image payloads", async () => {
   const file = writeProject(sampleProject())
   const source = await file.text()
-  await assert.rejects(readProject(new Blob([source.replace('"version":1', '"version":2')])), /Phiên bản/)
+  await assert.rejects(readProject(new Blob([source.replace('"version":2', '"version":9')])), /Phiên bản/)
   await assert.rejects(readProject(new Blob([source.replace('"currentPage":1', '"currentPage":2')])), /không hợp lệ/)
   await assert.rejects(readProject(new Blob([source.replace('"rotation":-30', '"rotation":999')])), /không hợp lệ/)
   await assert.rejects(readProject(file.slice(0, -1)), /không hợp lệ/)
   await assert.rejects(readProject(new Blob([file, "trailing bytes"])), /không hợp lệ/)
   await assert.rejects(readProject(new Blob(["not a project"])), /không hợp lệ/)
+})
+
+test("version 2 persists independent cleanup strokes, presets and interrupted translation jobs", async () => {
+  const project = sampleProject()
+  const box = project.pages[0].boxes[0]
+  box.cleanupRect = { x: .2, y: .2, w: .3, h: .4 }
+  box.cleanupStrokes = [{ mode: "erase", size: .05, points: [{ x: .25, y: .3 }, { x: .3, y: .35 }] }]
+  project.presets = [{ name: "Thoại", style: { size: box.size, font: box.font, color: box.color, align: box.align, rotation: box.rotation, fill: box.fill } }]
+  project.pages[0].translationJob = { kind: "translate", signature: "saved", state: "running" }
+  const opened = await readProject(writeProject(project))
+  assert.deepEqual(opened.pages[0].boxes[0], box)
+  assert.deepEqual(opened.presets, project.presets)
+  assert.equal(opened.pages[0].translationJob.state, "pending")
+})
+
+test("version 1 projects open with empty presets and glossary", async () => {
+  const project = sampleProject()
+  const file = writeProject(project)
+  const headerSize = 15
+  const length = new DataView(await file.slice(0, headerSize).arrayBuffer()).getUint32(11, true)
+  const metadata = JSON.parse(await file.slice(headerSize, headerSize + length).text())
+  metadata.version = 1
+  delete metadata.presets
+  delete metadata.settings["translation-glossary"]
+  const manifest = new TextEncoder().encode(JSON.stringify(metadata))
+  const header = new Uint8Array(await file.slice(0, headerSize).arrayBuffer())
+  new DataView(header.buffer).setUint32(11, manifest.length, true)
+  const oldFile = new Blob([header, manifest, file.slice(headerSize + length)])
+  const opened = await readProject(oldFile)
+  assert.equal(opened.settings["translation-glossary"], "")
+  assert.deepEqual(opened.presets, [])
+  assert.equal(opened.pages[0].boxes[0].text, project.pages[0].boxes[0].text)
+})
+
+test("invalid masks and preset styles cannot be saved", () => {
+  const project = sampleProject()
+  project.pages[0].boxes[0].cleanupStrokes = [{ mode: "erase", size: .1, points: [] }]
+  assert.throws(() => writeProject(project), /không hợp lệ/)
+  delete project.pages[0].boxes[0].cleanupStrokes
+  project.presets = [{ name: "Broken", style: { ...project.pages[0].boxes[0], size: -2 } }]
+  assert.throws(() => writeProject(project), /không hợp lệ/)
 })

@@ -1,3 +1,4 @@
+import { cleanupRectangle, maskCleanup } from "./cleanup.js"
 const luma = (pixels, index) => (pixels[index] * 54 + pixels[index + 1] * 183 + pixels[index + 2] * 19) / 256
 
 function estimatePaper(pixels, width, height, inner) {
@@ -116,9 +117,11 @@ const emptyLayout = { patches: [], pending: null }
 let desktopQueue = Promise.resolve()
 
 export function redrawLayout(page, { cancellable = true } = {}) {
-  const rectangles = page.boxes.filter((box) => box.cleanup).map((box) => box.originalBox ?? box)
+  const boxes = page.boxes.filter((box) => box.cleanup)
+  const rectangles = boxes.map(cleanupRectangle)
   if (!rectangles.length) return emptyLayout
-  const signature = JSON.stringify(rectangles.map(({ x, y, w, h }) => [x, y, w, h]))
+  const signature = JSON.stringify(rectangles.map(({ x, y, w, h }, index) => [x, y, w, h, boxes[index].cleanupStrokes]))
+  const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes) }))
   const cached = cachedRedraw.get(page.image)
   if (cached?.signature === signature) {
     if (!cancellable) cached.cancellable = false
@@ -130,11 +133,11 @@ export function redrawLayout(page, { cancellable = true } = {}) {
   if (globalThis.khungThoaiDesktop) {
     const task = desktopQueue.then(async () => {
       try {
-        for (const rectangle of rectangles) {
+        for (const [index, rectangle] of rectangles.entries()) {
           if (layout.superseded && layout.cancellable) return
           const patch = await cleanupPatch(page.image, rectangle)
           if (layout.superseded && layout.cancellable) return
-          if (patch) layout.patches.push(patch)
+          if (patch) layout.patches.push(maskCleanup(patch, masks[index], page.image))
         }
       } finally {
         layout.pending = null
@@ -143,7 +146,7 @@ export function redrawLayout(page, { cancellable = true } = {}) {
     layout.pending = task
     desktopQueue = task.catch(() => {})
   } else {
-    layout.patches = rectangles.map((rect) => cleanupPatch(page.image, rect)).filter(Boolean)
+    layout.patches = rectangles.map((rect, index) => maskCleanup(cleanupPatch(page.image, rect), masks[index], page.image)).filter(Boolean)
   }
   cachedRedraw.delete(page.image)
   cachedRedraw.set(page.image, layout)

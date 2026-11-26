@@ -98,7 +98,7 @@ function drawBox(canvas, box, {
   context.restore()
 }
 
-function paintPage(canvas, page, patches) {
+function paintPage(canvas, page, patches, { showCleanup = true, showText = true } = {}) {
   const width = page.image.naturalWidth
   const height = page.image.naturalHeight
   if (canvas.width !== width || canvas.height !== height) {
@@ -108,13 +108,13 @@ function paintPage(canvas, page, patches) {
   const context = canvas.getContext("2d")
   context.clearRect(0, 0, width, height)
   context.drawImage(page.image, 0, 0)
-  paintRedraw(canvas, patches)
-  page.boxes.forEach((box) => drawBox(canvas, box))
+  if (showCleanup) paintRedraw(canvas, patches)
+  if (showText) page.boxes.forEach((box) => drawBox(canvas, box))
 }
 
-export function drawPage(canvas, page) {
+export function drawPage(canvas, page, options) {
   const redraw = redrawLayout(page)
-  paintPage(canvas, page, redraw.patches)
+  paintPage(canvas, page, redraw.patches, options)
   return redraw.pending
 }
 
@@ -183,4 +183,12 @@ export async function exportPage(page, format) {
   if (dialogue.length) children.push({ name: "Thoại", opened: true, children: dialogue })
   const psd = writePsd({ width: base.width, height: base.height, canvas: composite, children }, { invalidateTextLayers: format === "psd" })
   return new Blob([psd], { type: "image/vnd.adobe.photoshop" })
+}
+
+export function textOverflows(page, box) {
+  const context = document.createElement("canvas").getContext("2d")
+  const g = geometry(context, box, page.image.naturalWidth, page.image.naturalHeight)
+  const padding = Math.max(2, Math.min(g.w, g.h) * .07)
+  return g.lines.length * g.lineHeight > g.h - padding * 2 ||
+    g.lines.some((line) => context.measureText(line).width > g.w - padding * 2 + .01)
 }
