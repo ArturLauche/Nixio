@@ -4,6 +4,7 @@ const { pathToFileURL } = require("node:url")
 const { NativeWorker } = require("./native-worker.cjs")
 const { TaskQueue } = require("./task-queue.cjs")
 const { ProjectFiles } = require("./project-files.cjs")
+const { webSearch, fetchUrl } = require("./web-search.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -97,7 +98,7 @@ app.whenReady().then(() => {
   })
   handle("khung-thoai:redraw-texture", (input) => imageWorker.available ? imageWorker.redraw(input) : undefined)
   handle("khung-thoai:native", (operation, options, data, taskId) => {
-    if (!["capabilities", "mask", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
+    if (!["capabilities", "mask", "inpaint", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
     if (["ocr", "preprocess", "png"].includes(operation) && taskId) return tasks.submit(taskId, operation, options, data)
     return imageWorker.call(operation, options, data)
   })
@@ -115,6 +116,8 @@ app.whenReady().then(() => {
     return projects.begin(mode, name, projectId)
   })
   handle("khung-thoai:project-write", (id, operation, options, data) => projects.write(id, operation, options, data))
+  handle("khung-thoai:web-search", (query, options) => webSearch(query, options))
+  handle("khung-thoai:fetch-url", (url, options) => fetchUrl(url, options))
 
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   session.defaultSession.setPermissionCheckHandler(() => false)
