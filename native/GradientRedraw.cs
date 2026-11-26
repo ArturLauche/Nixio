@@ -4,7 +4,8 @@ internal static partial class RedrawEngine
 {
     private readonly record struct PaperPlane(Vector3 Mean, Vector3 SlopeX, Vector3 SlopeY, double X, double Y)
     {
-        internal Vector3 At(int x, int y) => Mean + SlopeX * (float)(x - X) + SlopeY * (float)(y - Y);
+        internal Vector3 DeltaAt(int x, int y) => SlopeX * (float)(x - X) + SlopeY * (float)(y - Y);
+        internal Vector3 At(int x, int y) => Mean + DeltaAt(x, y);
     }
 
     private struct PlaneFit
@@ -47,16 +48,21 @@ internal static partial class RedrawEngine
         }
     }
 
-    private static PaperPlane? FitPaper(List<Sample> samples, Region area)
+    private static PaperPlane? ApproximatePaper(List<Sample> samples)
     {
         var fit = new PlaneFit();
         foreach (var sample in samples)
             fit.Add(sample);
-        if (fit.Solve() is not { } seed)
+        return fit.Solve();
+    }
+
+    private static PaperPlane? FitPaper(List<Sample> samples, Region area)
+    {
+        if (ApproximatePaper(samples) is not { } seed)
             return null;
 
         // Exclude ink passing through the outer ring, then verify that the fit still sees all sides.
-        fit = new PlaneFit();
+        var fit = new PlaneFit();
         foreach (var sample in samples)
             if (ColorError(seed, sample) <= 24)
                 fit.Add(sample);

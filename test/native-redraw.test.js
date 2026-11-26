@@ -129,3 +129,18 @@ test("native redraw restores a color gradient and protects an ink line crossing 
   assert.equal(result[crossing], 9)
   assert.equal(patch[crossing + 3], 0)
 })
+
+test("native redraw recovers screentone with a brightness gradient", { skip: !available }, async (context) => {
+  const worker = new TextureWorker(executable)
+  context.after(() => worker.close())
+  const shadedDots = (x, y) => 120 + Math.round(x * .45 + y * .22) - (x % 6 < 2 && y % 6 < 2 ? 78 : 0)
+  const expected = cropWithPatch(sample(shadedDots))
+  const inked = sample(shadedDots)
+  drawInk(inked)
+  const patch = await worker.redraw(inked)
+  assert.ok(patch?.length)
+  const result = cropWithPatch(inked, patch)
+  let error = 0
+  for (let i = 0; i < result.length; i++) error = Math.max(error, Math.abs(result[i] - expected[i]))
+  assert.ok(error <= 3, "maximum RGBA error: " + error)
+})

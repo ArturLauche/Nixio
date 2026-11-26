@@ -48,3 +48,5 @@ C# chạy trong tiến trình riêng với dữ liệu RGBA được giới hạ
 Trên một ảnh thử 480 × 640 có nền chấm lặp và ảnh sạch để đối chiếu, sai số tuyệt đối trung bình tại 1.291 điểm bị mực che giảm từ 216,04 xuống 3,55 trên thang 255. Trung vị của tám lượt gửi vùng 260 × 240 qua Electron IPC sau lượt làm nóng là 5,7 ms trên môi trường thử. Các phép đo dùng dữ liệu tổng hợp. Bản Linux x64 đã được mở để kiểm tra nhập ảnh, xem trước và xuất PNG/PSD. Bản Windows x64 được biên dịch và đóng gói trên Linux.
 
 Trên một ảnh thử chuyển sắc 480 × 640, bản Electron Linux phục hồi đúng màu RGB của ảnh sạch ở 1.291 điểm bị chữ che. Nét thử cắt qua mép khung được giữ lại và PSD xuất giữ riêng lớp redraw, ảnh gốc và chữ chỉnh sửa được. Trung vị của tám lượt xử lý vùng 260 × 240 sau lượt làm nóng là 6,8 ms, tính cả Electron IPC.
+
+Với screentone trên nền chuyển sắc, lõi ước tính độ dốc RGB từ vòng lấy mẫu rồi thử nhận diện chu kỳ trên phần màu còn lại. Khi phục hồi, lõi cộng lại độ dốc theo tọa độ từng pixel. Trong bài kiểm thử đầu-cuối trên bản Electron Linux, PNG xuất có sai số tối đa 1/255 ở vùng chữ của ảnh tổng hợp. Bản Linux cũng đã xuất PSD thành công.
