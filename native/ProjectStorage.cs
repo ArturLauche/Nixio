@@ -60,6 +60,7 @@ internal sealed class ProjectStorage : IDisposable
                 item.Stream.Write(data);
                 return (new JsonObject(), []);
             }
+            case "zipAppend":
             case "zipPage":
             {
                 var item = Get(options);
@@ -69,7 +70,10 @@ internal sealed class ProjectStorage : IDisposable
                     pageCounts[(string)options["id"]!] >= 50) throw new InvalidDataException("Invalid ZIP page name.");
                 pageCounts[(string)options["id"]!]++;
                 using var entry = item.Zip.CreateEntry(name, CompressionLevel.NoCompression).Open();
-                entry.Write(NativeImaging.CompositePng(options, data));
+                var png = operation == "zipPage" ? NativeImaging.CompositePng(options, data) : data;
+                if (png.Length < 8 || !png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }))
+                    throw new InvalidDataException("Invalid PNG page.");
+                entry.Write(png);
                 return (new JsonObject(), []);
             }
             case "fileCommit":

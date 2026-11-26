@@ -94,10 +94,12 @@ internal static class NativeImaging
         var high = Math.Max(low + 1, Percentile(.99));
         var denoise = (bool?)options["denoise"] ?? true;
         var output = new byte[width * height * scale * scale * 4];
+        NativeProgress.Emit(5, "Chuẩn hóa độ tương phản");
         Span<byte> neighbors = stackalloc byte[5];
         for (var y = 0; y < height; y++)
         for (var x = 0; x < width; x++)
         {
+            if (x == 0 && y % 64 == 0) NativeProgress.Emit(5 + 65d * y / height, "Lọc nhiễu và phóng ảnh");
             var value = (int)gray[y * width + x];
             if (denoise && x > 0 && y > 0 && x < width - 1 && y < height - 1)
             {
@@ -118,7 +120,25 @@ internal static class NativeImaging
                 output[offset + 3] = 255;
             }
         }
-        return (new JsonObject { ["width"] = width * scale, ["height"] = height * scale }, output);
+        var outputWidth = width * scale;
+        var outputHeight = height * scale;
+        var rotation = (int?)options["rotation"] ?? 0;
+        if (rotation is not (0 or 90 or 180 or 270)) throw new InvalidDataException("Invalid OCR rotation.");
+        if (rotation != 0)
+        {
+            var rotated = new byte[output.Length];
+            var rotatedWidth = rotation == 180 ? outputWidth : outputHeight;
+            for (var y = 0; y < outputHeight; y++)
+            for (var x = 0; x < outputWidth; x++)
+            {
+                var rx = rotation == 90 ? outputHeight - 1 - y : rotation == 180 ? outputWidth - 1 - x : y;
+                var ry = rotation == 90 ? x : rotation == 180 ? outputHeight - 1 - y : outputWidth - 1 - x;
+                output.AsSpan((y * outputWidth + x) * 4, 4).CopyTo(rotated.AsSpan((ry * rotatedWidth + rx) * 4));
+            }
+            output = rotated;
+            if (rotation != 180) (outputWidth, outputHeight) = (outputHeight, outputWidth);
+        }
+        return (new JsonObject { ["width"] = outputWidth, ["height"] = outputHeight }, output);
 
         int Percentile(double fraction)
         {
@@ -139,6 +159,7 @@ internal static class NativeImaging
         var length = checked(width * height * 4);
         Dimensions(options, length);
         if (data.Length < (long)length * 2) throw new InvalidDataException("Missing image layers.");
+        NativeProgress.Emit(5, "Ghép ảnh gốc");
         var output = data.AsSpan(0, length).ToArray();
         var offset = length * 2;
         foreach (var patch in options["patches"]?.AsArray() ?? [])
@@ -154,7 +175,9 @@ internal static class NativeImaging
             offset += w * h * 4;
         }
         if (offset != data.Length) throw new InvalidDataException("Unexpected export payload.");
+        NativeProgress.Emit(45, "Ghép chữ");
         for (var index = 0; index < length; index += 4) Blend(output, index, data, length + index);
+        NativeProgress.Emit(75, "Mã hóa PNG");
         return Png(output, width, height);
     }
 
