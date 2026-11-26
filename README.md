@@ -42,7 +42,7 @@ Kết quả nằm trong `desktop-dist/`. Mở `Khung-Thoai` trên Linux hoặc `
 4. Bấm **+ Khung chữ** rồi kéo hoặc bấm trên ảnh. Khi ảnh được lấy tiêu điểm, Enter đặt một khung ở giữa. Kéo khung đã có để di chuyển. Chọn khung để chỉnh nội dung, font, cỡ chữ, màu, canh, góc xoay và nền.
 5. Xuất PNG, PSD chứa lớp chữ chỉnh sửa được, PSD tách các khung thành lớp ảnh, hoặc ZIP chứa cả lượt. PSD có thể chứa riêng ảnh gốc, phần nền đã xóa chữ và nhóm thoại. Photoshop có thể hỏi cập nhật lớp chữ khi mở PSD. [Tài liệu ag-psd](https://github.com/Agamnentzar/ag-psd#updating-text-layers)
 
-Ảnh và thao tác biên tập được giữ trong phiên mở trang. Tải tệp xuất trước khi làm mới hoặc đóng tab.
+Bấm **Lưu dự án** để tải tệp `.khungthoai` chứa ảnh gốc, thứ tự trang, kịch bản, khung thoại, câu chưa đặt và thiết lập dịch. Dùng **Mở dự án** trên web hoặc Electron để tiếp tục từ trang đang làm. Khóa API Gemini chỉ giữ trong phiên. Các chỉnh sửa sau lần lưu gần nhất cần được lưu lại trước khi đóng app hoặc tải lại trang.
 
 ## Dịch bằng Gemini
 
