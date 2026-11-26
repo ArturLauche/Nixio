@@ -1,7 +1,8 @@
 const { app, BrowserWindow, ipcMain, net, protocol, session } = require("electron")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
-const { TextureWorker } = require("./worker.cjs")
+const { NativeWorker } = require("./native-worker.cjs")
+const { ProjectFiles } = require("./project-files.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -31,6 +32,7 @@ function workerExecutable() {
 
 let worker
 let mainWindow
+let closeApproved = false
 
 function localFile(url) {
   const { hostname, pathname } = new URL(url)
@@ -42,6 +44,7 @@ function localFile(url) {
 }
 
 function createWindow() {
+  closeApproved = false
   mainWindow = new BrowserWindow({
     width: 1420,
     height: 930,
@@ -63,19 +66,41 @@ function createWindow() {
   webContents.setWindowOpenHandler(() => ({ action: "deny" }))
   webContents.on("will-navigate", (event) => event.preventDefault())
   webContents.on("will-attach-webview", (event) => event.preventDefault())
+  mainWindow.on("close", (event) => {
+    if (closeApproved || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isCrashed()) return
+    event.preventDefault()
+    mainWindow.webContents.send("khung-thoai:closing")
+  })
   mainWindow.once("ready-to-show", () => mainWindow.show())
   mainWindow.on("closed", () => { mainWindow = null })
   mainWindow.loadURL(entry)
 }
 
 app.whenReady().then(() => {
-  worker = new TextureWorker(workerExecutable())
-  ipcMain.handle("khung-thoai:redraw-texture", (event, input) => {
-    const frame = event.senderFrame
-    if (event.sender !== mainWindow?.webContents || frame?.parent || frame?.url.split("#", 1)[0] !== entry) return null
-    if (!worker.available) return undefined
-    return worker.redraw(input)
+  worker = new NativeWorker(workerExecutable())
+  const projects = new ProjectFiles(worker, app.getPath("userData"), () => mainWindow)
+  const trusted = (event) => event.sender === mainWindow?.webContents && !event.senderFrame?.parent &&
+    event.senderFrame?.url.split("#", 1)[0] === entry
+  const handle = (channel, action) => ipcMain.handle(channel, async (event, ...args) => {
+    if (!trusted(event)) return { error: "Untrusted desktop frame." }
+    try { return { value: await action(...args) } }
+    catch (error) { return { error: error.message } }
   })
+  handle("khung-thoai:redraw-texture", (input) => worker.available ? worker.redraw(input) : undefined)
+  handle("khung-thoai:native", (operation, options, data) => {
+    if (!["capabilities", "mask", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
+    return worker.call(operation, options, data)
+  })
+  handle("khung-thoai:close", () => { closeApproved = true; mainWindow.close() })
+  handle("khung-thoai:project-status", () => projects.status())
+  handle("khung-thoai:project-open", (mode) => projects.open(mode))
+  handle("khung-thoai:project-read", (id) => projects.read(id))
+  handle("khung-thoai:project-cancel-read", (id) => projects.cancelRead(id))
+  handle("khung-thoai:project-begin", (mode, name) => {
+    if (!["autosave", "project", "zip"].includes(mode)) throw new Error("Invalid save mode.")
+    return projects.begin(mode, name)
+  })
+  handle("khung-thoai:project-write", (id, operation, options, data) => projects.write(id, operation, options, data))
 
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   session.defaultSession.setPermissionCheckHandler(() => false)
@@ -96,7 +121,7 @@ app.whenReady().then(() => {
   app.on("activate", () => { if (!mainWindow) createWindow() })
 })
 
-app.on("before-quit", () => worker?.close())
+app.on("will-quit", () => worker?.close())
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })

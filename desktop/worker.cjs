@@ -44,7 +44,7 @@ class TextureWorker {
   }
 
   start() {
-    const child = spawn(this.executable, [], { windowsHide: true, stdio: ["pipe", "pipe", "ignore"] })
+    const child = spawn(this.executable, this.args ?? [], { windowsHide: true, stdio: ["pipe", "pipe", "ignore"], env: this.environment ?? process.env })
     this.child = child
     child.stdout.on("data", (chunk) => { if (this.child === child) this.read(chunk) })
     child.stdin.on("error", (error) => { if (this.child === child) this.stop(error) })

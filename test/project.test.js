@@ -81,6 +81,7 @@ test("version 2 persists independent cleanup strokes, presets and interrupted tr
   const project = sampleProject()
   const box = project.pages[0].boxes[0]
   box.cleanupRect = { x: .2, y: .2, w: .3, h: .4 }
+  box.cleanupExpand = -2
   box.cleanupStrokes = [{ mode: "erase", size: .05, points: [{ x: .25, y: .3 }, { x: .3, y: .35 }] }]
   project.presets = [{ name: "Thoại", style: { size: box.size, font: box.font, color: box.color, align: box.align, rotation: box.rotation, fill: box.fill } }]
   project.pages[0].translationJob = { kind: "translate", signature: "saved", state: "running" }

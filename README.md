@@ -34,6 +34,16 @@ npm run desktop:package -- win-x64
 
 Kết quả nằm trong `desktop-dist/`. Mở `Khung-Thoai` trên Linux hoặc `Khung-Thoai.exe` trên Windows. Các lệnh đóng gói cần kết nối mạng khi chưa có Electron và runtime .NET cho nền tảng đích trong bộ nhớ đệm.
 
+## Xử lý C# trên desktop
+
+Sau khi build worker, app bật **OCR trên máy**, tiền xử lý ảnh, mặt nạ cọ C#, xuất PNG/ZIP bằng C# và ghi dự án trực tiếp. **Lưu dự án** và **Mở dự án** dùng hộp chọn tệp của hệ điều hành. App tự lưu sau chỉnh sửa mỗi 20 giây và ghi thêm lần cuối khi đóng cửa sổ đang rảnh. **Khôi phục tự lưu** và **Bản tự lưu trước** mở các bản phục hồi sau khi khởi động lại. Tệp đã có được giữ thêm một bản `.bak` trước khi thay thế.
+
+OCR cục bộ cần Tesseract cùng gói ngôn ngữ. Giao diện chỉ liệt kê những ngôn ngữ đã cài. Chọn bố cục, phóng lớn và giảm nhiễu, xem ảnh tiền xử lý rồi bấm **Nhận dạng chữ**. Có thể giới hạn OCR trong khung đang chọn. Dòng chồng lên khung có sẵn được giữ trong **Chưa đặt** để bạn đối chiếu.
+
+Worker phục hồi screentone có chu kỳ đến 32 pixel và bảo vệ nét mực nối qua biên vùng xóa. **Nới / thu mặt nạ** chỉnh phần bảo vệ bằng cọ trong vùng đã khoanh. Bộ xuất C# ghép ảnh, redraw và lớp chữ theo thứ tự của bản xem trước, sau đó xuất PNG hoặc ZIP từng trang. Lớp chữ PSD chỉnh sửa được tiếp tục được tạo bằng ag-psd.
+
+Xem [hướng dẫn lõi native](native/README.md) để cài OCR, đóng gói engine, đọc giao thức và thêm tác vụ mới.
+
 ## Biên tập và xuất tệp
 
 1. Thêm tối đa 50 ảnh PNG, JPEG hoặc WebP. Dùng các nút lên và xuống để sắp xếp trang.

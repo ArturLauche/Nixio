@@ -1,4 +1,4 @@
-import { cleanupRectangle, maskCleanup } from "./cleanup.js"
+import { cleanupRectangle, maskCleanup, nativeMaskCleanup } from "./cleanup.js"
 const luma = (pixels, index) => (pixels[index] * 54 + pixels[index + 1] * 183 + pixels[index + 2] * 19) / 256
 
 function estimatePaper(pixels, width, height, inner) {
@@ -120,8 +120,8 @@ export function redrawLayout(page, { cancellable = true } = {}) {
   const boxes = page.boxes.filter((box) => box.cleanup)
   const rectangles = boxes.map(cleanupRectangle)
   if (!rectangles.length) return emptyLayout
-  const signature = JSON.stringify(rectangles.map(({ x, y, w, h }, index) => [x, y, w, h, boxes[index].cleanupStrokes]))
-  const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes) }))
+  const signature = JSON.stringify(rectangles.map(({ x, y, w, h }, index) => [x, y, w, h, boxes[index].cleanupStrokes, boxes[index].cleanupExpand]))
+  const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes), cleanupExpand: box.cleanupExpand }))
   const cached = cachedRedraw.get(page.image)
   if (cached?.signature === signature) {
     if (!cancellable) cached.cancellable = false
@@ -137,7 +137,7 @@ export function redrawLayout(page, { cancellable = true } = {}) {
           if (layout.superseded && layout.cancellable) return
           const patch = await cleanupPatch(page.image, rectangle)
           if (layout.superseded && layout.cancellable) return
-          if (patch) layout.patches.push(maskCleanup(patch, masks[index], page.image))
+          if (patch) layout.patches.push(await nativeMaskCleanup(patch, masks[index], page.image))
         }
       } finally {
         layout.pending = null

@@ -26,6 +26,13 @@
           <button type="button" class="button" id="save-project">Lưu dự án</button>
           <input type="file" id="project-file" accept=".khungthoai" hidden>
         </div>
+        <div id="desktop-recovery" hidden>
+          <p id="autosave-status" class="muted" role="status"></p>
+          <div class="form-actions">
+            <button type="button" id="recover-project" class="button" hidden>Khôi phục tự lưu</button>
+            <button type="button" id="recover-backup" class="button" hidden>Bản tự lưu trước</button>
+          </div>
+        </div>
         <label class="dropzone" id="dropzone" for="images">
           <span class="upload-symbol" aria-hidden="true">↑</span>
           <strong>Thêm ảnh</strong>
@@ -82,6 +89,23 @@
           <button type="button" class="button full" id="stop-translation" disabled>Dừng dịch</button>
           <button type="button" class="button full" id="align-script">Ghép nghĩa kịch bản trang này</button>
         </details>
+      </section>
+      <section class="side-section" id="local-processing" hidden>
+        <h2>OCR trên máy</h2>
+        <p class="muted" id="native-status"></p>
+        <label class="field" for="local-ocr-language">Ngôn ngữ đã cài<select id="local-ocr-language"></select></label>
+        <label class="field" for="local-ocr-layout">Bố cục
+          <select id="local-ocr-layout"><option value="11">Chữ rải rác</option><option value="6">Một khối chữ</option><option value="3">Tự động toàn trang</option></select>
+        </label>
+        <label class="field" for="ocr-scale">Phóng lớn
+          <select id="ocr-scale"><option value="1">1×</option><option value="2" selected>2×</option><option value="3">3×</option></select>
+        </label>
+        <label class="choice"><input type="checkbox" id="ocr-denoise" checked>Giảm nhiễu</label>
+        <label class="choice"><input type="checkbox" id="ocr-crop">Chỉ đọc vùng khung đang chọn</label>
+        <div class="form-actions">
+          <button type="button" class="button" id="preview-ocr">Xem ảnh tiền xử lý</button>
+          <button type="button" class="button" id="run-local-ocr">Nhận dạng chữ</button>
+        </div>
       </section>
     </aside>
 
@@ -180,6 +204,9 @@
       <section class="side-section" id="cleanup-inspector" hidden>
         <h2>Vùng xóa chữ</h2>
         <p class="muted">Khoanh vùng trên ảnh. Dùng cọ giữ nét vẽ hoặc thêm lại vùng xóa trong khung.</p>
+        <label class="field" id="native-mask-control" for="cleanup-expand" hidden>Nới / thu mặt nạ (px)
+          <input id="cleanup-expand" type="number" min="-8" max="8" value="0">
+        </label>
         <button type="button" class="button" id="reset-cleanup">Đặt lại vùng xóa</button>
       </section>
       <section id="queue-section" class="side-section" hidden>
@@ -221,6 +248,11 @@
     </section>
   </main>
 
+  <dialog id="ocr-preview">
+    <h2>Ảnh tiền xử lý OCR</h2>
+    <canvas id="ocr-preview-canvas"></canvas>
+    <form method="dialog"><button class="button">Đóng</button></form>
+  </dialog>
   <dialog id="preflight-dialog">
     <h2>Rà trước khi xuất</h2>
     <p id="preflight-summary" class="muted"></p>
