@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123e32">
+  <title>Khung Thoại — Biên tập trang truyện</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="wordmark" href="#editor" data-view="editor"><span>KT</span> Khung Thoại</a>
+    <nav aria-label="Không gian làm việc">
+      <a href="#editor" data-view="editor" aria-current="page">Biên tập</a>
+      <a href="#library" data-view="library">Thư viện chương</a>
+    </nav>
+    <button type="button" class="button header-export" id="export-all">Xuất cả lượt</button>
+  </header>
+
+  <main id="editor" class="editor-layout">
+    <aside class="sidebar" aria-label="Ảnh và kịch bản">
+      <section class="side-section">
+        <div class="section-heading"><h1>Trang truyện</h1><span id="page-count">0 / 50</span></div>
+        <label class="dropzone" id="dropzone" for="images">
+          <span class="upload-symbol" aria-hidden="true">↑</span>
+          <strong>Thêm ảnh</strong>
+          <small>PNG, JPEG hoặc WebP</small>
+          <input id="images" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" multiple>
+        </label>
+        <ol id="pages" class="page-list" aria-label="Thứ tự trang"></ol>
+      </section>
+
+      <section class="side-section">
+        <div class="section-heading"><h2>Kịch bản</h2></div>
+        <label for="script-file" class="file-label">Nhập TXT, DOCX hoặc XLSX</label>
+        <input id="script-file" class="sr-only" type="file" accept=".txt,.docx,.xlsx">
+        <label for="script-text">Lời thoại</label>
+        <textarea id="script-text" rows="4" placeholder="Trang 1&#10;Mỗi câu thoại một dòng"></textarea>
+        <label class="field" for="direction">Hướng đọc
+          <select id="direction">
+            <option value="rtl">Phải sang trái</option><option value="ltr">Trái sang phải</option>
+          </select>
+        </label>
+        <button type="button" id="apply-script" class="button full">Dàn thoại lên ảnh</button>
+        <details class="translation">
+          <summary>Dịch ảnh bằng Gemini</summary>
+          <label class="field" for="gemini-key">Khóa API
+            <input id="gemini-key" type="password" autocomplete="off">
+          </label>
+          <label class="field" for="source-language">Ngôn ngữ gốc
+            <select id="source-language">
+              <option value="Japanese">Tiếng Nhật</option><option value="Korean">Tiếng Hàn</option>
+              <option value="Chinese">Tiếng Trung</option><option value="English">Tiếng Anh</option>
+            </select>
+          </label>
+          <label class="field" for="target-language">Dịch sang
+            <select id="target-language">
+              <option value="Vietnamese">Tiếng Việt</option><option value="English">Tiếng Anh</option>
+            </select>
+          </label>
+          <label class="field" for="translation-notes">Thuật ngữ và xưng hô
+            <textarea id="translation-notes" rows="2"></textarea>
+          </label>
+          <button type="button" class="button full" id="translate">Dịch trang đang mở</button>
+        </details>
+      </section>
+    </aside>
+
+    <section class="main-panel" aria-label="Bản vẽ">
+      <div class="canvas-toolbar">
+        <div class="navigation">
+          <button type="button" id="prev-page" aria-label="Trang trước">←</button>
+          <span id="page-indicator">Chưa có trang</span>
+          <button type="button" id="next-page" aria-label="Trang sau">→</button>
+        </div>
+        <div class="canvas-actions">
+          <button type="button" id="fit-page">Vừa trang</button>
+          <button type="button" id="add-box" aria-pressed="false">+ Khung chữ</button>
+        </div>
+      </div>
+      <div class="viewport" id="viewport">
+        <div id="canvas-empty" class="empty">
+          <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span></div>
+          <h2>Mở một trang truyện</h2>
+          <p>Thêm ảnh ở cột bên trái để bắt đầu dàn chữ.</p>
+        </div>
+        <div id="stage" class="stage" tabindex="0" aria-label="Ảnh trang truyện, nhấn Enter để thêm khung chữ" hidden>
+          <canvas id="page-canvas"></canvas>
+          <div id="overlays" class="overlays"></div>
+        </div>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite">Sẵn sàng.</p>
+    </section>
+
+    <aside class="inspector" aria-label="Chỉnh khung thoại">
+      <section class="side-section">
+        <div class="section-heading"><h2>Khung chữ</h2><span id="box-count">0</span></div>
+        <ol id="boxes" class="box-list" aria-label="Khung của trang hiện tại"></ol>
+        <p id="inspector-empty" class="muted">Chọn một khung trên ảnh để chỉnh thoại và kiểu chữ.</p>
+        <form id="box-form" hidden>
+          <label class="field" for="box-text">Nội dung
+            <textarea id="box-text" rows="4" required></textarea>
+          </label>
+          <label class="field" for="box-font">Font
+            <select id="box-font">
+              <option value="Arial">Arial</option><option value="Georgia">Georgia</option>
+              <option value="Verdana">Verdana</option><option value="Times New Roman">Times New Roman</option>
+            </select>
+          </label>
+          <div class="two-fields">
+            <label class="field" for="box-size">Cỡ (px)<input id="box-size" type="number" min="8" max="400" required></label>
+            <label class="field" for="box-color">Màu<input id="box-color" type="color"></label>
+          </div>
+          <div class="two-fields">
+            <label class="field" for="box-align">Canh chữ
+              <select id="box-align"><option value="center">Giữa</option><option value="left">Trái</option><option value="right">Phải</option></select>
+            </label>
+            <label class="field" for="box-rotation">Góc (°)<input id="box-rotation" type="number" min="-180" max="180" required></label>
+          </div>
+          <label class="choice"><input id="box-fill" type="checkbox"> Nền trắng dưới thoại</label>
+          <div class="form-actions">
+            <button type="submit" class="button primary">Lưu khung</button>
+            <button type="button" id="delete-box" class="button danger">Xóa</button>
+          </div>
+        </form>
+      </section>
+      <section id="queue-section" class="side-section" hidden>
+        <div class="section-heading"><h2>Chưa đặt</h2></div>
+        <p class="muted">Bấm một câu để đặt trên trang hiện tại.</p>
+        <ol id="queue" class="box-list"></ol>
+      </section>
+      <section class="side-section exports">
+        <h2>Xuất trang</h2>
+        <button type="button" class="button" data-export="png">PNG</button>
+        <button type="button" class="button" data-export="psd">PSD chữ</button>
+        <button type="button" class="button" data-export="raster">PSD ảnh</button>
+      </section>
+    </aside>
+  </main>
+
+  <main id="library" class="library" hidden>
+    <section class="library-panel">
+      <h1>Thư viện chương</h1>
+      <p>Nhập danh mục JSON của bạn để tìm truyện, đọc chương và tải ảnh về.</p>
+      <label for="catalog-file" class="button file-label">Nhập danh mục JSON</label>
+      <input id="catalog-file" type="file" accept=".json,application/json" class="sr-only">
+      <label class="field" for="catalog-search">Tên truyện
+        <input id="catalog-search" type="search" placeholder="Tìm theo tên hoặc tên khác">
+      </label>
+      <div id="catalog-results"></div>
+      <label class="field" for="chapter-select">Chương<select id="chapter-select" disabled></select></label>
+      <div class="form-actions">
+        <button type="button" id="read-chapter" class="button primary" disabled>Đọc chương</button>
+        <button type="button" id="import-chapter" class="button" disabled>Đưa vào biên tập</button>
+        <button type="button" id="download-chapter" class="button" disabled>Tải ảnh ZIP</button>
+      </div>
+      <p id="library-status" class="muted" role="status" aria-live="polite"></p>
+    </section>
+    <section id="reader" class="reader" aria-label="Trang đọc" hidden>
+      <div class="reader-tools"><h2 id="reader-title"></h2><label for="reader-page">Đến trang <select id="reader-page"></select></label><button type="button" id="close-reader" class="button">Đóng</button></div>
+      <div id="reader-images"></div>
+    </section>
+  </main>
+
+  <dialog id="zip-dialog">
+    <form method="dialog">
+      <h2>Xuất toàn bộ trang</h2>
+      <label class="field" for="zip-format">Định dạng
+        <select id="zip-format"><option value="png">ZIP ảnh PNG</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+      </label>
+      <div class="form-actions">
+        <button value="cancel" class="button">Hủy</button>
+        <button value="export" class="button primary">Tải ZIP</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
