@@ -2,7 +2,7 @@ import { imageMimeType, imageTypes } from "./io.js"
 
 export const projectExtension = ".khungthoai"
 export const projectPageLimit = 50
-export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes"]
+export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes", "translation-glossary"]
 
 const encoder = new TextEncoder()
 // The header stores the UTF-8 manifest length. The original image bytes follow in page order.
@@ -22,17 +22,39 @@ function rectangle(rect) {
   return { x, y, w, h }
 }
 
-function projectBox(box) {
-  const { text, size, font, color, align, rotation, fill, cleanup = false, originalBox } = box ?? {}
-  if (!isText(text) || !inRange(size, 8, 400) || !["Arial", "Georgia", "Verdana", "Times New Roman"].includes(font) ||
+export function projectStyle(style) {
+  const { size, font, color, align, rotation, fill } = style ?? {}
+  if (!inRange(size, 8, 400) || !["Arial", "Georgia", "Verdana", "Times New Roman"].includes(font) ||
       !isText(color) || !/^#[\da-f]{6}$/i.test(color) || !["left", "center", "right"].includes(align) ||
-      !inRange(rotation, -180, 180) || typeof fill !== "boolean" || typeof cleanup !== "boolean") {
-    throw invalidProject()
-  }
+      !inRange(rotation, -180, 180) || typeof fill !== "boolean") throw invalidProject()
+  return { size, font, color, align, rotation, fill }
+}
+
+function projectStroke(stroke) {
+  if (!["erase", "restore"].includes(stroke?.mode) || !inRange(stroke.size, .00001, 200) ||
+      !Array.isArray(stroke.points) || !stroke.points.length ||
+      !stroke.points.every((point) => isFraction(point?.x) && isFraction(point.y))) throw invalidProject()
+  return { mode: stroke.mode, size: stroke.size, points: stroke.points.map(({ x, y }) => ({ x, y })) }
+}
+
+function projectBox(box) {
+  const { text, cleanup = false, originalBox, cleanupRect, cleanupStrokes } = box ?? {}
+  if (!isText(text) || typeof cleanup !== "boolean" ||
+      (cleanupStrokes !== undefined && !Array.isArray(cleanupStrokes))) throw invalidProject()
   return {
-    ...rectangle(box), text, size, font, color, align, rotation, fill, cleanup,
+    ...rectangle(box), ...projectStyle(box), text, cleanup,
     ...(originalBox && { originalBox: rectangle(originalBox) }),
+    ...(cleanupRect && { cleanupRect: rectangle(cleanupRect) }),
+    ...(cleanupStrokes && { cleanupStrokes: cleanupStrokes.map(projectStroke) }),
   }
+}
+
+function projectJob(job) {
+  if (job === undefined) return undefined
+  if (!["pending", "running", "done", "error"].includes(job?.state) ||
+      !["translate", "align"].includes(job.kind) || !isText(job.signature) ||
+      (job.error !== undefined && !isText(job.error))) throw invalidProject()
+  return { kind: job.kind, signature: job.signature, state: job.state === "running" ? "pending" : job.state, error: job.error }
 }
 
 function projectLine(line) {
@@ -56,29 +78,33 @@ function projectContext(context) {
 }
 
 function projectPage(page) {
-  const { name, type, size, boxes, unplaced, translationContext } = page ?? {}
+  const { name, type, size, boxes, unplaced, translationContext, translationJob } = page ?? {}
   if (!isText(name) || !name || !imageTypes.has(type) || !Number.isSafeInteger(size) || size <= 0 ||
       !Array.isArray(boxes) || !Array.isArray(unplaced)) {
     throw invalidProject()
   }
-  return { name, type, size, boxes: boxes.map(projectBox), unplaced: unplaced.map(projectLine), translationContext: projectContext(translationContext) }
+  return { name, type, size, boxes: boxes.map(projectBox), unplaced: unplaced.map(projectLine), translationContext: projectContext(translationContext), translationJob: projectJob(translationJob) }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [] }) {
+  settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
       !Number.isInteger(currentPage) || (pages.length ? currentPage < 0 || currentPage >= pages.length : currentPage !== -1) ||
-      typeof fit !== "boolean") {
+      typeof fit !== "boolean" || !Array.isArray(presets) ||
+      !presets.every((preset) => isText(preset?.name) && preset.name.trim())) {
     throw invalidProject()
   }
-  return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit }
+  return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
+    presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
+  }
 }
 
 export function writeProject(project) {
-  const pages = project.pages.map(({ file, name, boxes, unplaced, translationContext }) => ({
-    name, type: imageMimeType(name, file.type), size: file.size, boxes, unplaced, translationContext,
+  const pages = project.pages.map(({ file, name, boxes, unplaced, translationContext, translationJob }) => ({
+    name, type: imageMimeType(name, file.type), size: file.size, boxes, unplaced, translationContext, translationJob,
   }))
-  const manifest = encoder.encode(JSON.stringify({ version: 1, ...projectData({ ...project, pages }) }))
+  const manifest = encoder.encode(JSON.stringify({ version: 2, ...projectData({ ...project, pages }) }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")
   const header = new Uint8Array(headerSize)
   header.set(magic)
@@ -101,7 +127,7 @@ export async function readProject(file) {
     throw invalidProject()
   }
   if (!Number.isInteger(manifest?.version) || manifest.version < 1) throw invalidProject()
-  if (manifest.version !== 1) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
+  if (![1, 2].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
   const project = projectData(manifest)
   if (project.pages.reduce((total, page) => total + page.size, offset) !== file.size) throw invalidProject()
   const pages = project.pages.map(({ name, type, size, ...page }) => {

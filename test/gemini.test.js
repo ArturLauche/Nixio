@@ -20,11 +20,13 @@ function installMocks(dataUrl, handler) {
 
 test("translateImage infers image MIME type from filename when FileReader reports octet-stream", async (t) => {
   const seenMimeTypes = []
+  const payloads = []
   let calls = 0
   const restore = installMocks("data:application/octet-stream;base64,AAAA", async (_url, options) => {
     const body = JSON.parse(options.body)
     seenMimeTypes.push(body.contents[0].parts[1].inlineData.mimeType)
     calls++
+    payloads.push(body.contents[0].parts[0].text)
     const text = calls === 1
       ? JSON.stringify({ lines: [{ box_2d: [100, 100, 200, 300], text: "こんにちは" }] })
       : JSON.stringify({ lines: [{ id: "B1", text: "Xin chào" }] })
@@ -43,10 +45,12 @@ test("translateImage infers image MIME type from filename when FileReader report
     target: "Vietnamese",
     direction: "rtl",
     notes: "",
+    glossary: "こんにちは = Xin chào",
     context: [],
     report: () => {},
   })
 
+  assert.ok(payloads[1].includes("こんにちは = Xin chào"))
   assert.deepEqual(seenMimeTypes, ["image/jpeg", "image/jpeg"])
   assert.deepEqual(result, [{ id: "B1", box: [100, 100, 300, 200], source: "こんにちは", text: "Xin chào" }])
 })
@@ -72,4 +76,19 @@ test("translateImage surfaces a clear error when Gemini returns malformed JSON",
     }),
     /JSON không hợp lệ/,
   )
+})
+
+test("stopping translation aborts the in-flight Gemini request", async (t) => {
+  const controller = new AbortController()
+  const restore = installMocks("data:image/png;base64,AAAA", async (_url, { signal }) => {
+    queueMicrotask(() => controller.abort())
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+    })
+  })
+  t.after(restore)
+  await assert.rejects(() => translateImage({ file: { name: "page.png", size: 128 } }, {
+    key: "test", model: "auto", source: "Japanese", target: "Vietnamese", direction: "rtl",
+    report: () => {}, signal: controller.signal,
+  }), { name: "AbortError" })
 })

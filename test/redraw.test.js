@@ -89,3 +89,28 @@ test("redrawLayout preserves non-cancellable export layouts when preview updates
   assert.equal(exportLayout.patches.length, 1)
   assert.equal(previewLayout.patches.length, 1)
 })
+
+test("moving text keeps a separately selected cleanup region and its cached native patch", async (t) => {
+  const samples = []
+  const restore = installCanvasMocks(async (sample) => {
+    samples.push(sample)
+    const { inner } = sample
+    return new Uint8Array((inner.right - inner.left) * (inner.bottom - inner.top) * 4).fill(255)
+  })
+  t.after(restore)
+  const page = {
+    image: { naturalWidth: 200, naturalHeight: 200 },
+    boxes: [{
+      x: .1, y: .1, w: .2, h: .2, cleanup: true,
+      cleanupRect: { x: .3, y: .4, w: .2, h: .2 },
+    }],
+  }
+  const first = redrawLayout(page)
+  await first.pending
+  assert.equal(first.patches[0].left, 60)
+  assert.equal(first.patches[0].top, 80)
+  page.boxes[0].x = .6
+  page.boxes[0].y = .7
+  assert.equal(redrawLayout(page), first)
+  assert.equal(samples.length, 1)
+})

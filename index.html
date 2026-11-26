@@ -70,11 +70,16 @@
               <option value="Vietnamese">Tiếng Việt</option><option value="English">Tiếng Anh</option>
             </select>
           </label>
-          <label class="field" for="translation-notes">Thuật ngữ và xưng hô
+          <label class="field" for="translation-notes">Ghi chú và xưng hô
             <textarea id="translation-notes" rows="2"></textarea>
+          </label>
+          <label class="field" for="translation-glossary">Bảng thuật ngữ
+            <textarea id="translation-glossary" rows="3" placeholder="Tên gốc = tên dịch, mỗi mục một dòng"></textarea>
           </label>
           <button type="button" class="button full" id="translate">Dịch trang đang mở</button>
           <button type="button" class="button full" id="translate-all">Dịch cả lượt</button>
+          <button type="button" class="button full" id="resume-translation">Tiếp tục dịch chương</button>
+          <button type="button" class="button full" id="stop-translation" disabled>Dừng dịch</button>
           <button type="button" class="button full" id="align-script">Ghép nghĩa kịch bản trang này</button>
         </details>
       </section>
@@ -88,9 +93,24 @@
           <button type="button" id="next-page" aria-label="Trang sau">→</button>
         </div>
         <div class="canvas-actions">
+          <button type="button" id="undo" aria-label="Hoàn tác (Ctrl+Z)" disabled>Hoàn tác</button>
+          <button type="button" id="redo" aria-label="Làm lại (Ctrl+Shift+Z)" disabled>Làm lại</button>
           <button type="button" id="fit-page">Vừa trang</button>
           <button type="button" id="add-box" aria-pressed="false">+ Khung chữ</button>
         </div>
+      </div>
+      <div class="cleanup-toolbar">
+        <label for="cleanup-tool">Công cụ
+          <select id="cleanup-tool">
+            <option value="text">Di chuyển chữ</option>
+            <option value="region">Khoanh vùng xóa</option>
+            <option value="erase">Cọ giữ nền gốc</option>
+            <option value="restore">Cọ thêm vùng xóa</option>
+          </select>
+        </label>
+        <label for="brush-size">Cỡ cọ (px)<input id="brush-size" type="number" min="1" max="200" value="20"></label>
+        <label class="choice"><input type="checkbox" id="show-cleanup" checked>Hiện redraw</label>
+        <label class="choice"><input type="checkbox" id="show-text" checked>Hiện chữ</label>
       </div>
       <div class="viewport" id="viewport">
         <div id="canvas-empty" class="empty">
@@ -100,6 +120,7 @@
         </div>
         <div id="stage" class="stage" tabindex="0" aria-label="Ảnh trang truyện, nhấn Enter để thêm khung chữ" hidden>
           <canvas id="page-canvas"></canvas>
+          <canvas id="cleanup-overlay" aria-hidden="true"></canvas>
           <div id="overlays" class="overlays"></div>
         </div>
       </div>
@@ -139,6 +160,28 @@
           </div>
         </form>
       </section>
+      <section class="side-section">
+        <h2>Mẫu dàn chữ</h2>
+        <label class="field" for="preset-name">Tên mẫu<input id="preset-name" maxlength="80"></label>
+        <button type="button" id="save-preset" class="button">Lưu kiểu khung đang chọn</button>
+        <label class="field" for="style-preset">Mẫu<select id="style-preset"></select></label>
+        <label class="field" for="preset-scope">Áp dụng cho
+          <select id="preset-scope">
+            <option value="box">Khung đang chọn</option>
+            <option value="page">Tất cả khung trên trang</option>
+            <option value="chapter">Tất cả khung trong chương</option>
+          </select>
+        </label>
+        <div class="form-actions">
+          <button type="button" id="apply-preset" class="button">Áp dụng mẫu</button>
+          <button type="button" id="delete-preset" class="button danger">Xóa mẫu</button>
+        </div>
+      </section>
+      <section class="side-section" id="cleanup-inspector" hidden>
+        <h2>Vùng xóa chữ</h2>
+        <p class="muted">Khoanh vùng trên ảnh. Dùng cọ giữ nét vẽ hoặc thêm lại vùng xóa trong khung.</p>
+        <button type="button" class="button" id="reset-cleanup">Đặt lại vùng xóa</button>
+      </section>
       <section id="queue-section" class="side-section" hidden>
         <div class="section-heading"><h2>Chưa đặt</h2></div>
         <p class="muted">Bấm một câu để đặt trên trang hiện tại.</p>
@@ -146,6 +189,7 @@
       </section>
       <section class="side-section exports">
         <h2>Xuất trang</h2>
+        <button type="button" class="button" id="check-export">Rà trước khi xuất</button>
         <button type="button" class="button" data-export="png">PNG</button>
         <button type="button" class="button" data-export="psd">PSD chữ</button>
         <button type="button" class="button" data-export="raster">PSD ảnh</button>
@@ -177,6 +221,15 @@
     </section>
   </main>
 
+  <dialog id="preflight-dialog">
+    <h2>Rà trước khi xuất</h2>
+    <p id="preflight-summary" class="muted"></p>
+    <ol id="preflight-issues" class="box-list"></ol>
+    <div class="form-actions">
+      <button type="button" id="close-preflight" class="button">Đóng</button>
+      <button type="button" id="continue-export" class="button primary">Vẫn xuất</button>
+    </div>
+  </dialog>
   <dialog id="zip-dialog">
     <form method="dialog">
       <h2>Xuất toàn bộ trang</h2>
