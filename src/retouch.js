@@ -2,6 +2,29 @@ import { inpaintRegion } from "./inpaint.js"
 import { desktop } from "./native.js"
 
 const nativeInpaintCache = new WeakMap()
+const strokeOrigins = new WeakMap()
+
+export function shareInpaintOrigins(source, copy) {
+  source?.forEach((stroke, index) => {
+    if (stroke.mode === "inpaint") strokeOrigins.set(copy[index], strokeOrigins.get(stroke) ?? stroke)
+  })
+}
+
+function inpaintEntry(page, stroke) {
+  const entry = nativeInpaintCache.get(strokeOrigins.get(stroke) ?? stroke)
+  return entry && entry.image === page.image && entry.geometry === inpaintGeometry(stroke) ? entry : null
+}
+
+function inpaintGeometry(stroke) {
+  return JSON.stringify([stroke.size, stroke.points])
+}
+
+export function waitForNativeRetouch(page) {
+  return Promise.all((page.retouchStrokes ?? []).flatMap((stroke) => {
+    const pending = inpaintEntry(page, stroke)?.pending
+    return pending ? [pending] : []
+  }))
+}
 
 const isFraction = (value) => Number.isFinite(value) && value >= 0 && value <= 1
 const inRange = (value, min, max) => Number.isFinite(value) && value >= min && value <= max
@@ -60,14 +83,7 @@ function drawStrokePath(context, points, width, height, left = 0, top = 0) {
 const retouchCache = new WeakMap()
 
 function retouchSignature(strokes, width, height) {
-  let parts = `${width}x${height}:${strokes.length}`
-  for (const s of strokes) {
-    const pts = s.points ?? []
-    const first = pts[0]
-    const last = pts[pts.length - 1]
-    parts += `|${s.mode},${s.size},${s.color ?? ""},${s.offsetX ?? ""},${s.offsetY ?? ""},${s.opacity ?? 1},${pts.length},${first?.x ?? ""},${first?.y ?? ""},${last?.x ?? ""},${last?.y ?? ""}`
-  }
-  return parts
+  return JSON.stringify([width, height, strokes])
 }
 
 function renderRetouchStrokes(context, page, width, height) {
@@ -131,7 +147,7 @@ function renderRetouchStrokes(context, page, width, height) {
       continue
     }
     if (stroke.mode === "inpaint" && page.image) {
-      const nativePatch = nativeInpaintCache.get(stroke)
+      const nativePatch = inpaintEntry(page, stroke)?.patch
       if (nativePatch && nativePatch.width === width && nativePatch.height === height) {
         context.save()
         context.globalAlpha = opacity
@@ -222,12 +238,28 @@ function inpaintBounds(stroke, width, height) {
 
 export async function prepareNativeInpaint(page, stroke) {
   if (!desktop?.native || stroke?.mode !== "inpaint" || !page?.image || !stroke.points?.length) return false
-  if (nativeInpaintCache.has(stroke)) return true
+  const cached = inpaintEntry(page, stroke)
+  if (cached) return cached.pending ?? Boolean(cached.patch)
+  const origin = strokeOrigins.get(stroke) ?? stroke
+  const entry = { image: page.image, geometry: inpaintGeometry(stroke), patch: null, pending: null }
+  nativeInpaintCache.set(origin, entry)
+  entry.pending = buildNativeInpaintPatch(page, stroke).then((patch) => {
+    entry.patch = patch
+    if (patch) retouchCache.delete(entry.image)
+    return Boolean(patch)
+  }).catch(() => false).finally(() => {
+    entry.pending = null
+    if (!entry.patch && nativeInpaintCache.get(origin) === entry) nativeInpaintCache.delete(origin)
+  })
+  return entry.pending
+}
+
+async function buildNativeInpaintPatch(page, stroke) {
   const width = page.image.naturalWidth
   const height = page.image.naturalHeight
-  if (!width || !height) return false
+  if (!width || !height) return null
   const { left, top, bw, bh, lineWidth } = inpaintBounds(stroke, width, height)
-  if (bw <= 2 || bh <= 2 || bw * bh > 2_500_000) return false
+  if (bw <= 2 || bh <= 2 || bw * bh > 2_500_000) return null
 
   const maskCanvas = document.createElement("canvas")
   maskCanvas.width = bw
@@ -247,7 +279,7 @@ export async function prepareNativeInpaint(page, stroke) {
       any = true
     }
   }
-  if (!any) return false
+  if (!any) return null
 
   const patchCanvas = document.createElement("canvas")
   patchCanvas.width = bw
@@ -259,20 +291,14 @@ export async function prepareNativeInpaint(page, stroke) {
   payload.set(rgba, 0)
   payload.set(mask, rgba.length)
 
-  try {
-    const response = await desktop.native("inpaint", { width: bw, height: bh, patchRadius: 3, colorAdapt: true }, payload)
-    const out = new Uint8ClampedArray(response.data)
-    if (out.length !== rgba.length) return false
-    for (let i = 0; i < mask.length; i++) {
-      out[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
-    }
-    patchCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
-    nativeInpaintCache.set(stroke, { canvas: patchCanvas, left, top, width, height })
-    retouchCache.delete(page.image)
-    return true
-  } catch {
-    return false
+  const response = await desktop.native("inpaint", { width: bw, height: bh, patchRadius: 3, colorAdapt: true }, payload)
+  const out = new Uint8ClampedArray(response.data)
+  if (out.length !== rgba.length) return null
+  for (let i = 0; i < mask.length; i++) {
+    out[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
   }
+  patchCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
+  return { canvas: patchCanvas, left, top, width, height }
 }
 
 export function paintRetouchStrokes(canvas, page) {

@@ -1,7 +1,7 @@
 import { psdFontName } from "./fonts.js"
 import { nativeCapabilities, runNativeTask } from "./native.js"
 import { paintRedraw, redrawLayout } from "./redraw.js"
-import { paintRetouchStrokes } from "./retouch.js"
+import { paintRetouchStrokes, waitForNativeRetouch } from "./retouch.js"
 import { fitBoxFontSize } from "./tools.js"
 
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
@@ -217,6 +217,10 @@ function paintPage(canvas, page, patches, { showCleanup = true, showText = true 
 }
 
 export function drawPage(canvas, page, options) {
+  if (options?.showCleanup === false) {
+    paintPage(canvas, page, [], options)
+    return null
+  }
   const redraw = redrawLayout(page)
   paintPage(canvas, page, redraw.patches, options)
   return redraw.pending
@@ -296,7 +300,7 @@ export function psdTextLayer(canvas, box) {
 
 export async function nativePageLayers(page) {
   const redraw = redrawLayout(page, { cancellable: false })
-  if (redraw.pending) await redraw.pending
+  await Promise.all([redraw.pending, waitForNativeRetouch(page)])
   const base = baseCanvas(page)
   const text = makeCanvas(base.width, base.height)
   page.boxes.forEach((box) => drawBox(text, box))
@@ -324,8 +328,6 @@ export async function nativePageLayers(page) {
 }
 
 export async function exportPage(page, format) {
-  const redraw = redrawLayout(page, { cancellable: false })
-  if (redraw.pending) await redraw.pending
   if (format === "png" && globalThis.khungThoaiDesktop?.native) {
     if (await nativeCapabilities()) {
       const { options, data } = await nativePageLayers(page)
@@ -333,6 +335,8 @@ export async function exportPage(page, format) {
       return new Blob([response.data], { type: "image/png" })
     }
   }
+  const redraw = redrawLayout(page, { cancellable: false })
+  await Promise.all([redraw.pending, waitForNativeRetouch(page)])
   const composite = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
   paintPage(composite, page, redraw.patches)
   if (format === "png") {
@@ -366,8 +370,7 @@ export async function exportPage(page, format) {
   return new Blob([psd], { type: "image/vnd.adobe.photoshop" })
 }
 
-export function textOverflows(page, box) {
-  const context = document.createElement("canvas").getContext("2d")
+export function textOverflows(page, box, context = document.createElement("canvas").getContext("2d")) {
   const g = geometry(context, box, page.image.naturalWidth, page.image.naturalHeight)
   if (g.vertical) {
     const maxColHeight = Math.max(...g.columns.map((column) => column.length)) * g.lineHeight
@@ -378,5 +381,6 @@ export function textOverflows(page, box) {
 }
 
 export function autoFitBox(page, box) {
-  return fitBoxFontSize(page, box, textOverflows)
+  const context = document.createElement("canvas").getContext("2d")
+  return fitBoxFontSize(page, box, (currentPage, candidate) => textOverflows(currentPage, candidate, context))
 }
