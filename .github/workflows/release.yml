@@ -132,15 +132,15 @@ jobs:
           VER: ${{ needs.meta.outputs.version }}
         run: |
           cat << EOF > release-notes.md
-          # Khung Thoại ${TAG}
+          # Nixio (Khung Thoại) ${TAG}
 
-          Bản phát hành chính thức đầu tiên của **Khung Thoại** — ứng dụng biên tập, xóa chữ (redraw), OCR, dịch thuật và dàn thoại truyện tranh/manga với lõi xử lý ảnh **C#/.NET 10** tự chứa, hỗ trợ **Windows 10/11**, **Ubuntu / Debian-based Linux** và **Fedora Linux**.
+          Bản phát hành chính thức **Nixio (Khung Thoại) ${TAG}** — ứng dụng biên tập, xóa chữ (redraw), OCR, dịch thuật và dàn thoại truyện tranh/manga với lõi xử lý ảnh **C#/.NET 10** tự chứa, hỗ trợ **Windows 10/11**, **Ubuntu / Debian-based Linux** và **Fedora Linux**.
 
           ## Tải về theo hệ điều hành
 
           | Hệ điều hành | Gói cài đặt | Cách cài đặt nhanh |
           |---|---|---|
-          | **Windows 10 / 11 (x64)** | \`Khung-Thoai-${VER}-win-x64-setup.exe\` | Chạy trình cài đặt (không cần quyền Admin, hỗ trợ mở tệp \`.khungthoai\`) |
+          | **Windows 10 / 11 (x64)** | \`Khung-Thoai-${VER}-win-x64-setup.exe\` | Chạy trình cài đặt (không cần quyền Admin, tự liên kết tệp \`.khungthoai\`) |
           | **Windows 10 / 11 (Portable)** | \`Khung-Thoai-${VER}-win-x64-portable.zip\` | Giải nén và chạy \`Khung-Thoai.exe\` |
           | **Ubuntu / Debian / Mint / Pop!_OS (x64)** | \`khung-thoai_${VER}_amd64.deb\` | \`sudo apt install ./khung-thoai_${VER}_amd64.deb\` |
           | **Fedora Linux (x64)** | \`khung-thoai-${VER}-1.x86_64.rpm\` | \`sudo dnf install ./khung-thoai-${VER}-1.x86_64.rpm\` |
@@ -152,21 +152,26 @@ jobs:
           - **Fedora**: \`sudo dnf install tesseract tesseract-langpack-eng tesseract-langpack-jpn tesseract-langpack-jpn_vert\`
           - **Windows 10/11**: Cài [UB-Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) hoặc \`winget install UB-Mannheim.TesseractOCR\`
 
-          ## Tính năng nổi bật trong ${TAG}
-          - **Biên tập & dàn chữ chuyên nghiệp**: Co giãn 8 tay cầm (gồm khung xoay), xoay 15°, chọn nhiều khung & căn hàng/chia đều, hút lưới tự động, chấm bong bóng thoại tự động, viền chữ + đổ bóng + chữ dọc + xuất **PSD Layer Style** chuẩn Photoshop, nạp và lưu font cục bộ.
-          - **Xóa chữ & Retouch lõi C#/.NET 10**: Phục hồi nền trơn, chuyển sắc, screentone lặp, mặt nạ bảo vệ nét vẽ, và **Cọ tẩy chữ thông minh Multi-Scale PatchMatch Inpaint** (EM Voting + Colour Adaptation).
-          - **Dịch linh hoạt (Gemini API & Local/OpenAI LLM)**: Hỗ trợ Ollama, LM Studio, Hy-MT2, OpenRouter, dịch ảnh hoặc dịch trực tiếp các khung OCR sẵn có, bảng thuật ngữ và ngữ cảnh liên trang.
-          - **Trợ lý AI · Agent Harness v2**: Ngữ cảnh trực tiếp dự án, quy chuẩn biên tập, danh sách tiến độ (Todo), **Chế độ Kế hoạch (Plan Mode)**, tự nén ngữ cảnh công cụ, **Web Search** (DuckDuckGo + Jisho + Wikipedia / Tavily / SearXNG) và 18 công cụ biên tập kèm Hoàn tác.
-          - **Kiểm tra cập nhật & Trung tâm Thông báo**: Tự kiểm tra bản mới qua GitHub Releases, cảnh báo khung tràn chữ kèm nút 1 chạm **Khớp cỡ cả trang**, nhắc lưu dự án và trạng thái mạng.
+          ## Điểm nổi bật trong ${TAG}
+          - **Redraw & Typeset Pro (PhotoCraft)**:
+            - **Poisson Seamless Blending C#** cho Multi-Scale PatchMatch Inpaint — hòa khớp ánh sáng/chuyển sắc biên tuyệt đối không lộ viền ghép.
+            - **Làm sạch ảnh Raw tự động** (cân bằng trắng từng kênh R/G/B khử ố vàng giấy scan + khử nhiễu bilateral giữ screentone + tăng sắc nét nhẹ trên C# & JS).
+            - **Cọ tẩy nét Redraw** xóa cục bộ nét vẽ/inpaint bị lem lên nét nhân vật.
+            - **Dàn chữ ôm bong bóng bầu dục (`Ôm bong bóng`)** tương thích auto-fit và **Uốn chữ SFX** (`arc`, `arcDown`, `wave`).
+          - **Trợ lý AI · Agent Harness v2.5 (DeepSeek Harness)**:
+            - Tự thử lại LLM (`withLlmRetry` exponential backoff) cho lỗi 429/5xx và chống lặp công cụ (`RepeatToolGuard`).
+            - **Thẻ hỏi trắc nghiệm `ask_user`**, **duyệt thao tác hàng loạt**, **5 Hồ sơ kỹ năng theo thể loại** áp dụng cho cả Chat và Dịch ảnh/khung chữ.
+            - **Lệnh nhanh Slash Commands** (\`/qc\`, \`/plan\`, \`/autofit\`, \`/compact ai\`, \`/skill\`, \`/help\`), tóm tắt lịch sử bằng LLM và tự động lưu phiên chat/Todo theo từng dự án.
+          - **Kiểm tra cập nhật & Trung tâm Thông báo**: Tự phát hiện bản mới qua GitHub Releases (\`wiothemilo-lang/Nixio\`), cảnh báo khung tràn chữ kèm nút 1 chạm **Khớp cỡ cả trang** và nhắc lưu dự án.
 
           Kiểm tra toàn vẹn tệp bằng \`SHA256SUMS.txt\`.
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "Khung Thoại ${TAG}" --notes-file release-notes.md
+            gh release edit "$TAG" --title "Nixio (Khung Thoại) ${TAG}" --notes-file release-notes.md
             gh release upload "$TAG" release-assets/* --clobber
           else
             gh release create "$TAG" release-assets/* \
-              --title "Khung Thoại ${TAG}" \
+              --title "Nixio (Khung Thoại) ${TAG}" \
               --notes-file release-notes.md
           fi
