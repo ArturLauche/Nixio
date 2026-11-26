@@ -106,3 +106,15 @@ Nhập tệp JSON trỏ đến kho ảnh của bạn. Mỗi truyện có thể c
 ```
 
 Chọn truyện và chương để đọc, chuyển ảnh vào trình biên tập hoặc tải ảnh thành ZIP. Máy chủ ảnh cần cho phép CORS đối với thao tác tải ZIP và chuyển vào trình biên tập khi chạy khác nguồn.
+
+## Kiểm tra chất lượng và phát triển tiếp
+
+Workflow **Verify desktop and image quality** build và kiểm tra trên Windows/Linux, chạy test C#, bộ đối chứng ảnh và kiểm tra luồng trên app đã đóng gói. Báo cáo được tải lên dưới dạng artifact CI. Tại máy, dùng `npm run benchmark -- --output artifacts/benchmark.json` và `npm run test:desktop -- --packaged` sau khi đóng gói.
+
+Bộ đối chứng chứa tranh gốc tạo riêng cho repo, ảnh sạch và ảnh có chữ, cùng mẫu OCR Anh ngang và Nhật dọc. Sai số vùng chữ, thay đổi nền ngoài ý muốn và sai số ký tự OCR được ghi vào báo cáo. Xem [nguồn và cách bổ sung mẫu](test/fixtures/comic/README.md).
+
+Các tác vụ OCR, tiền xử lý và mã hóa PNG hiện tiến độ trong bảng **Tác vụ** và có nút **Hủy**. Worker ảnh dài chạy riêng với worker lưu dự án và redraw. Khi hủy một trang đang xuất ZIP, tệp ZIP chưa hoàn tất bị hủy và tệp đã lưu trước đó được giữ lại.
+
+OCR hỗ trợ xoay 0/90/180/270 độ, chế độ chữ dọc (cần `jpn_vert`) và gom dòng gần nhau. Cửa sổ kiểm tra hiển thị vùng ảnh, nội dung và độ tin cậy. Sửa chữ, xóa nội dung để bỏ qua một vùng rồi bấm **Đặt lên trang**.
+
+**Dự án gần đây và phục hồi** liệt kê từng dự án và tối đa 10 mốc tự lưu gần nhất. Mã dự án được giữ trong tệp portable. Các bản tự lưu cũ vẫn mở được qua nút khôi phục cũ. Trạng thái **Còn thay đổi chưa lưu** phản ánh việc lưu tệp thủ công. Tự lưu tạo mốc phục hồi riêng và giữ trạng thái này cho đến khi bạn lưu tệp.

@@ -1,4 +1,4 @@
-import { nativeCapabilities } from "./native.js"
+import { nativeCapabilities, runNativeTask } from "./native.js"
 import { paintRedraw, redrawLayout } from "./redraw.js"
 
 const psdFonts = { Arial: "ArialMT", Georgia: "Georgia", Verdana: "Verdana", "Times New Roman": "TimesNewRomanPSMT" }
@@ -182,7 +182,7 @@ export async function exportPage(page, format) {
   if (format === "png" && globalThis.khungThoaiDesktop?.native) {
     if (await nativeCapabilities()) {
       const { options, data } = await nativePageLayers(page)
-      const response = await globalThis.khungThoaiDesktop.native("png", options, data)
+      const response = await runNativeTask("png", options, data)
       return new Blob([response.data], { type: "image/png" })
     }
   }

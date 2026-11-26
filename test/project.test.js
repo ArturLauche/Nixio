@@ -118,3 +118,11 @@ test("invalid masks and preset styles cannot be saved", () => {
   project.presets = [{ name: "Broken", style: { ...project.pages[0].boxes[0], size: -2 } }]
   assert.throws(() => writeProject(project), /không hợp lệ/)
 })
+
+test("portable projects retain their recovery identity while older projects can omit it", async () => {
+  const project = sampleProject()
+  project.projectId = "d26b25ce-44de-4fcb-a04a-9c63d471527a"
+  assert.equal((await readProject(writeProject(project))).projectId, project.projectId)
+  project.projectId = "../escape"
+  assert.throws(() => writeProject(project), /không hợp lệ/)
+})

@@ -87,7 +87,8 @@ function projectPage(page) {
   return { name, type, size, boxes: boxes.map(projectBox), unplaced: unplaced.map(projectLine), translationContext: projectContext(translationContext), translationJob: projectJob(translationJob) }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [] }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId }) {
+  if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
   settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
@@ -97,6 +98,7 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [] })
     throw invalidProject()
   }
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
+    ...(projectId && { projectId }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
   }
 }

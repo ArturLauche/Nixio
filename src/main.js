@@ -1,15 +1,18 @@
-import { clamp, drawPage, exportPage, makeBox, textOverflows, nativePageLayers } from "./canvas.js"
-import { filenameStem, groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
-import { alignScript, translateImage } from "./gemini.js"
+import { clamp, drawPage, makeBox } from "./canvas.js"
+import { groupDialogue, isImageFile, readDialogueFile } from "./io.js"
 import { setupLibrary } from "./library.js"
-import { matchDialogue, toCoordinates, toRectangle, overlapScore } from "./placement.js"
-import { projectExtension, projectPageLimit as pageLimit, projectSettingIds, readProject, writeProject, projectStyle } from "./project.js"
+import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
+import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "./project.js"
 
 import { copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
-import { remainingTranslations, translationLabel, translationSignature } from "./translation.js"
+import { remainingTranslations, translationLabel } from "./translation.js"
 
-import { desktop, nativeCapabilities, saveDesktopProject, openDesktopProject, imagePixels } from "./native.js"
+import { setupTasks } from "./controllers/tasks.js"
+import { setupProjects } from "./controllers/project.js"
+import { setupTranslation } from "./controllers/translation.js"
+import { setupOcr } from "./controllers/ocr.js"
+import { setupExports } from "./controllers/export.js"
 
 const history = new EditHistory()
 const ownedUrls = new Set()
@@ -26,17 +29,11 @@ const state = {
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
-const projectFile = byId("project-file")
-let projectName
 let gesture
 let pendingPaint
 let previewRedraw
-let translationController
 let nativeReady = false
 let nativeLanguages = []
-let revision = 0
-let savedRevision = 0
-let autosaving = false
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -62,7 +59,7 @@ function releaseUnusedImages() {
 }
 
 function checkpoint(snapshot = editorSnapshot()) {
-  revision++
+  projects.changed()
   history.record(snapshot)
   syncProjectActions()
 }
@@ -72,7 +69,7 @@ function restoreHistory(direction) {
   const snapshot = history[direction](editorSnapshot())
   if (!snapshot) return
   const { settings, ...editor } = snapshot
-  revision++
+  projects.changed()
   Object.assign(state, editor, { placing: false })
   projectSettings.forEach((field) => { field.value = settings[field.id] })
   render()
@@ -91,7 +88,7 @@ document.addEventListener("keydown", (event) => {
   restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
 })
 for (const field of projectSettings) {
-  field.addEventListener("input", () => { revision++ })
+  field.addEventListener("input", () => { projects.changed() })
   let before
   field.addEventListener("focus", () => { before = editorSnapshot() })
   field.addEventListener("change", () => {
@@ -182,15 +179,16 @@ function syncProjectActions() {
 }
 
 function syncTranslationActions() {
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, readTranslationSettings()).length
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
   byId("pages").querySelectorAll(".page-job").forEach((element, index) => {
     const page = state.pages[index]
     element.dataset.state = page.translationJob?.state ?? "pending"
-    element.textContent = translationLabel(page, readTranslationSettings())
+    element.textContent = translationLabel(page, translation.settings())
   })
 }
 
 function renderPages() {
+  projects.refreshDirty()
   const current = selectedIndex()
   const count = state.pages.length
   if (!state.importing && !state.openingProject) releaseUnusedImages()
@@ -209,7 +207,7 @@ function renderPages() {
   syncProjectActions()
   byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, readTranslationSettings()).length
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
   byId("stop-translation").disabled = !state.translating
   renderPresets()
   byId("check-export").disabled = projectBusy()
@@ -232,7 +230,7 @@ function renderPages() {
     const job = document.createElement("span")
     job.className = "page-job"
     job.dataset.state = page.translationJob?.state ?? "pending"
-    job.textContent = translationLabel(page, readTranslationSettings())
+    job.textContent = translationLabel(page, translation.settings())
     li.append(button, up, down, remove, job)
     return li
   }))
@@ -448,97 +446,6 @@ async function openImage(file) {
     URL.revokeObjectURL(url)
     ownedUrls.delete(url)
     throw error
-  }
-}
-
-function projectBlob() {
-  const settings = Object.fromEntries(projectSettings.map(({ id, value }) => [id, value]))
-  return writeProject({ pages: state.pages, presets: state.presets, queue: state.queue, settings, currentPage: selectedIndex(), fit: state.fit })
-}
-
-byId("save-project").onclick = async () => {
-  if (projectBusy()) return
-  try {
-    const file = projectBlob()
-    const name = projectName ?? filenameStem(state.pages[0]?.name ?? "khung-thoai")
-    if (nativeReady) {
-      state.savingProject = true
-      renderPages()
-      if (!await saveDesktopProject(file, "project", name + projectExtension)) return
-      status("Đã lưu dự án vào máy.")
-    } else {
-      saveFile(file, name + projectExtension)
-      status("Đã tạo tệp dự án.")
-    }
-  } catch (error) {
-    status("Không lưu được dự án. " + error.message, true)
-  } finally {
-    state.savingProject = false
-    renderPages()
-  }
-}
-
-byId("open-project").onclick = () => {
-  if (projectBusy()) return
-  if (nativeReady) openNativeProject("dialog")
-  else projectFile.click()
-}
-
-projectFile.onchange = async () => {
-  const file = projectFile.files[0]
-  projectFile.value = ""
-  await loadProject(file)
-}
-
-async function loadProject(file) {
-  if (!file || projectBusy()) return
-  const loaded = []
-  state.openingProject = true
-  renderPages()
-  status("Đang mở dự án…")
-  try {
-    const project = await readProject(file)
-    for (const field of projectSettings) {
-      if (field.options && ![...field.options].some(({ value }) => value === project.settings[field.id])) {
-        throw new Error("Tệp dự án chứa thiết lập chưa được hỗ trợ.")
-      }
-    }
-    for (const saved of project.pages) {
-      let page
-      try {
-        page = await openImage(saved.file)
-      } catch {
-        throw new Error("Không đọc được ảnh trong dự án: " + saved.file.name)
-      }
-      page.boxes = saved.boxes.map((box) => ({ ...box, id: crypto.randomUUID() }))
-      page.unplaced = saved.unplaced
-      page.translationContext = saved.translationContext
-      page.translationJob = saved.translationJob
-      loaded.push(page)
-    }
-    const hasContent = state.pages.length || state.presets.length || state.queue.length ||
-      projectSettings.some(({ value }, index) => value !== defaultProjectSettings[index])
-    if (hasContent && !window.confirm("Mở dự án này sẽ thay thế phiên biên tập hiện tại. Tiếp tục?")) {
-      status("Đã hủy mở dự án.")
-      return
-    }
-    revision++
-    history.clear()
-    state.pages = loaded
-    state.queue = project.queue
-    state.presets = project.presets
-    state.fit = project.fit
-    updateFitLabel()
-    projectSettings.forEach((field) => { field.value = project.settings[field.id] })
-    projectName = filenameStem(file.name)
-    selectPage(loaded[project.currentPage])
-    status(`Đã mở dự án với ${loaded.length} trang.`)
-  } catch (error) {
-    status("Không mở được dự án. " + error.message, true)
-  } finally {
-    releaseUnusedImages()
-    state.openingProject = false
-    renderPages()
   }
 }
 
@@ -854,183 +761,6 @@ function applyTranslation(page, lines) {
   return placed.length
 }
 
-function readTranslationSettings() {
-  return {
-    model: byId("gemini-model").value,
-    source: byId("source-language").value,
-    target: byId("target-language").value,
-    notes: byId("translation-notes").value.trim(),
-    direction: byId("direction").value,
-    glossary: byId("translation-glossary").value.trim(),
-  }
-}
-
-async function processWithGemini(pages, read, action, kind = "translate") {
-  const key = byId("gemini-key").value.trim()
-  if (projectBusy() || !pages.length) return
-  if (!key) return status("Hãy nhập khóa API Gemini.", true)
-  const settings = { ...readTranslationSettings(), key }
-  const signature = translationSignature(settings)
-  const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
-  let context = previousPage?.translationContext?.signature === signature ? previousPage.translationContext.lines : []
-  let completed = 0
-  let placed = 0
-  let skipped = 0
-  checkpoint()
-  translationController = new AbortController()
-  state.translating = true
-  for (const page of pages) page.translationJob = { kind, signature, state: "pending" }
-  renderPages()
-  renderInspector()
-  let activePage
-  try {
-    for (const page of pages) {
-      activePage = page
-      page.translationJob = { kind, signature, state: "running" }
-      renderPages()
-      const report = (message) => status(page.name + " · " + message)
-      const lines = await read(page, { ...settings, context, report, signal: translationController.signal })
-      translationController.signal.throwIfAborted()
-      if (lines.length) {
-        placed += applyTranslation(page, lines)
-        skipped += page.unplaced.length
-        context = [...context, ...lines.filter(({ source }) => source).map(({ source, text }) => ({
-          source: source.slice(0, 240), text: text.slice(0, 240),
-        }))].slice(-8)
-      } else {
-        page.unplaced = []
-      }
-      page.translationContext = { signature, lines: context }
-      page.translationJob = { kind, signature, state: "done" }
-      completed++
-      if (selectedPage() === page) {
-        renderCanvas()
-        renderInspector()
-      }
-    }
-    status(`Đã ${action} ${completed}/${pages.length} trang. ${placed} câu đã đặt và ${skipped} câu chờ đặt.`)
-  } catch (error) {
-    const stopped = translationController.signal.aborted
-    if (activePage) activePage.translationJob = {
-      kind, signature, state: stopped ? "pending" : "error", error: stopped ? undefined : error.message,
-    }
-    status(stopped ? `Đã dừng sau ${completed} trang. Có thể tiếp tục dịch chương.` :
-      `Đã ${action} ${completed}/${pages.length} trang. ${error.message}`, !stopped)
-  } finally {
-    state.translating = false
-    translationController = null
-    render()
-  }
-}
-byId("translate").onclick = () => processWithGemini([selectedPage()].filter(Boolean), translateImage, "dịch")
-byId("translate-all").onclick = () => processWithGemini([...state.pages], translateImage, "dịch")
-byId("resume-translation").onclick = () => processWithGemini(remainingTranslations(state.pages, readTranslationSettings()), translateImage, "dịch")
-byId("stop-translation").onclick = () => translationController?.abort()
-byId("align-script").onclick = () => {
-  const page = selectedPage()
-  if (!page) return
-  const lines = groupDialogue(byId("script-text").value)
-    .filter(({ reference }) => pageForScript(reference, page) === page)
-    .flatMap(({ lines }) => lines)
-  if (!lines.length) return status("Hãy nhập kịch bản cho trang này.", true)
-  processWithGemini([page], (selected, settings) => alignScript(selected, settings, lines), "ghép", "align")
-}
-
-function extensionFor(format) {
-  return format === "png" ? "png" : "psd"
-}
-
-async function performExport(action) {
-  if (state.exporting || state.openingProject) return
-  state.exporting = true
-  renderPages()
-  try {
-    await action()
-    status("Đã tạo tệp xuất.")
-  } catch (error) {
-    status("Xuất thất bại. " + error.message, true)
-  } finally {
-    state.exporting = false
-    renderPages()
-  }
-}
-
-async function openNativeProject(mode) {
-  if (projectBusy()) return
-  state.openingProject = true
-  renderPages()
-  let file
-  try { file = await openDesktopProject(mode) }
-  catch (error) { status("Không mở được dự án. " + error.message, true) }
-  finally { state.openingProject = false; renderPages() }
-  if (file) await loadProject(file)
-}
-byId("recover-project").onclick = () => openNativeProject("recovery")
-byId("recover-backup").onclick = () => openNativeProject("backup")
-
-async function refreshRecovery() {
-  const info = await desktop.projectStatus()
-  byId("recover-project").hidden = !info.recovery
-  byId("recover-backup").hidden = !info.backup
-}
-
-async function autosave() {
-  if (!nativeReady || autosaving || projectBusy() || gesture || savedRevision === revision) return
-  autosaving = true
-  const snapshotRevision = revision
-  try {
-    await saveDesktopProject(projectBlob(), "autosave", "recovery.khungthoai")
-    savedRevision = snapshotRevision
-    byId("autosave-status").textContent = "Đã tự lưu lúc " + new Date().toLocaleTimeString("vi-VN")
-    await refreshRecovery()
-  } catch (error) {
-    byId("autosave-status").textContent = "Tự lưu thất bại. " + error.message
-  } finally { autosaving = false }
-}
-if (desktop?.native) {
-  byId("local-processing").hidden = false
-  byId("native-status").textContent = "Đang kiểm tra worker C#…"
-  nativeCapabilities().then(async (capabilities) => {
-    nativeReady = Boolean(capabilities)
-    nativeLanguages = capabilities?.languages ?? []
-    byId("native-status").textContent = capabilities ? (capabilities.ocrError ?? "OCR cục bộ sẵn sàng.") : "Chạy npm run desktop:native để bật xử lý C#."
-    byId("local-ocr-language").replaceChildren(...nativeLanguages.map((language) => new Option(language, language)))
-    byId("native-mask-control").hidden = !nativeReady
-    byId("desktop-recovery").hidden = !nativeReady
-    if (nativeReady) {
-      await refreshRecovery()
-      setInterval(autosave, 20000)
-      byId("autosave-status").textContent = "Tự lưu mỗi 20 giây và khi đóng app."
-    }
-    renderPages()
-  }).catch((error) => status(error.message, true))
-}
-let closing = false
-desktop?.onClose?.(() => {
-  if (!nativeReady || savedRevision === revision) {
-    desktop.closeWindow()
-    return
-  }
-  if (closing) return
-  closing = true
-  const finish = async () => {
-    // Let a running snapshot finish, then save the latest edit before closing.
-    while (autosaving) await new Promise((resolve) => setTimeout(resolve, 100))
-    if (projectBusy()) {
-      status("Hãy chờ tác vụ hiện tại hoàn tất trước khi đóng app.", true)
-      closing = false
-      return
-    }
-    await autosave()
-    if (savedRevision === revision || window.confirm("Tự lưu thất bại. Đóng app và bỏ các thay đổi chưa lưu?")) {
-      savedRevision = revision
-      await desktop.closeWindow()
-    }
-    closing = false
-  }
-  finish().catch((error) => { closing = false; status(error.message, true) })
-})
-
 byId("cleanup-expand").onchange = () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
@@ -1039,155 +769,15 @@ byId("cleanup-expand").onchange = () => {
   render()
 }
 
-async function localProcessing(preview) {
-  const page = selectedPage()
-  if (!page || projectBusy()) return
-  const crop = byId("ocr-crop").checked ? selectedBox() : null
-  if (byId("ocr-crop").checked && !crop) return status("Hãy chọn khung để cắt vùng OCR.", true)
-  state.processingNative = true
-  renderPages()
-  status(preview ? "Đang tiền xử lý ảnh…" : "Đang nhận dạng chữ trên máy…")
-  try {
-    const sample = imagePixels(page.image, crop)
-    const options = { width: sample.width, height: sample.height, scale: Number(byId("ocr-scale").value),
-      denoise: byId("ocr-denoise").checked, language: byId("local-ocr-language").value, psm: Number(byId("local-ocr-layout").value) }
-    const { result, data } = await desktop.native(preview ? "preprocess" : "ocr", options, sample.pixels)
-    if (preview) {
-      const canvas = byId("ocr-preview-canvas")
-      canvas.width = result.width
-      canvas.height = result.height
-      canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(data), result.width, result.height), 0, 0)
-      byId("ocr-preview").showModal()
-      status("Đã tạo ảnh tiền xử lý.")
-    } else {
-      checkpoint()
-      for (const line of result.lines) {
-        line.box = [
-          Math.round((sample.left + line.box[0] / 1000 * sample.width) / page.image.naturalWidth * 1000),
-          Math.round((sample.top + line.box[1] / 1000 * sample.height) / page.image.naturalHeight * 1000),
-          Math.round((sample.left + line.box[2] / 1000 * sample.width) / page.image.naturalWidth * 1000),
-          Math.round((sample.top + line.box[3] / 1000 * sample.height) / page.image.naturalHeight * 1000),
-        ]
-        const overlapping = page.boxes.find((box) => overlapScore(toCoordinates(box), line.box) > .5)
-        if (overlapping) {
-          if (overlapping.text !== line.text && !page.unplaced.some((item) => item.text === line.text)) page.unplaced.push(line)
-        } else {
-          const box = makeBox(page, toRectangle(line.box), line.text)
-          box.fill = false
-          page.boxes.push(box)
-        }
-      }
-      status(`Đã nhận dạng ${result.lines.length} dòng. Dòng chồng khung có sẵn được đưa vào Chưa đặt.`)
-    }
-  } catch (error) { status(error.message, true) }
-  finally { state.processingNative = false; render() }
-}
-byId("preview-ocr").onclick = () => localProcessing(true)
-byId("run-local-ocr").onclick = () => localProcessing(false)
 
-const preflightDialog = byId("preflight-dialog")
-let pendingExport
-function exportIssues(pages) {
-  const issues = []
-  if (state.queue.length) issues.push({ text: `${state.queue.length} câu chưa đặt trong chương.` })
-  for (const page of pages) {
-    const prefix = page.name + " · "
-    if (page.unplaced.length) issues.push({ page, text: prefix + `${page.unplaced.length} câu chưa đặt.` })
-    if (page.translationJob?.state === "error") issues.push({ page, text: prefix + "Lỗi dịch. " + page.translationJob.error })
-    if (page.translationJob?.state === "pending") issues.push({ page, text: prefix + "Chưa xử lý xong lượt dịch." })
-    if (page.translationJob?.state === "done" && page.translationJob.signature !== translationSignature(readTranslationSettings())) {
-      issues.push({ page, text: prefix + "Thiết lập dịch đã đổi sau lần xử lý gần nhất." })
-    }
-    for (const box of page.boxes) {
-      if (textOverflows(page, box)) issues.push({ page, box, text: prefix + "Chữ tràn khung · " + box.text.slice(0, 70) })
-    }
-  }
-  return issues
-}
-
-function showPreflight(issues, action) {
-  pendingExport = action
-  byId("continue-export").hidden = !action
-  byId("preflight-summary").textContent = issues.length ? `Có ${issues.length} mục cần kiểm tra.` : "Các trang đã sẵn sàng để xuất."
-  byId("preflight-issues").replaceChildren(...issues.map((issue) => {
-    const li = document.createElement("li")
-    li.append(listButton(issue.text, () => {
-      preflightDialog.close()
-      location.hash = "editor"
-      if (issue.page) selectPage(issue.page)
-      if (issue.box) selectBox(issue.box)
-      if (!issue.page) byId("queue-section").scrollIntoView({ block: "nearest" })
-      status(issue.text)
-    }))
-    return li
-  }))
-  preflightDialog.showModal()
-}
-
-function requestExport(pages, action) {
-  if (projectBusy()) return
-  const issues = exportIssues(pages)
-  if (issues.length) showPreflight(issues, action)
-  else action()
-}
-byId("check-export").onclick = () => showPreflight(exportIssues(state.pages))
-byId("close-preflight").onclick = () => preflightDialog.close()
-byId("continue-export").onclick = () => {
-  const action = pendingExport
-  preflightDialog.close()
-  action?.()
-}
-preflightDialog.addEventListener("close", () => { pendingExport = null })
-
-for (const button of exportButtons) {
-  button.onclick = () => {
-    const page = selectedPage()
-    const format = button.dataset.export
-    if (!page) return
-    requestExport([page], () => performExport(async () => {
-      status("Đang xuất trang…")
-      const snapshot = copyEditor({ pages: [page] }).pages[0]
-      saveFile(await exportPage(snapshot, format), filenameStem(page.name) + "." + extensionFor(format))
-    }))
-  }
-}
-
-const zipDialog = byId("zip-dialog")
-byId("export-all").onclick = () => {
-  zipDialog.returnValue = ""
-  zipDialog.showModal()
-}
-zipDialog.addEventListener("close", () => {
-  if (zipDialog.returnValue !== "export") return
-  const format = byId("zip-format").value
-  requestExport(state.pages, () => performExport(async () => {
-    const pages = copyEditor({ pages: state.pages }).pages
-    if (format === "png" && nativeReady) {
-      const transfer = await desktop.projectBegin("zip", "khung-thoai-png.zip")
-      if (!transfer) return
-      try {
-        for (const [index, page] of pages.entries()) {
-          status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
-          const { options, data } = await nativePageLayers(page)
-          const name = String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name) + ".png"
-          await desktop.projectWrite(transfer.id, "zipPage", { ...options, name }, data)
-        }
-        await desktop.projectWrite(transfer.id, "fileCommit")
-      } catch (error) {
-        await desktop.projectWrite(transfer.id, "fileCancel").catch(() => {})
-        throw error
-      }
-      return
-    }
-    const { default: JSZip } = await import("jszip")
-    const zip = new JSZip()
-    for (const [index, page] of pages.entries()) {
-      status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
-      const name = String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
-      zip.file(name + "." + extensionFor(format), await exportPage(page, format))
-    }
-    saveFile(await zip.generateAsync({ type: "blob" }), "khung-thoai-" + format + ".zip")
-  }))
+const shared = { state, byId, status, checkpoint, renderPages, renderInspector, renderCanvas, render, selectedPage, selectedBox, projectBusy }
+const translation = setupTranslation({ ...shared, pageForScript, applyTranslation })
+const projects = setupProjects({
+  ...shared, projectSettings, defaultProjectSettings, history, openImage, selectPage, selectedIndex, updateFitLabel, releaseUnusedImages,
+  hasGesture: () => Boolean(gesture),
+  onCapabilities: (ready, languages) => { nativeReady = ready; nativeLanguages = languages },
 })
-
+setupTasks(byId)
+setupOcr(shared)
+setupExports({ ...shared, selectPage, selectBox, listButton, readTranslationSettings: translation.settings, isNativeReady: () => projects.ready })
 render()
