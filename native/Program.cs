@@ -19,7 +19,7 @@ while (input.ReadByte() is var first && first != -1)
 
     var pixels = GC.AllocateUninitializedArray<byte>(width * height * 4);
     input.ReadExactly(pixels);
-    var result = TextureRedraw.Recover(pixels, width, height, area);
+    var result = RedrawEngine.Recover(pixels, width, height, area);
     BinaryPrimitives.WriteInt32LittleEndian(size, result?.Length ?? 0);
     output.Write(size);
     if (result is not null)

@@ -43,6 +43,8 @@ Máy chủ Lilyzono chưa sẵn sàng khi kiểm tra trực tiếp. Dịch Hy-MT
 
 Bundle Lilyzono gửi tùy chọn giữ screentone cùng ảnh đến máy chủ và nhận ảnh redraw để ghép PSD. Thuật toán phục hồi phía máy chủ vẫn chưa quan sát được. Lõi C# của Khung Thoại dùng các pixel bên ngoài khung chữ để tìm chu kỳ nền. Khi tìm được mẫu lặp đủ tin cậy, lớp redraw chỉ chứa những pixel tối hơn nền dự kiến trong khung. Ứng dụng ghép lớp này với ảnh gốc khi xem trước hoặc xuất tệp.
 
-C# chạy trong tiến trình riêng với dữ liệu RGBA được giới hạn kích thước. Bộ ghép vùng JavaScript dùng chung cho web và desktop. Bản web và nền giấy sáng tiếp tục dùng xử lý cục bộ trên Canvas.
+C# chạy trong tiến trình riêng với dữ liệu RGBA được giới hạn kích thước. Khi vòng lấy mẫu không có screentone đáng tin cậy, lõi thử khớp một mặt phẳng màu RGB từ bốn phía của khung. Lõi loại mẫu lệch màu, chỉ phục hồi điểm đủ tối và giữ lại các cụm mực nối ra ngoài khung. Bộ ghép vùng JavaScript dùng chung cho web và desktop. Bản web tiếp tục dùng xử lý nền sáng cục bộ trên Canvas.
 
 Trên một ảnh thử 480 × 640 có nền chấm lặp và ảnh sạch để đối chiếu, sai số tuyệt đối trung bình tại 1.291 điểm bị mực che giảm từ 216,04 xuống 3,55 trên thang 255. Trung vị của tám lượt gửi vùng 260 × 240 qua Electron IPC sau lượt làm nóng là 5,7 ms trên môi trường thử. Các phép đo dùng dữ liệu tổng hợp. Bản Linux x64 đã được mở để kiểm tra nhập ảnh, xem trước và xuất PNG/PSD. Bản Windows x64 được biên dịch và đóng gói trên Linux.
+
+Trên một ảnh thử chuyển sắc 480 × 640, bản Electron Linux phục hồi đúng màu RGB của ảnh sạch ở 1.291 điểm bị chữ che. Nét thử cắt qua mép khung được giữ lại và PSD xuất giữ riêng lớp redraw, ảnh gốc và chữ chỉnh sửa được. Trung vị của tám lượt xử lý vùng 260 × 240 sau lượt làm nóng là 6,8 ms, tính cả Electron IPC.

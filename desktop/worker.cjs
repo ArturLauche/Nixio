@@ -8,6 +8,10 @@ class TextureWorker {
     this.queued = 0
   }
 
+  get available() {
+    return this.executable !== null
+  }
+
   redraw(sample) {
     const { width, height, inner, pixels } = sample ?? {}
     if (!this.executable || this.queued >= 8 || !validInput(width, height, inner, pixels)) return null

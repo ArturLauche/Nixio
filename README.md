@@ -18,7 +18,7 @@ Mở địa chỉ mà Vite in ra. Dùng `npm run build` để tạo thư mục `
 
 ## App Electron
 
-Để mở bản desktop từ mã nguồn, cài Node.js 22.12+ và chạy `npm ci` rồi `npm run desktop`. Biên dịch lõi C# bằng .NET 10 SDK trước khi mở app để bật phục hồi nền chấm lặp.
+Để mở bản desktop từ mã nguồn, cài Node.js 22.12+ và chạy `npm ci` rồi `npm run desktop`. Biên dịch lõi C# bằng .NET 10 SDK trước khi mở app để bật phục hồi nền chấm lặp và nền chuyển sắc.
 
 ```sh
 npm run desktop:native
@@ -50,7 +50,7 @@ Mở **Dịch ảnh bằng Gemini**, nhập khóa API, chọn ngôn ngữ rồi 
 
 Nếu đã có bản dịch, nhập kịch bản rồi bấm **Ghép nghĩa kịch bản trang này**. Dịch và ghép nghĩa đều ưu tiên khung có sẵn trên trang. Khi trang trống, chúng dùng khung OCR. Các câu không có tọa độ đáng tin cậy hoặc xung đột được giữ trong **Chưa đặt** để xử lý thủ công.
 
-Tùy chọn **Xóa chữ gốc trong khung** lấy mẫu màu giấy quanh khung. App Electron có lõi C# còn có thể nhận diện screentone lặp và phục hồi mẫu nền tại các điểm mực che phủ. Vùng ảnh thiếu mẫu đủ tin cậy được giữ nguyên. Kiểm tra ảnh xem trước khi xuất.
+Tùy chọn **Xóa chữ gốc trong khung** lấy mẫu màu giấy quanh khung. Lõi C# của app Electron xử lý nền trơn, nền chuyển sắc và screentone lặp offline. Với nền chuyển sắc, app giữ nguyên nét đậm nối từ trong ra ngoài khung. Vùng ảnh thiếu mẫu đủ tin cậy được giữ nguyên. Kiểm tra ảnh xem trước khi xuất.
 
 ## Kiểm thử
 

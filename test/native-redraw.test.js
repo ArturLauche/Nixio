@@ -94,3 +94,38 @@ test("native redraw leaves irregular backgrounds alone and keeps concurrent repl
   assert.equal(rejected, null)
   assert.ok(accepted?.length)
 })
+
+test("native redraw restores a color gradient and protects an ink line crossing the box", { skip: !available }, async (context) => {
+  const worker = new TextureWorker(executable)
+  context.after(() => worker.close())
+  const paper = () => {
+    const result = sample(() => 0)
+    for (let y = 0; y < result.height; y++) {
+      for (let x = 0; x < result.width; x++) {
+        result.pixels.set([
+          145 + Math.round(x * .42 + y * .15),
+          95 + Math.round(x * .35 + y * .32),
+          130 + Math.round(x * .18 + y * .27),
+          255,
+        ], (y * result.width + x) * 4)
+      }
+    }
+    // A short slice of panel artwork crosses both edges of the selection.
+    for (let y = 93; y < 95; y++) {
+      for (let x = 27; x < 133; x++) result.pixels.fill(9, (y * result.width + x) * 4, (y * result.width + x) * 4 + 3)
+    }
+    return result
+  }
+  const expected = cropWithPatch(paper())
+  const inked = paper()
+  drawInk(inked)
+  const patch = await worker.redraw(inked)
+  assert.ok(patch?.length)
+  const result = cropWithPatch(inked, patch)
+  let largestError = 0
+  for (let i = 0; i < result.length; i++) largestError = Math.max(largestError, Math.abs(result[i] - expected[i]))
+  assert.ok(largestError <= 2, "maximum RGBA error: " + largestError)
+  const crossing = ((93 - area.top) * (area.right - area.left) + 80 - area.left) * 4
+  assert.equal(result[crossing], 9)
+  assert.equal(patch[crossing + 3], 0)
+})

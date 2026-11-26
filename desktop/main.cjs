@@ -73,6 +73,7 @@ app.whenReady().then(() => {
   ipcMain.handle("khung-thoai:redraw-texture", (event, input) => {
     const frame = event.senderFrame
     if (event.sender !== mainWindow?.webContents || frame?.parent || frame?.url.split("#", 1)[0] !== entry) return null
+    if (!worker.available) return undefined
     return worker.redraw(input)
   })
 

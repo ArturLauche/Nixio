@@ -1,4 +1,4 @@
-internal static class TextureRedraw
+internal static partial class RedrawEngine
 {
     private const int TargetSamples = 12_000;
     private const int MaximumPeriod = 16;
@@ -37,8 +37,10 @@ internal static class TextureRedraw
     internal static byte[]? Recover(byte[] pixels, int width, int height, Region area)
     {
         var samples = CollectSamples(pixels, width, height, area);
-        if (samples.Count < 32 || FindTexture(samples) is not { } texture)
+        if (samples.Count < 32)
             return null;
+        if (FindTexture(samples) is not { } texture)
+            return RecoverGradient(pixels, width, height, area, samples);
 
         var patch = new byte[area.Width * area.Height * 4];
         var changed = 0;

@@ -66,19 +66,26 @@ function cleanupPatch(image, rect) {
   context.drawImage(image, -sampleX, -sampleY)
   const { data } = context.getImageData(0, 0, sampleWidth, sampleHeight)
   const inner = { left: left - sampleX, top: top - sampleY, right: right - sampleX, bottom: bottom - sampleY }
-  const paper = estimatePaper(data, sampleWidth, sampleHeight, inner)
-  if (!paper) {
-    const redraw = globalThis.khungThoaiDesktop?.redrawTexture
-    if (!redraw || sampleWidth * sampleHeight > 1_600_000) return null
-    return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
-      .then((bytes) => {
-        if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
-        const patch = new ImageData(new Uint8ClampedArray(bytes), width, height)
-        return createPatch(patch, left, top)
-      })
-      .catch(() => null)
+  const useCanvas = () => {
+    const result = cleanupPaper(context, data, sampleWidth, sampleHeight, inner)
+    return result ? createPatch(result, left, top) : null
   }
+  const redraw = globalThis.khungThoaiDesktop?.redrawTexture
+  if (!redraw || sampleWidth * sampleHeight > 1_600_000) return useCanvas()
+  return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
+    .then((bytes) => {
+      if (bytes === undefined) return useCanvas()
+      if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
+      return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
+    })
+    .catch(() => null)
+}
 
+function cleanupPaper(context, data, sampleWidth, sampleHeight, inner) {
+  const paper = estimatePaper(data, sampleWidth, sampleHeight, inner)
+  if (!paper) return null
+  const width = inner.right - inner.left
+  const height = inner.bottom - inner.top
   const background = luma(paper, 0)
   const result = context.createImageData(width, height)
   let changed = 0
@@ -93,7 +100,7 @@ function cleanupPatch(image, rect) {
     }
   }
   if (!changed || changed > width * height * .48) return null
-  return createPatch(result, left, top)
+  return result
 }
 
 function createPatch(result, left, top) {
