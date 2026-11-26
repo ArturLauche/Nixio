@@ -90,9 +90,9 @@ internal sealed class ProjectStorage : IDisposable
                     if (item.Backup && File.Exists(item.Path))
                     {
                         File.Copy(item.Path, item.Temporary + ".bak");
-                        File.Move(item.Temporary + ".bak", item.Path + ".bak", true);
+                        ReplaceCommittedFile(item.Temporary + ".bak", item.Path + ".bak");
                     }
-                    File.Move(item.Temporary, item.Path, true);
+                    ReplaceCommittedFile(item.Temporary, item.Path);
                 }
                 finally { item.Stream.Dispose(); File.Delete(item.Temporary); File.Delete(item.Temporary + ".bak"); }
                 return (new JsonObject(), []);
@@ -106,6 +106,16 @@ internal sealed class ProjectStorage : IDisposable
             }
             default: throw new InvalidDataException("Unknown native operation: " + operation);
         }
+    }
+
+    private static void ReplaceCommittedFile(string source, string destination)
+    {
+        // ReplaceFile preserves open readers on Windows. MoveFileEx overwrite can deny access
+        // even when those readers explicitly share deletion.
+        if (OperatingSystem.IsWindows() && File.Exists(destination))
+            File.Replace(source, destination, null);
+        else
+            File.Move(source, destination, true);
     }
 
     private Transfer Get(JsonObject options) => transfers.TryGetValue((string)options["id"]!, out var item)

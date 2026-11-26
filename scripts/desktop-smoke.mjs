@@ -18,8 +18,18 @@ if (process.platform === "linux" && !process.env.DISPLAY) args.push("--ozone-pla
 if (!packaged) args.push(root)
 const app = await _electron.launch({ executablePath, args, env: environment, timeout: 30000 })
 const errors = []
+let page
+async function waitForArtifact(read, description) {
+  const deadline = Date.now() + 20000
+  while (Date.now() < deadline) {
+    const value = await read()
+    if (value) return value
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error("Timed out waiting for " + description)
+}
 try {
-  const page = await app.firstWindow()
+  page = await app.firstWindow()
   page.setDefaultTimeout(20000)
   page.on("pageerror", (error) => errors.push(error.message))
   await app.evaluate(({ dialog, session }, directory) => {
@@ -66,13 +76,18 @@ try {
   await page.locator("[data-export=png]").click()
   if (await page.locator("#preflight-dialog").isVisible()) await page.locator("#continue-export").click()
   await page.getByText("Đã tạo tệp xuất.").waitFor()
-  const outputs = await app.evaluate(() => globalThis.downloads)
-  assert.equal((await readFile(outputs[0])).subarray(0, 8).toString("hex"), "89504e470d0a1a0a")
+  const output = await waitForArtifact(() => app.evaluate(() => globalThis.downloads[0]), "PNG download completion")
+  assert.equal((await readFile(output)).subarray(0, 8).toString("hex"), "89504e470d0a1a0a")
   await page.locator("#export-all").click()
   await page.locator("#zip-dialog button[value=export]").click()
   if (await page.locator("#preflight-dialog").isVisible()) await page.locator("#continue-export").click()
   await page.getByText("Đã tạo tệp xuất.").waitFor()
-  const zip = await JSZip.loadAsync(await readFile(path.join(directory, "chapter.zip")))
+  const zipPath = path.join(directory, "chapter.zip")
+  await waitForArtifact(async () => {
+    const info = await stat(zipPath).catch(() => null)
+    return info?.size > 0
+  }, "atomic ZIP commit")
+  const zip = await JSZip.loadAsync(await readFile(zipPath))
   assert.deepEqual(Object.keys(zip.files), ["01-01.png"])
   await page.locator("#box-text").fill("Recover this latest edit")
   await page.locator("#box-form button[type=submit]").click()
@@ -90,4 +105,14 @@ try {
   await mkdir(path.join(root, "artifacts"), { recursive: true })
   await writeFile(path.join(root, "artifacts/desktop-smoke.json"), JSON.stringify({ platform: process.platform, packaged, passed: true }, null, 2))
   console.log((packaged ? "Packaged" : "Source") + " desktop workflow passed on " + process.platform)
+} catch (error) {
+  const artifacts = path.join(root, "artifacts")
+  await mkdir(artifacts, { recursive: true })
+  await writeFile(path.join(artifacts, "desktop-failure.json"), JSON.stringify({
+    message: error.message,
+    status: page ? await page.locator("#status").textContent().catch(() => null) : null,
+    pageErrors: errors,
+  }, null, 2))
+  if (page) await page.screenshot({ path: path.join(artifacts, "desktop-failure.png"), timeout: 3000 }).catch(() => {})
+  throw error
 } finally { await app.close() }
