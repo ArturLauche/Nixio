@@ -11,6 +11,7 @@ import {
   resolveTerms,
   termSummary,
 } from "./terminology-graph.js"
+import { normalizeFontName } from "./fonts.js"
 import { lintStyleGuide, normalizeStyleGuide } from "./style-guide.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
 import { createToolRegistry } from "./tool-registry.js"
@@ -405,7 +406,9 @@ export function createAgentTools({
         if (typeof args.text === "string" && args.text.trim()) box.text = args.text.trim()
         if (Number.isFinite(args.size)) box.size = clamp(Math.round(args.size), 8, 400)
         if (typeof args.font === "string" && args.font.trim()) {
-          const clean = registerFontName?.(args.font) ?? args.font.trim().slice(0, 80)
+          // A staged box is not in the project yet, so the review must not teach the font picker a
+          // family the user could still reject; the render that places the box registers it.
+          const clean = draft ? normalizeFontName(args.font) : registerFontName?.(args.font) ?? normalizeFontName(args.font)
           if (clean) {
             box.font = clean
             renderFontOptions?.()

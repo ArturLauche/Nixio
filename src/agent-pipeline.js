@@ -73,7 +73,12 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
   const rawTimeout = tools.timeoutMs?.(call.name)
   const approvalRequired = tools.needsApproval
     ? tools.needsApproval(call.name, frozenArgs, { confirmBulkEdits, forceWriteApproval })
-    : Boolean(confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs) === true)
+    : // Hosts without needsApproval still owe the same two gates: an untrusted-read turn makes every
+      // write wait for a human, and the bulk switch waits on the tools the registry marks.
+      Boolean(
+        (forceWriteApproval && tools.categoryOf?.(call.name) === "write") ||
+          (confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs) === true),
+      )
   const needsHumanWait = rawTimeout === 0 || approvalRequired
   const timeoutMs = needsHumanWait ? 0 : (rawTimeout ?? 15000)
   const execSignal = fuseSignals(signal, timeoutMs)

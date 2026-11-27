@@ -482,3 +482,25 @@ test("runAgentTurn context budget counts the system prompt once per provider mes
     Math.ceil((geminiBody.systemInstruction.parts[0].text.length + JSON.stringify(geminiBody.contents).length) / 3.6),
   )
 })
+
+test("a host without needsApproval still gates writes after an untrusted read, and the bulk switch (#review)", async () => {
+  // Old hosts passed only requiresApproval, so the pipeline has to keep applying both gates itself.
+  const tools = {
+    timeoutMs: () => 0,
+    categoryOf: (name) => (name === "update_box" ? "write" : "read"),
+    requiresApproval: (name) => name === "delete_box",
+    async execute(name) {
+      return { ok: true, summary: name, data: {} }
+    },
+  }
+  const approvalOf = async (name, options) => {
+    const [result] = await executeToolBatch([{ id: name, name, args: {} }], { tools, ...options })
+    return result.approvalRequired
+  }
+
+  assert.equal(await approvalOf("list_boxes", {}), false)
+  assert.equal(await approvalOf("update_box", { forceWriteApproval: true }), true, "an untrusted read makes every write wait")
+  assert.equal(await approvalOf("update_box", { forceWriteApproval: false }), false)
+  assert.equal(await approvalOf("delete_box", { confirmBulkEdits: true }), true)
+  assert.equal(await approvalOf("list_boxes", { confirmBulkEdits: true }), false, "reads are never gated by the bulk switch")
+})

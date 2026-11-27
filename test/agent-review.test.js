@@ -292,3 +292,30 @@ test("a diff with no visible change stays empty and the glossary diff ignores un
   assert.equal(diffGlossaryChange("a = b", "a = b"), null)
   assert.equal(diffGlossaryChange("a = b", "a = b\nc = d").kind, "glossary")
 })
+
+test("a staged font never teaches the picker a family the user has not accepted (#review)", async () => {
+  const page = makePage()
+  const state = { pages: [page], presets: [], pageId: "p1", boxId: "b1", selectedBoxIds: new Set(["b1"]), queue: [] }
+  const registered = []
+  const rendered = []
+  const { tools } = makeTools(state, page, {
+    registerFontName: (name) => { registered.push(name); return name.trim().slice(0, 80) },
+    renderFontOptions: () => { rendered.push("options") },
+  })
+
+  // Staged: the draft box takes the family, the live picker stays as it was.
+  const session = createReviewSession()
+  tools.beginReview(session)
+  const staged = await tools.execute("update_box", { boxId: "b1", font: "Be Vietnam Pro" }, { callId: "c1" })
+  assert.equal(staged.ok, true)
+  assert.deepEqual(registered, [], "a rejected suggestion must not leave its font in the picker")
+  assert.deepEqual(rendered, [])
+  assert.equal(session.summary().pending, 1)
+
+  // Accepted, the same call registers it because the box is now part of the project.
+  tools.endReview()
+  const direct = await tools.execute("update_box", { boxId: "b1", font: "Be Vietnam Pro" }, { callId: "c2" })
+  assert.equal(direct.ok, true)
+  assert.deepEqual(registered, ["Be Vietnam Pro"])
+  assert.equal(page.boxes[0].font, "Be Vietnam Pro")
+})
