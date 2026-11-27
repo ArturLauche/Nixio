@@ -107,6 +107,35 @@ test("duplicatePage copies content with fresh ids and shares the image assets (#
   assert.equal(page.boxes[0].id, "b1", "the original keeps its ids")
 })
 
+test("duplicating a raw-cleaned page keeps the untouched scan instead of cloning it (#review)", () => {
+  // A raw cleanup keeps the scan it replaced beside the new image. That scan is an
+  // HTMLImageElement, which structuredClone refuses, so the copy has to share it.
+  const originalImage = { naturalWidth: 10, tagName: "IMG" }
+  const page = {
+    id: "p1",
+    name: "01.png",
+    image: { naturalWidth: 10 },
+    file: { name: "01.png" },
+    url: "blob:clean",
+    originalImage,
+    originalFile: { name: "01-raw.png" },
+    originalUrl: "blob:raw",
+    boxes: [{ id: "b1", text: "Xin chào" }],
+  }
+  let n = 0
+  const copy = duplicatePage(page, () => `new-${++n}`)
+  assert.equal(copy.originalImage, originalImage)
+  assert.equal(copy.originalFile, page.originalFile)
+  assert.equal(copy.originalUrl, "blob:raw")
+  assert.equal(copy.url, "blob:clean")
+  assert.notEqual(copy.boxes, page.boxes)
+  assert.equal(copy.boxes[0].id, "new-2")
+  // A page that was never raw-cleaned carries none of the three.
+  const plain = duplicatePage({ id: "p2", name: "02.png", url: "blob:two", boxes: [] }, () => "id")
+  assert.equal("originalImage" in plain, false)
+  assert.equal("originalFile" in plain, false)
+})
+
 test("the page list offers an additive checkbox and a bulk bar wired to the selection (#74)", () => {
   assert.match(main, /selectedPageIds: new Set\(\)/)
   assert.match(main, /check\.type = "checkbox"/)

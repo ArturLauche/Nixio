@@ -64,12 +64,16 @@ export function moveSelectedPages(pages, selectedIds, delta) {
 
 // The copy keeps the image, file and object URL (the URL stays owned once through the shared
 // reference) but gets fresh page and box ids, so selection, history and the inspector never
-// confuse the two. Inpaint origins stay shared the same way history snapshots share them.
+// confuse the two. The untouched scan a raw cleanup kept is shared the same way, because an
+// HTMLImageElement cannot be structured-cloned and would otherwise throw on a cleaned page.
 export function duplicatePage(page, createId = () => crypto.randomUUID()) {
-  const { image, file, url, ...data } = page
+  const { image, file, url, originalImage, originalFile, originalUrl, ...data } = page
   const id = createId()
   const copy = structuredClone(data)
   for (const box of copy.boxes ?? []) box.id = createId()
   shareInpaintOrigins(page.retouchStrokes, copy.retouchStrokes)
-  return { ...copy, id, name: `${page.name} (bản sao)`, image, file, url }
+  return {
+    ...copy, id, name: `${page.name} (bản sao)`, image, file, url,
+    ...(originalFile && { originalImage, originalFile, originalUrl }),
+  }
 }
