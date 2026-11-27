@@ -1,6 +1,10 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { readFile } from "node:fs/promises"
 import { compareMode, toggleCompare } from "../src/compare.js"
+
+const main = await readFile(new URL("../src/main.js", import.meta.url), "utf8")
+const shortcuts = await readFile(new URL("../src/controllers/shortcuts.js", import.meta.url), "utf8")
 
 const editing = () => ({ compareOriginal: false, splitCompare: false, compareRestore: "edit" })
 const apply = (state, mode) => ({ ...state, ...toggleCompare(state, mode) })
@@ -58,4 +62,10 @@ test("a missing, unknown or self-referencing restore falls back to the edit view
   assert.deepEqual(toggleCompare({ compareOriginal: true, compareRestore: "original" }, "original"),
     { compareOriginal: false, splitCompare: false, compareRestore: "edit" })
   assert.deepEqual(toggleCompare(editing(), "nonsense"), editing())
+})
+
+test("the buttons and the backslash keys drive the same toggle (#97)", () => {
+  assert.ok(main.includes('Object.assign(state, toggleCompare(state, "original"))'))
+  assert.ok(main.includes('Object.assign(state, toggleCompare(state, "split"))'))
+  assert.ok(shortcuts.includes('Object.assign(state, toggleCompare(state, event.shiftKey || event.key === "|" ? "split" : "original"))'))
 })
