@@ -512,6 +512,9 @@ function setView() {
   })
 }
 window.addEventListener("hashchange", setView)
+if (typeof matchMedia === "function") {
+  matchMedia("(max-width: 640px)").addEventListener("change", syncToolControls)
+}
 setView()
 
 function selectPage(page) {
@@ -586,6 +589,10 @@ function syncTranslationActions() {
 }
 
 function syncToolControls() {
+  const toolRail = byId("tool-rail")
+  if (toolRail && typeof matchMedia === "function") {
+    toolRail.setAttribute("aria-orientation", matchMedia("(max-width: 640px)").matches ? "horizontal" : "vertical")
+  }
   const select = byId("cleanup-tool")
   const tool = select.value
   const page = selectedPage()
