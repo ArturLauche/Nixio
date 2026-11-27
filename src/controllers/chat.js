@@ -5,6 +5,7 @@ import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkill
 import { createAgentTools } from "../agent-tools.js"
 import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
+import { formatTokens, formatUsd } from "../token-accounting.js"
 
 const searchStorageKey = "khung-thoai-search-config"
 const planExecutionPrompt =
@@ -64,6 +65,7 @@ export function setupChat({
   renderFontOptions,
   notify,
   restoreHistory,
+  usageLedger,
 }) {
   const panel = byId("chat-panel")
   const toggleBtn = byId("open-chat")
@@ -196,6 +198,15 @@ export function setupChat({
       apiKey: byId("llm-key").value.trim(),
     }
   }
+
+  // Every paid call in this panel is booked against the project ledger, so the soft budget and the
+  // per-project totals see agent steps and compaction calls alike.
+  const accounting = usageLedger
+    ? {
+      record: (call) => usageLedger.record({ ...call, pageId: selectedPage()?.id }),
+      gate: () => usageLedger.gate(),
+    }
+    : null
 
   // Main rejects a provider request whose vault entry is missing with a fixed code, so the chat keeps
   // a Vietnamese message instead of echoing main's own wording.
@@ -732,6 +743,7 @@ export function setupChat({
         history: chatHistory,
         settings: readAgentSettings(),
         signal: activeController.signal,
+        accounting,
       })
       if (!res.compacted) {
         statusEl.textContent = "Lịch sử chat còn ngắn, chưa cần nén."
@@ -907,6 +919,7 @@ export function setupChat({
         maxSteps: 10,
         stream: true,
         signal: activeController.signal,
+        accounting,
         onEvent(event) {
           if (event.type === "step") {
             clearStreamPreview()
@@ -941,6 +954,14 @@ export function setupChat({
             }
           } else if (event.type === "usage") {
             updateContextMeter(event.budget)
+          } else if (event.type === "budget") {
+            statusEl.textContent = event.message
+            notify?.({
+              kind: "error",
+              title: "Đã chặn lượt gọi AI",
+              message: event.message,
+              key: "usage-budget-stop",
+            })
           } else if (event.type === "retry") {
             clearStreamPreview()
             statusEl.textContent = `Thử lại kết nối AI lần ${event.attempt}/${event.maxRetries} (${Math.round(event.delayMs / 100) / 10}s)…`
@@ -1015,13 +1036,21 @@ export function setupChat({
         renderDiffCard(computeBoxDiffs(beforeBoxes, state.pages), turnEl)
       }
 
-      statusEl.textContent = result.toolTrace.length
-        ? `Hoàn tất (${result.steps} bước · ${result.toolTrace.length} công cụ).`
-        : "Hoàn tất."
+      statusEl.textContent = result.budgetBlocked
+        ? "Đã dừng vì hạn mức chi phí AI."
+        : result.toolTrace.length
+          ? `Hoàn tất (${result.steps} bước · ${result.toolTrace.length} công cụ).`
+          : "Hoàn tất."
       if (statsEl) {
         const parts = [`${(result.elapsedMs / 1000).toFixed(1)}s`]
         if (result.retriesUsed > 0) parts.push(`${result.retriesUsed} retry`)
         if (result.prunedChars > 0) parts.push(`-${result.prunedChars} kt`)
+        const usage = result.usageTotals
+        if (usage?.totalTokens) {
+          parts.push(`${formatTokens(usage.totalTokens)} token`)
+          if (usage.costUsd > 0) parts.push(formatUsd(usage.costUsd))
+          else if (usage.unpricedCalls > 0) parts.push("chưa đặt giá")
+        }
         statsEl.textContent = parts.join(" · ")
         statsEl.hidden = false
       }

@@ -40,6 +40,7 @@ export function setupTranslation({
   configWritesReady,
   notify,
   notifyOverflowIfAny,
+  usageLedger,
 }) {
   let translationController
 
@@ -273,8 +274,29 @@ export function setupTranslation({
     return { ...settings, key }
   }
 
+  // A translation call is a paid call like an agent step, so it lands in the same project ledger the
+  // chat panel reads (#65 d). The page id keeps the per-page rollup honest across a chapter batch.
+  function recordUsage(page, call) {
+    usageLedger?.record({ ...call, pageId: page?.id })
+  }
+
+  function budgetStopMessage() {
+    const gate = usageLedger?.gate?.()
+    return gate?.blocked ? gate.message : ""
+  }
+
+  // The soft budget refuses the next batch instead of starting pages the project cannot pay for.
+  function stopForBudget() {
+    const message = budgetStopMessage()
+    if (!message) return false
+    status(message, true)
+    notify?.({ kind: "error", title: "Đã chặn lượt dịch AI", message, key: "usage-budget-stop" })
+    return true
+  }
+
   async function processPages(pages, read, action, kind = "translate") {
     if (projectBusy() || !pages.length) return
+    if (stopForBudget()) return
     let settings
     try {
       settings = prepareCredentials(readTranslationSettings())
@@ -298,8 +320,13 @@ export function setupTranslation({
     renderPages()
     renderInspector()
     let activePage
+    let budgetStopped = false
     try {
       for (const page of pages) {
+        if (usageLedger?.gate?.().blocked) {
+          budgetStopped = true
+          break
+        }
         activePage = page
         page.translationJob = { kind, signature, state: "running" }
         renderPages()
@@ -310,6 +337,7 @@ export function setupTranslation({
           context,
           report,
           signal: translationController.signal,
+          onUsage: (call) => recordUsage(page, call),
         })
         translationController.signal.throwIfAborted()
         if (lines.length) {
@@ -335,10 +363,16 @@ export function setupTranslation({
           renderInspector()
         }
       }
+      const budgetMessage = budgetStopped ? budgetStopMessage() : ""
       status(
-        `Đã ${action} ${completed}/${pages.length} trang. ${placed} câu đã đặt và ${skipped} câu chờ đặt.`,
+        budgetMessage
+          ? `${budgetMessage} Đã dừng sau ${completed}/${pages.length} trang.`
+          : `Đã ${action} ${completed}/${pages.length} trang. ${placed} câu đã đặt và ${skipped} câu chờ đặt.`,
+        Boolean(budgetMessage),
       )
-      if (pages.length > 1) {
+      if (budgetMessage) {
+        notify?.({ kind: "error", title: "Đã chặn lượt dịch AI", message: budgetMessage, key: "usage-budget-stop" })
+      } else if (pages.length > 1) {
         notify?.({
           kind: "success",
           title: `Hoàn tất ${action} chương`,
@@ -383,6 +417,7 @@ export function setupTranslation({
     const page = selectedPage()
     if (projectBusy() || !page) return
     if (!page.boxes.length) return status("Trang hiện tại chưa có khung chữ nào để dịch.", true)
+    if (stopForBudget()) return
     let settings
     try {
       settings = prepareCredentials(readTranslationSettings())
@@ -403,7 +438,14 @@ export function setupTranslation({
     renderInspector()
     try {
       const report = (message) => status(page.name + " · " + message)
-      const requestSettings = { ...settings, notes: translationNotes(settings), context, report, signal: translationController.signal }
+      const requestSettings = {
+        ...settings,
+        notes: translationNotes(settings),
+        context,
+        report,
+        signal: translationController.signal,
+        onUsage: (call) => recordUsage(page, call),
+      }
       const translated = await translateBoxesForProvider(settings.provider, page, page.boxes, requestSettings)
       translationController.signal.throwIfAborted()
       const byBoxId = new Map(translated.map((item) => [item.boxId, item]))

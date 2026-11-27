@@ -44,8 +44,10 @@ import { setupDialogs } from "./controllers/dialogs.js"
 import { setupGestures } from "./controllers/gestures.js"
 import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
+import { setupUsage } from "./controllers/usage.js"
 import { announce } from "./live-region.js"
 import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
+import { createUsageLedger } from "./token-accounting.js"
 
 const history = new EditHistory()
 const ownedUrls = new Set()
@@ -1865,6 +1867,11 @@ byId("cleanup-expand").onchange = () => {
 const notifications = createNotificationCenter({ byId })
 const notify = (options) => notifications.notify(options)
 
+// One ledger for every paid provider call in the window; the project that is open when a call lands
+// is the project it is billed to.
+const usageLedger = createUsageLedger({ projectKey: () => state.projectId || "unsaved" })
+setupUsage({ byId, ledger: usageLedger, notify, pageId: () => state.pageId })
+
 function notifyOverflowIfAny(page, sourceLabel = "") {
   if (!page?.boxes?.length) return
   let overflowCount = 0
@@ -2072,6 +2079,7 @@ const translation = setupTranslation({
   pageForScript,
   applyTranslation,
   configWritesReady: credentialMigration,
+  usageLedger,
   onSettingsChange: () => {
     syncTranslationActions()
     chat?.refreshModelBadge()
@@ -2121,6 +2129,7 @@ chat = setupChat({
   registerFontName,
   renderFontOptions,
   restoreHistory,
+  usageLedger,
 })
 
 restoreCustomFonts().then((restored) => {

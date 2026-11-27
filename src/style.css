@@ -1040,6 +1040,18 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 }
 .chat-context-meter[data-level="warn"] { background: var(--warn-bg); color: var(--warn); }
 .chat-context-meter[data-level="high"] { background: var(--danger-bg); color: var(--danger); }
+.chat-usage {
+  font-size: .68rem; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+  background: var(--surface-hover); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.chat-usage[data-level="warn"] { background: var(--warn-bg); color: var(--warn); }
+.chat-usage[data-level="over"] { background: var(--danger-bg); color: var(--danger); }
+.usage-models { display: grid; gap: 5px; margin: 6px 0; }
+.usage-model { display: grid; gap: 3px; }
+.usage-model-name { font-size: .74rem; color: var(--ink); word-break: break-word; }
+.usage-model-prices { display: flex; gap: 5px; flex-wrap: wrap; }
+.usage-model-prices label { display: flex; align-items: center; gap: 3px; font-size: .68rem; color: var(--muted); }
+.usage-model-prices input { width: 66px; min-height: 24px; padding: 2px 4px; font-size: .72rem; }
 .chat-composer { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
 .chat-composer .form-actions { justify-content: flex-end; }
 .chat-todo-bar { padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); max-height: 140px; overflow: auto; }
