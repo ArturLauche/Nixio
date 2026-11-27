@@ -19,6 +19,7 @@ import {
   serializePresetsJson,
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
+import { formatDate, formatTime, isMessage, msg } from "./i18n.js"
 import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
@@ -60,6 +61,7 @@ import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
 import { setupUsage } from "./controllers/usage.js"
 import { setupReplay } from "./controllers/replay.js"
+import { setupLocale } from "./controllers/locale.js"
 import { announce } from "./live-region.js"
 import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
 import { createUsageLedger } from "./token-accounting.js"
@@ -105,12 +107,25 @@ let previewRedraw
 let cleanRawController = null
 let syncLayers = () => {}
 
+// #79: the interface locale is applied before any text is rendered. `t` is the only way a message
+// reaches the screen, and a switch re-renders the status line and the theme label in place.
+let refreshLocaleViews = () => {}
+const i18n = setupLocale({
+  byId,
+  onChange: () => {
+    syncThemeButton()
+    refreshStatus()
+    refreshLocaleViews()
+  },
+})
+const t = (key, params) => i18n.t(key, params)
+
 let currentTheme = applyTheme(loadTheme())
 function syncThemeButton() {
   const btn = byId("toggle-theme")
   if (!btn) return
   const isDark = currentTheme === "dark"
-  btn.textContent = isDark ? "☀ Sáng" : "☾ Tối"
+  btn.textContent = isDark ? t("header.theme.light") : t("header.theme.dark")
   btn.setAttribute("aria-pressed", String(isDark))
 }
 syncThemeButton()
@@ -231,7 +246,7 @@ function restoreHistory(direction) {
   const snapshot = history[direction](editorSnapshot())
   if (!snapshot) return
   applyHistorySnapshot(snapshot)
-  status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
+  status(direction === "undo" ? msg("status.undo") : msg("status.redo"))
 }
 
 // Undo, redo and a timeline jump all apply a snapshot through one path so selection, project
@@ -262,7 +277,7 @@ function undoCleanupAction(token) {
     status(check.message, true)
     notify({
       kind: "warning",
-      title: "Không thể hoàn tác thao tác đã chọn",
+      title: t("notify.undoFailed.title"),
       message: check.message,
       key: "clean-raw-undo",
     })
@@ -294,7 +309,7 @@ function jumpToHistoryRow(actionId) {
   if (!prepareHistoryJump()) return false
   const target = historyTargetFor(actionId)
   if (!target) {
-    status("Mốc này không còn trong lịch sử vì một nhánh chỉnh sửa mới đã thay thế nó. Hãy chọn mốc khác.", true)
+    status(msg("status.history.missing"), true)
     syncHistoryPanel()
     return false
   }
@@ -309,18 +324,18 @@ function jumpToHistoryStart() {
 
 function historyTime(at) {
   const date = new Date(at)
-  const time = date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  const time = formatTime(i18n.locale, date, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   if (date.toDateString() === new Date().toDateString()) return time
-  return `${date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })} ${time}`
+  return `${formatDate(i18n.locale, date, { day: "2-digit", month: "2-digit" })} ${time}`
 }
 
 function prepareHistoryJump() {
   if (projectBusy()) {
-    status("Chưa thể nhảy lịch sử khi đang có tác vụ khác chạy. Hãy đợi tác vụ xong rồi thử lại.", true)
+    status(msg("status.history.busy"), true)
     return false
   }
   if (gestures.hasGesture()) {
-    status("Chưa thể nhảy lịch sử khi đang kéo/thao tác trên ảnh. Hãy kết thúc thao tác đó rồi thử lại.", true)
+    status(msg("status.history.gesture"), true)
     return false
   }
   // A form edit or nudge that is still open becomes its own named action before the playhead
@@ -334,7 +349,7 @@ function jumpHistory(id, label = "") {
   const result = history.jump(id, editorSnapshot())
   if (!result.ok) {
     status(
-      result.reason === "current" ? "Đang ở đúng mốc lịch sử này." : "Mốc lịch sử này không còn trong danh sách.",
+      result.reason === "current" ? msg("status.history.same") : msg("status.history.gone"),
       result.reason !== "current",
     )
     syncHistoryPanel()
@@ -343,10 +358,10 @@ function jumpHistory(id, label = "") {
   applyHistorySnapshot(result.snapshot)
   status(
     id === HISTORY_HEAD
-      ? "Đã trở về mốc mới nhất."
+      ? msg("status.history.head")
       : label
-        ? `Đã quay lại trạng thái sau "${label}".`
-        : "Đã trở về mốc cũ nhất trong lịch sử.",
+        ? msg("status.history.after", { label })
+        : msg("status.history.start"),
   )
   return true
 }
@@ -453,7 +468,7 @@ function jumpToNewestMatch() {
     .at(-1)
   if (!row) {
     syncHistoryPanel()
-    return status("Không còn mốc nào khác để nhảy tới trong lịch sử.", true)
+    return status(msg("status.history.noTarget"), true)
   }
   return jumpHistory(historyJumpTarget(rows, row), row.label)
 }
@@ -519,7 +534,7 @@ byId("font-file").onchange = async (event) => {
       renderCanvas()
       renderInspector()
     }
-    status(`Đã nạp và lưu font "${family}".`)
+    status(msg("status.font.loaded", { family: family }))
   } catch (error) {
     status(error.message, true)
   }
@@ -546,9 +561,18 @@ byId("export-profile")?.addEventListener("change", (event) => {
   saveGlobalExportProfileId(event.currentTarget.value)
 })
 
+let statusDescriptor = null
+
+// A msg() descriptor renders in the active locale and is remembered, so a locale switch redraws
+// the line the user is reading instead of leaving it in the previous language.
 function status(message, error = false) {
-  editorStatus.textContent = message
+  statusDescriptor = isMessage(message) ? message : null
+  editorStatus.textContent = statusDescriptor ? t(statusDescriptor.key, statusDescriptor.params) : String(message ?? "")
   editorStatus.toggleAttribute("data-error", error)
+}
+
+function refreshStatus() {
+  if (statusDescriptor) editorStatus.textContent = t(statusDescriptor.key, statusDescriptor.params)
 }
 
 function listButton(text, onClick, label = text) {
@@ -589,7 +613,9 @@ setView()
 // name the page list shows instead of only its position.
 function pageAnnouncement() {
   const index = selectedIndex()
-  return index < 0 ? "Chưa có trang" : `Trang ${index + 1} / ${state.pages.length}: ${state.pages[index].name}`
+  return index < 0
+    ? t("status.page.none")
+    : t("status.page.position", { index: index + 1, total: state.pages.length, name: state.pages[index].name })
 }
 
 function selectPage(page) {
@@ -634,7 +660,7 @@ function removePage(index) {
   if (!page) return
   if (page.id === state.pageId) selectPage(state.pages[Math.min(index, state.pages.length - 1)])
   else renderPages()
-  status("Đã bỏ " + page.name + ".")
+  status(msg("status.page.removed", { name: page.name }))
 }
 
 function projectBusy() {
@@ -943,7 +969,7 @@ byId("save-preset").onclick = () => {
   const box = selectedBox()
   const name = byId("preset-name").value.trim()
   if (!box || projectBusy()) return
-  if (!name) return status("Hãy nhập tên mẫu dàn chữ.", true)
+  if (!name) return status(msg("status.preset.needName"), true)
   commitLiveFormCheckpoint()
   checkpoint(undefined, { label: `Lưu mẫu dàn chữ "${name}"`, kind: "preset" })
   const preset = { name, style: projectStyle(box) }
@@ -955,8 +981,8 @@ byId("save-preset").onclick = () => {
   const savedIndex = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
   byId("style-preset").value = String(savedIndex >= 0 ? savedIndex : 0)
   status(savedIndex >= 0
-    ? "Đã lưu mẫu toàn cục " + name + "."
-    : `Đã đủ ${MAX_GLOBAL_PRESETS} mẫu dàn chữ; mẫu mới không được lưu.`)
+    ? msg("status.preset.saved", { name })
+    : msg("status.preset.full", { max: MAX_GLOBAL_PRESETS }))
 }
 
 byId("apply-preset").onclick = () => {
@@ -972,7 +998,7 @@ byId("apply-preset").onclick = () => {
       : state.selectedBoxIds.size > 1 && page
         ? page.boxes.filter((b) => state.selectedBoxIds.has(b.id))
         : [selectedBox()].filter(Boolean)
-  if (!boxes.length) return status("Hãy chọn khung để áp dụng mẫu.", true)
+  if (!boxes.length) return status(msg("status.preset.needBox"), true)
   checkpoint(undefined, { label: `Áp dụng mẫu "${preset.name}" cho ${boxes.length} khung`, kind: "preset" })
   const defaults = {
     bold: false, italic: false, uppercase: false, vertical: false,
@@ -983,7 +1009,7 @@ byId("apply-preset").onclick = () => {
   }
   boxes.forEach((box) => Object.assign(box, defaults, preset.style))
   render()
-  status(`Đã áp dụng mẫu cho ${boxes.length} khung.`)
+  status(msg("status.preset.applied", { count: boxes.length }))
 }
 
 byId("delete-preset").onclick = () => {
@@ -995,10 +1021,10 @@ byId("delete-preset").onclick = () => {
 }
 
 byId("export-presets")?.addEventListener("click", () => {
-  if (!state.presets.length) return status("Chưa có mẫu dàn chữ nào để xuất.", true)
+  if (!state.presets.length) return status(msg("status.preset.none"), true)
   const json = serializePresetsJson(state.presets)
   saveFile(new Blob([json], { type: "application/json;charset=utf-8" }), "khung-thoai-presets.json")
-  status(`Đã xuất ${state.presets.length} mẫu dàn chữ ra tệp JSON.`)
+  status(msg("status.preset.exported", { count: state.presets.length }))
 })
 
 byId("import-presets")?.addEventListener("click", () => {
@@ -1017,9 +1043,9 @@ byId("presets-file")?.addEventListener("change", async (event) => {
     for (const preset of imported) registerFontName(preset.style.font)
     renderFontOptions()
     renderPresets()
-    status(`Đã nhập và gộp ${imported.length} mẫu dàn chữ (tổng ${state.presets.length} mẫu).`)
+    status(msg("status.preset.imported", { imported: imported.length, total: state.presets.length }))
   } catch (error) {
-    status("Không nhập được tệp mẫu. " + error.message, true)
+    status(msg("status.preset.importFailed", { error: error.message }), true)
   }
 })
 
@@ -1052,8 +1078,8 @@ byId("cleanup-mode")?.addEventListener("change", () => {
   render()
   status(
     mode === "content-aware"
-      ? "Đã bật xóa chữ nền tranh phức tạp (PatchMatch C#) cho khung đang chọn."
-      : "Đã chuyển về chế độ xóa chữ tự động (Nền trơn / Screentone).",
+      ? msg("status.cleanupMode.contentAware")
+      : msg("status.cleanupMode.auto"),
   )
 })
 
@@ -1064,7 +1090,7 @@ byId("undo-retouch").onclick = () => {
   checkpoint(undefined, { label: "Hoàn tác nét cọ gần nhất", kind: "retouch" })
   page.retouchStrokes.pop()
   render()
-  status("Đã hoàn tác nét cọ gần nhất.")
+  status(msg("status.retouch.undo"))
 }
 
 byId("clear-retouch").onclick = () => {
@@ -1074,7 +1100,7 @@ byId("clear-retouch").onclick = () => {
   checkpoint(undefined, { label: `Xóa toàn bộ nét vẽ tay trang ${page.name}`, kind: "retouch" })
   page.retouchStrokes = []
   render()
-  status("Đã xóa toàn bộ nét vẽ tay trên trang.")
+  status(msg("status.retouch.cleared"))
 }
 
 // The scan the page arrived with is kept before a cleaned copy replaces it, so the original is one
@@ -1110,23 +1136,23 @@ async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true,
   commitLiveFormCheckpoint()
   state.processingNative = true
   renderPages()
-  status("Đang làm sạch ảnh raw (cân bằng trắng, khử nhiễu, tăng sắc nét)…")
+  status(msg("status.raw.running"))
   try {
     const { file, engine } = await cleanRawPageImage(page, options)
     const decoded = await openImage(file)
     const token = checkpoint(undefined, { label: `Làm sạch raw trang ${page.name}`, kind: "raw-cleanup" })
     replaceScan(page, decoded)
     render()
-    status(`Đã làm sạch ảnh raw (${engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS"}). Nhấn Ctrl+Z nếu muốn hoàn tác.`)
+    status(msg("status.raw.done", { engine: engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS" }))
     notify({
       kind: "success",
-      title: "Đã làm sạch ảnh raw",
-      message: `Trang ${page.name} đã được xử lý cân bằng giấy & khử nhiễu (${engine === "native-cs" ? "lõi C#" : "JS"}).`,
+      title: t("notify.raw.done.title"),
+      message: t("notify.raw.done.message", { page: page.name, engine: engine === "native-cs" ? t("notify.raw.engineNative") : "JS" }),
       key: `clean-raw-${page.id}`,
-      actions: [{ label: "Hoàn tác", onClick: () => undoCleanupAction(token) }],
+      actions: [{ label: t("notify.action.undo"), onClick: () => undoCleanupAction(token) }],
     })
   } catch (error) {
-    status("Không thể làm sạch ảnh raw. " + error.message, true)
+    status(msg("status.raw.failed", { error: error.message }), true)
   } finally {
     state.processingNative = false
     render()
@@ -1152,7 +1178,7 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
     for (let i = 0; i < state.pages.length; i++) {
       if (cleanRawController.signal.aborted) break
       const page = state.pages[i]
-      status(`Đang làm sạch raw ${i + 1}/${total} trang (${page.name})…`)
+      status(msg("status.raw.chapterRunning", { index: i + 1, total: total, name: page.name }))
       const { file, engine } = await cleanRawPageImage(page, options)
       if (cleanRawController.signal.aborted) break
       const decoded = await openImage(file)
@@ -1168,20 +1194,20 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
     const stopped = cleanRawController.signal.aborted
     status(
       stopped
-        ? `Đã dừng làm sạch raw sau ${cleaned}/${total} trang.`
-        : `Đã làm sạch raw ${cleaned}/${total} trang (${engineLabel}). Nhấn Ctrl+Z để hoàn tác.`,
+        ? msg("status.raw.chapterStopped", { cleaned, total })
+        : msg("status.raw.chapterDone", { cleaned, total, engine: engineLabel }),
     )
     if (cleaned > 0) {
       notify({
         kind: "success",
-        title: stopped ? "Đã dừng làm sạch raw" : "Hoàn tất làm sạch raw cả chương",
-        message: `Đã xử lý ${cleaned}/${total} trang (${engineLabel}).`,
+        title: stopped ? t("notify.raw.chapter.title.stopped") : t("notify.raw.chapter.title.done"),
+        message: t("notify.raw.chapter.message", { cleaned, total, engine: engineLabel }),
         key: "clean-raw-chapter",
-        actions: [{ label: "Hoàn tác", onClick: () => undoCleanupAction(token) }],
+        actions: [{ label: t("notify.action.undo"), onClick: () => undoCleanupAction(token) }],
       })
     }
   } catch (error) {
-    status(`Lỗi làm sạch raw sau ${cleaned}/${total} trang: ${error.message}`, true)
+    status(msg("status.raw.chapterFailed", { cleaned: cleaned, total: total, error: error.message }), true)
   } finally {
     cleanRawController = null
     state.processingNative = false
@@ -1268,12 +1294,12 @@ byId("webtoon-stitch-run")?.addEventListener("click", async () => {
   const to = clamp(Math.round(Number(byId("webtoon-stitch-to")?.value) || state.pages.length), 1, state.pages.length)
   const startIdx = Math.min(from, to) - 1
   const endIdx = Math.max(from, to) - 1
-  if (endIdx <= startIdx) return status("Hãy chọn ít nhất 2 trang để ghép dọc.", true)
+  if (endIdx <= startIdx) return status(msg("status.webtoon.needPages"), true)
   webtoonDialog?.close()
   commitLiveFormCheckpoint()
   state.processingNative = true
   renderPages()
-  status(`Đang ghép dọc trang ${startIdx + 1}–${endIdx + 1}…`)
+  status(msg("status.webtoon.stitching", { from: startIdx + 1, to: endIdx + 1 }))
   try {
     const subset = state.pages.slice(startIdx, endIdx + 1)
     const files = await stitchPagesVertically(subset, { maxPages: pageLimit - (state.pages.length - subset.length) })
@@ -1282,9 +1308,9 @@ byId("webtoon-stitch-run")?.addEventListener("click", async () => {
     checkpoint(undefined, { label: `Ghép dọc ${subset.length} trang`, kind: "page" })
     state.pages.splice(startIdx, subset.length, ...decoded)
     selectPage(decoded[0])
-    status(`Đã ghép ${subset.length} trang thành ${decoded.length} dải Webtoon (nhấn Ctrl+Z để hoàn tác).`)
+    status(msg("status.webtoon.stitched", { pages: subset.length, strips: decoded.length }))
   } catch (error) {
-    status("Không thể ghép dọc trang. " + error.message, true)
+    status(msg("status.webtoon.stitchFailed", { error: error.message }), true)
   } finally {
     state.processingNative = false
     render()
@@ -1303,11 +1329,11 @@ byId("webtoon-slice-run")?.addEventListener("click", async () => {
   commitLiveFormCheckpoint()
   state.processingNative = true
   renderPages()
-  status(`Đang cắt thông minh trang ${page.name} theo rãnh trống…`)
+  status(msg("status.webtoon.slicing", { name: page.name }))
   try {
     const files = await smartSlicePageImage(page, { targetHeight, profile })
     if (!files.length) {
-      status("Trang hiện tại đã đủ gọn, không cần cắt thêm.")
+      status(msg("status.webtoon.sliceUnneeded"))
       return
     }
     const idx = state.pages.indexOf(page)
@@ -1319,9 +1345,9 @@ byId("webtoon-slice-run")?.addEventListener("click", async () => {
     checkpoint(undefined, { label: `Cắt thông minh trang ${page.name} thành ${decoded.length} trang`, kind: "page" })
     state.pages.splice(idx, 1, ...decoded)
     selectPage(decoded[0])
-    status(`Đã cắt thông minh thành ${decoded.length} trang theo rãnh trống (nhấn Ctrl+Z để hoàn tác).`)
+    status(msg("status.webtoon.sliced", { pages: decoded.length }))
   } catch (error) {
-    status("Không thể cắt trang Webtoon. " + error.message, true)
+    status(msg("status.webtoon.sliceFailed", { error: error.message }), true)
   } finally {
     state.processingNative = false
     render()
@@ -1334,7 +1360,7 @@ byId("detect-bubbles")?.addEventListener("click", () => {
   const direction = byId("direction").value
   const detected = detectAllBubblesOnImage(page.image, { direction })
   if (!detected.length) {
-    return status("Không tìm thấy bong bóng thoại sáng tách biệt nào trên trang này.", true)
+    return status(msg("status.bubble.none"), true)
   }
   const fresh = detected.filter((cand) => {
     const coords = toCoordinates(cand)
@@ -1343,7 +1369,7 @@ byId("detect-bubbles")?.addEventListener("click", () => {
   const capacity = Math.max(0, 24 - page.boxes.length)
   const chosen = fresh.slice(0, capacity)
   if (!chosen.length) {
-    return status("Tất cả bong bóng phát hiện đã có khung hoặc trang đã đạt giới hạn 24 khung.")
+    return status(msg("status.bubble.alreadyFramed"))
   }
   commitLiveFormCheckpoint()
   checkpoint(undefined, { label: `Quét bong bóng trang ${page.name} (${chosen.length} khung)`, kind: "ocr" })
@@ -1366,7 +1392,7 @@ byId("detect-bubbles")?.addEventListener("click", () => {
     state.selectedBoxIds.add(lastBox.id)
   }
   render()
-  status(`Đã quét và tạo tự động ${chosen.length} khung bong bóng thoại trên trang.`)
+  status(msg("status.bubble.created", { count: chosen.length }))
 })
 
 byId("cleanup-tool").onchange = () => {
@@ -1374,14 +1400,14 @@ byId("cleanup-tool").onchange = () => {
   syncToolControls()
   renderCanvas()
   const tool = byId("cleanup-tool").value
-  if (tool === "pan") status("Kéo trên ảnh để di chuyển bản vẽ (hoặc giữ phím Space).")
-  else if (tool === "bubble") status("Bấm vào bên trong một bong bóng thoại sáng để tự động tạo khung khớp viền.")
-  else if (tool === "eyedropper") status("Bấm lên ảnh để hút màu cho cọ vẽ (Shift+bấm để đổi màu chữ).")
-  else if (tool === "paint") status("Kéo cọ trên ảnh để vẽ che chữ theo màu cọ đã chọn.")
-  else if (tool === "clone") status("Giữ Alt + bấm vùng nền mẫu, sau đó kéo cọ để sao chép nền che chữ.")
-  else if (tool === "inpaint") status("Tô cọ lên chữ trên nền tranh phức tạp để tự động tái tạo nền phía sau (PatchMatch + Poisson).")
-  else if (tool === "retouch-erase") status("Tô lên vùng đã vẽ/tẩy để xóa cục bộ nét redraw và lộ lại ảnh gốc.")
-  else if (tool !== "text") status("Chọn khung thoại rồi khoanh vùng hoặc vẽ cọ trên ảnh.")
+  if (tool === "pan") status(msg("status.tool.pan"))
+  else if (tool === "bubble") status(msg("status.tool.bubble"))
+  else if (tool === "eyedropper") status(msg("status.tool.eyedropper"))
+  else if (tool === "paint") status(msg("status.tool.paint"))
+  else if (tool === "clone") status(msg("status.tool.clone"))
+  else if (tool === "inpaint") status(msg("status.tool.inpaint"))
+  else if (tool === "retouch-erase") status(msg("status.tool.retouchErase"))
+  else if (tool !== "text") status(msg("status.tool.generic"))
 }
 document.querySelectorAll("#tool-rail .rail-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -1590,9 +1616,9 @@ async function importPages(files) {
     if (loaded.length && !selectedPage()) selectPage(loaded[0])
     else render()
     if (rejected.length) {
-      status(`Đã thêm ${loaded.length} ảnh. Bỏ qua ${rejected.length} tệp do định dạng, kích thước hoặc giới hạn 50 trang.`, true)
+      status(msg("status.images.addedSkipped", { added: loaded.length, skipped: rejected.length }), true)
     } else if (loaded.length) {
-      status(`Đã thêm ${loaded.length} ảnh.`)
+      status(msg("status.images.added", { count: loaded.length }))
     }
     return loaded
   } finally {
@@ -1665,9 +1691,9 @@ byId("script-file").onchange = async (event) => {
     const script = await readDialogueFile(file)
     checkpoint(undefined, { label: `Nhập kịch bản ${file.name}`, kind: "script" })
     byId("script-text").value = script
-    status("Đã đọc " + file.name + ".")
+    status(msg("status.script.read", { name: file.name }))
   } catch (error) {
-    status("Không nhập được kịch bản. " + error.message, true)
+    status(msg("status.script.failed", { error: error.message }), true)
   } finally {
     state.importingScript = false
     renderPages()
@@ -1699,7 +1725,7 @@ byId("apply-script").onclick = () => {
   const current = selectedPage()
   const groups = groupDialogue(byId("script-text").value)
   if (projectBusy()) return
-  if (!current || !groups.length) return status("Hãy thêm ảnh và nhập lời thoại.", true)
+  if (!current || !groups.length) return status(msg("status.script.needInput"), true)
   commitLiveFormCheckpoint()
   checkpoint(undefined, { label: `Dàn kịch bản (${groups.length} nhóm thoại)`, kind: "script" })
   const unplaced = []
@@ -1718,7 +1744,7 @@ byId("apply-script").onclick = () => {
   }
   state.queue.push(...unplaced)
   render()
-  status(`Đã đặt ${placed} câu. ${unplaced.length} câu chờ đặt thủ công.`)
+  status(msg("status.script.placed", { placed: placed, unplaced: unplaced.length }))
   notifyOverflowIfAny(current, "sau khi dàn kịch bản")
 }
 
@@ -1735,7 +1761,7 @@ function addBox(rectangle, line, record = true) {
   state.placing = false
   renderCanvas()
   renderInspector()
-  status("Đã thêm khung chữ.")
+  status(msg("status.box.added"))
 }
 
 byId("add-box").onclick = () => {
@@ -1745,9 +1771,9 @@ byId("add-box").onclick = () => {
   renderCanvas()
   if (state.placing) {
     stage.focus()
-    status("Bấm hoặc kéo trên ảnh để đặt khung, hoặc nhấn Enter.")
+    status(msg("status.box.placing"))
   } else {
-    status("Đã thoát chế độ đặt khung.")
+    status(msg("status.box.placingCancelled"))
   }
 }
 
@@ -1848,7 +1874,7 @@ form.onsubmit = (event) => {
   renderPages()
   renderCanvas()
   renderInspector()
-  status("Đã lưu khung.")
+  status(msg("status.box.saved"))
 }
 
 function deleteSelectedBoxes() {
@@ -1864,7 +1890,7 @@ function deleteSelectedBoxes() {
   state.selectedBoxIds.clear()
   renderCanvas()
   renderInspector()
-  status(removed > 1 ? `Đã xóa ${removed} khung.` : "Đã xóa khung.")
+  status(removed > 1 ? msg("status.box.removedMany", { count: removed }) : msg("status.box.removed"))
 }
 
 byId("delete-box").onclick = deleteSelectedBoxes
@@ -1881,7 +1907,7 @@ byId("autofit-box").onclick = () => {
   byId("box-size").value = next
   renderCanvas()
   renderInspector()
-  status(`Đã tự khớp cỡ chữ ${next} px.`)
+  status(msg("status.fit.auto", { size: next }))
 }
 
 byId("autofit-page").onclick = () => {
@@ -1891,7 +1917,7 @@ byId("autofit-page").onclick = () => {
   checkpoint(undefined, { label: `Tự khớp cỡ chữ trang ${page.name}`, kind: "text" })
   page.boxes.forEach((box) => { box.size = autoFitBox(page, box) })
   render()
-  status(`Đã khớp cỡ chữ cho ${page.boxes.length} khung trên trang.`)
+  status(msg("status.fit.page", { count: page.boxes.length }))
 }
 
 byId("multi-autofit").onclick = () => {
@@ -1902,7 +1928,7 @@ byId("multi-autofit").onclick = () => {
   const targets = page.boxes.filter((box) => state.selectedBoxIds.has(box.id))
   targets.forEach((box) => { box.size = autoFitBox(page, box) })
   render()
-  status(`Đã khớp cỡ chữ cho ${targets.length} khung đã chọn.`)
+  status(msg("status.fit.selected", { count: targets.length }))
 }
 
 document.querySelectorAll("[data-align]").forEach((button) => {
@@ -1914,7 +1940,7 @@ document.querySelectorAll("[data-align]").forEach((button) => {
     if (!alignBoxes(page.boxes, state.selectedBoxIds, button.dataset.align)) return
     checkpoint(before, { label: `Căn ${alignLabels[button.dataset.align] ?? button.dataset.align} ${state.selectedBoxIds.size} khung`, kind: "layout" })
     render()
-    status("Đã căn hàng các khung đã chọn.")
+    status(msg("status.align.done"))
   }
 })
 
@@ -1927,7 +1953,7 @@ document.querySelectorAll("[data-distribute]").forEach((button) => {
     if (!distributeBoxes(page.boxes, state.selectedBoxIds, button.dataset.distribute)) return
     checkpoint(before, { label: `Chia đều khoảng cách ${distributeLabels[button.dataset.distribute] ?? ""} ${state.selectedBoxIds.size} khung`, kind: "layout" })
     render()
-    status("Đã chia đều khoảng cách các khung đã chọn.")
+    status(msg("status.distribute.done"))
   }
 })
 
@@ -1943,7 +1969,7 @@ function duplicateSelectedBox() {
   state.selectedBoxIds.clear()
   state.selectedBoxIds.add(copy.id)
   render()
-  status("Đã nhân bản khung.")
+  status(msg("status.box.duplicated"))
 }
 byId("duplicate-box").onclick = duplicateSelectedBox
 
@@ -1956,7 +1982,7 @@ function moveBoxLayer(delta) {
   checkpoint(undefined, { label: delta > 0 ? "Đưa khung lên lớp trên" : "Đưa khung xuống lớp dưới", kind: "box" })
   page.boxes = result.boxes
   render()
-  status(delta > 0 ? "Đã đưa khung lên lớp trên." : "Đã đưa khung xuống lớp dưới.")
+  status(delta > 0 ? msg("status.zOrder.up") : msg("status.zOrder.down"))
 }
 byId("box-layer-up").onclick = () => moveBoxLayer(1)
 byId("box-layer-down").onclick = () => moveBoxLayer(-1)
@@ -1991,7 +2017,12 @@ byId("cleanup-expand").onchange = () => {
   render()
 }
 
-const notifications = createNotificationCenter({ byId })
+const notifications = createNotificationCenter({ byId, locale: () => i18n.locale, t })
+// Panels that render their own copy redraw through here when the locale changes.
+refreshLocaleViews = () => {
+  notifications.render()
+  dialogs?.renderFindResults()
+}
 const notify = (options) => notifications.notify(options)
 
 // One ledger for every paid provider call in the window; the project that is open when a call lands
@@ -2017,12 +2048,12 @@ function notifyOverflowIfAny(page, sourceLabel = "") {
   if (!overflowCount) return
   notify({
     kind: "warning",
-    title: `Có ${overflowCount} khung bị tràn chữ`,
-    message: `Trang ${page.name}${sourceLabel ? ` (${sourceLabel})` : ""} có ${overflowCount}/${page.boxes.length} khung chữ vượt quá kích thước khung.`,
+    title: t("notify.overflow.title", { count: overflowCount }),
+    message: t("notify.overflow.message", { page: page.name, source: sourceLabel ? ` (${sourceLabel})` : "", over: overflowCount, total: page.boxes.length }),
     key: `overflow-${page.id}`,
     actions: [
       {
-        label: "Khớp cỡ cả trang",
+        label: t("notify.action.autofitPage"),
         primary: true,
         onClick: () => {
           if (selectedPage() !== page) selectPage(page)
@@ -2040,18 +2071,18 @@ function showUpdateDialog(result) {
   activeUpdateResult = result
   const release = result.release ?? {}
   byId("update-dialog-title").textContent = result.hasUpdate
-    ? `Có bản cập nhật mới v${result.latestVersion}`
-    : "Khung Thoại đã ở phiên bản mới nhất"
+    ? t("update.dialog.available", { version: result.latestVersion })
+    : t("update.dialog.latest")
   const dateText = release.publishedAt
-    ? " · phát hành " + new Date(release.publishedAt).toLocaleDateString("vi-VN")
+    ? " · " + t("update.dialog.released", { date: formatDate(i18n.locale, release.publishedAt) })
     : ""
   byId("update-version-row").textContent = result.hasUpdate
-    ? `Hiện tại: v${result.currentVersion} → Mới nhất: v${result.latestVersion}${dateText}`
-    : `Phiên bản hiện tại: v${result.currentVersion} (mới nhất${dateText})`
+    ? t("update.dialog.versions", { current: result.currentVersion, latest: result.latestVersion, released: dateText })
+    : t("update.dialog.current", { current: result.currentVersion, released: dateText })
   byId("update-notes").textContent = release.notes
     || (result.hasUpdate
-      ? "Mở trang GitHub Releases để tải bản mới nhất và xem đầy đủ thay đổi."
-      : "Bạn đang dùng phiên bản mới nhất của Khung Thoại.")
+      ? t("update.dialog.notesHint")
+      : t("update.dialog.notesLatest"))
 
   const assetsEl = byId("update-assets")
   const assets = Array.isArray(release.assets) ? release.assets : []
@@ -2086,7 +2117,7 @@ byId("update-open-release").onclick = () => {
 byId("update-dismiss-version").onclick = () => {
   if (activeUpdateResult?.latestVersion) {
     dismissUpdateVersion(activeUpdateResult.latestVersion)
-    status(`Đã bỏ qua nhắc cập nhật cho bản v${activeUpdateResult.latestVersion}.`)
+    status(msg("status.update.dismissedFor", { version: activeUpdateResult.latestVersion }))
   }
   updateDialog.close()
 }
@@ -2098,47 +2129,47 @@ async function runUpdateCheck({ force = false } = {}) {
   checkingUpdate = true
   const checkBtn = byId("check-update")
   if (force && checkBtn) checkBtn.disabled = true
-  if (force) status("Đang kiểm tra bản cập nhật mới…")
+  if (force) status(msg("status.update.checking"))
   try {
     const result = await checkAppUpdate({ force, currentVersion: APP_VERSION })
     if (result.skipped) return
     if (!result.ok) {
       if (force) {
-        status(result.error || "Không thể kiểm tra cập nhật.", true)
+        status(result.error || t("status.update.checkFailed"), true)
         notify({
           kind: "warning",
-          title: "Không kiểm tra được cập nhật",
-          message: result.error || "Hãy kiểm tra kết nối mạng hoặc thử lại sau.",
+          title: t("notify.update.failed.title"),
+          message: result.error || t("notify.update.failed.message"),
           key: "app-update",
         })
       }
       return
     }
     if (result.hasUpdate && (!result.dismissed || force)) {
-      if (force) status(`Có bản cập nhật mới v${result.latestVersion}.`)
+      if (force) status(msg("status.update.available", { version: result.latestVersion }))
       notify({
         kind: "update",
-        title: `Có phiên bản mới v${result.latestVersion}`,
-        message: `Bạn đang dùng v${result.currentVersion}. Bấm để xem ghi chú phát hành và tải về.`,
+        title: t("notify.update.available.title", { version: result.latestVersion }),
+        message: t("notify.update.available.message", { current: result.currentVersion }),
         key: "app-update",
         actions: [
-          { label: "Xem bản phát hành", primary: true, onClick: () => showUpdateDialog(result) },
+          { label: t("notify.action.openRelease"), primary: true, onClick: () => showUpdateDialog(result) },
           {
-            label: "Bỏ qua bản này",
+            label: t("update.dismiss"),
             onClick: () => {
               dismissUpdateVersion(result.latestVersion)
-              status(`Đã bỏ qua nhắc cập nhật v${result.latestVersion}.`)
+              status(msg("status.update.dismissed", { version: result.latestVersion }))
             },
           },
         ],
       })
       if (force) showUpdateDialog(result)
     } else if (force) {
-      status(`Khung Thoại v${result.currentVersion} là phiên bản mới nhất.`)
+      status(msg("status.update.latest", { version: result.currentVersion }))
       notify({
         kind: "success",
-        title: "Đã cập nhật mới nhất",
-        message: `Khung Thoại v${result.currentVersion} hiện là phiên bản mới nhất.`,
+        title: t("notify.update.latest.title"),
+        message: t("notify.update.latest.message", { version: result.currentVersion }),
         key: "app-update",
       })
     }
@@ -2159,16 +2190,16 @@ byId("notifications-check-update").onclick = () => {
 window.addEventListener("offline", () => {
   notify({
     kind: "warning",
-    title: "Đã mất kết nối mạng",
-    message: "OCR cục bộ, cọ Inpaint C# và Ollama cục bộ vẫn hoạt động bình thường; Gemini API và Web Search tạm ngưng.",
+    title: t("notify.offline.title"),
+    message: t("notify.offline.message"),
     key: "network-state",
   })
 })
 window.addEventListener("online", () => {
   notify({
     kind: "success",
-    title: "Đã kết nối lại mạng",
-    message: "Gemini API, Web Search và kiểm tra cập nhật đã sẵn sàng trở lại.",
+    title: t("notify.online.title"),
+    message: t("notify.online.message"),
     key: "network-state",
   })
 })
@@ -2198,8 +2229,8 @@ credentialMigration.then(
 )
 
 const shared = {
-  state, byId, status, checkpoint, renderPages, renderInspector, renderCanvas, render,
-  selectedPage, selectedBox, projectBusy, notify, notifyOverflowIfAny,
+  state, byId, status, t, locale: () => i18n.locale, checkpoint, renderPages, renderInspector,
+  renderCanvas, render, selectedPage, selectedBox, projectBusy, notify, notifyOverflowIfAny,
 }
 const gestures = setupGestures({
   ...shared, stage, overlays, pageCanvas, viewport, editorSnapshot,

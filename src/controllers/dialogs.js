@@ -1,9 +1,11 @@
+import { createTranslator, DEFAULT_LOCALE } from "../i18n.js"
 import { findMatches, replaceMatches } from "../tools.js"
 import { normalizeStyleGuide, styleGuideFields } from "../style-guide.js"
 
 export function setupDialogs({
   state,
   byId,
+  t = createTranslator(DEFAULT_LOCALE).t,
   status,
   checkpoint,
   render,
@@ -31,7 +33,7 @@ export function setupDialogs({
     if (field.kind === "select") {
       control = document.createElement("select")
       control.id = "sg-" + field.id
-      control.append(new Option("Theo mặc định", ""))
+      control.append(new Option(t("dialogs.styleGuide.defaultOption"), ""))
       for (const option of field.options) control.append(new Option(option.label, option.value))
     } else if (field.rows) {
       control = document.createElement("textarea")
@@ -73,7 +75,7 @@ export function setupDialogs({
   }
 
   function openStyleGuide() {
-    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    if (projectBusy()) return status(t("status.busy"), true)
     commitLiveForm?.()
     styleGuideBefore = editorSnapshot?.()
     fillStyleGuideForm(state.styleGuide)
@@ -87,10 +89,10 @@ export function setupDialogs({
       return
     }
     state.styleGuide = guide
-    checkpoint(styleGuideBefore, { label: "Đổi hướng dẫn phong cách", kind: "settings" })
+    checkpoint(styleGuideBefore, { label: t("dialogs.styleGuide.historyLabel"), kind: "settings" })
     onStyleGuideChange?.()
     styleGuideDialog.close()
-    status(guide ? "Đã lưu hướng dẫn phong cách của dự án." : "Đã xóa hướng dẫn phong cách của dự án.")
+    status(t(guide ? "dialogs.styleGuide.saved" : "dialogs.styleGuide.cleared"))
   }
 
   byId("open-style-guide").onclick = openStyleGuide
@@ -118,19 +120,20 @@ export function setupDialogs({
     const query = byId("find-query").value
     const results = byId("find-results")
     if (!query) {
-      byId("find-summary").textContent = "Nhập từ khóa để tìm trong toàn bộ chương."
+      byId("find-summary").textContent = t("find.prompt")
       results.replaceChildren()
       return
     }
     const matches = findMatches(state.pages, query, findOptions())
     const totalOccurrences = matches.reduce((sum, item) => sum + item.count, 0)
     byId("find-summary").textContent = matches.length
-      ? `Tìm thấy ${totalOccurrences} kết quả trong ${matches.length} mục.`
-      : "Không tìm thấy kết quả phù hợp."
+      ? t("find.summary", { occurrences: totalOccurrences, items: matches.length })
+      : t("find.none")
     results.replaceChildren(
       ...matches.map((match) => {
         const li = document.createElement("li")
-        const prefix = `Trang ${match.pageIndex + 1}${match.isUnplaced ? " (chưa đặt)" : ""} · `
+        const prefix = t("find.pagePrefix", { page: match.pageIndex + 1 })
+          + (match.isUnplaced ? t("find.unplacedSuffix") : "") + " · "
         li.append(
           listButton(prefix + match.text.slice(0, 80), () => {
             findDialog.close()
@@ -151,7 +154,7 @@ export function setupDialogs({
   }
 
   function openFind() {
-    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    if (projectBusy()) return status(t("status.busy"), true)
     findError(null)
     commitLiveForm?.()
     if (!findDialog.open) findDialog.showModal()
@@ -175,10 +178,10 @@ export function setupDialogs({
   byId("find-unplaced").onchange = renderFindResults
 
   byId("replace-all-btn").onclick = () => {
-    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    if (projectBusy()) return status(t("status.busy"), true)
     const query = byId("find-query").value
     if (!query) {
-      findError("Hãy nhập nội dung cần tìm.")
+      findError(t("find.needQuery"))
       byId("find-query").focus()
       return
     }
@@ -186,8 +189,8 @@ export function setupDialogs({
     const replacement = byId("replace-text").value
     commitLiveForm?.()
     const matches = findMatches(state.pages, query, findOptions())
-    if (!matches.length) return status("Không có mục nào khớp để thay thế.")
-    checkpoint(undefined, { label: `Thay thế "${query}" trong chương`, kind: "find" })
+    if (!matches.length) return status(t("find.noMatch"))
+    checkpoint(undefined, { label: t("find.historyLabel", { query }), kind: "find" })
     const { replacedItems, replacedOccurrences, skippedEmpty } = replaceMatches(
       state.pages,
       query,
@@ -196,8 +199,8 @@ export function setupDialogs({
     )
     render()
     renderFindResults()
-    const extra = skippedEmpty ? ` (bỏ qua ${skippedEmpty} mục để tránh rỗng)` : ""
-    status(`Đã thay ${replacedOccurrences} vị trí trong ${replacedItems} mục.${extra}`)
+    const extra = skippedEmpty ? t("find.replacedSkipped", { count: skippedEmpty }) : ""
+    status(t("find.replaced", { occurrences: replacedOccurrences, items: replacedItems, extra }))
   }
 
   byId("open-shortcuts").onclick = openShortcuts

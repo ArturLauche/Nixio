@@ -220,7 +220,7 @@ test("the shortcut dialog documents the keyboard geometry keys", async () => {
     "Dịch khung 1 px (giữ Shift: 10 px), hút theo lưới căn thẳng hàng",
     "Tab tới tay cầm rồi mũi tên",
     "Mũi tên trên tay cầm xoay",
-    "<dt>G</dt>",
+    "<dt data-i18n=\"shortcuts.geometryKey\">G</dt>",
     "Esc (trong thao tác phím)",
   ]) {
     assert.ok(markup.includes(row), `the shortcut table must list ${row}`)

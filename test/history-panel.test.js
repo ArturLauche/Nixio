@@ -181,9 +181,9 @@ test("a row jump is guarded by busy, gesture and the open form edit", () => {
   for (const [busy, gesturing, accepted] of [[true, false, false], [false, true, false], [false, false, true]]) {
     let committed = 0
     const prepare = new Function(
-      "projectBusy", "gestures", "status", "commitLiveFormCheckpoint",
+      "projectBusy", "gestures", "status", "commitLiveFormCheckpoint", "msg",
       mainFunction("prepareHistoryJump") + "\nreturn prepareHistoryJump",
-    )(() => busy, { hasGesture: () => gesturing }, () => {}, () => { committed++ })
+    )(() => busy, { hasGesture: () => gesturing }, () => {}, () => { committed++ }, (key) => key)
     assert.equal(prepare(), accepted)
     assert.equal(committed, accepted ? 1 : 0)
   }
@@ -317,7 +317,9 @@ test("the oldest state has its own control and reports when it is already curren
   assert.match(main, /byId\("history-start"\)\.onclick = \(\) => jumpToHistoryStart\(\)/)
   assert.match(mainFunction("syncHistoryPanel"), /byId\("history-start"\)\.disabled = !rows\.length \|\| applied === 0/)
   assert.match(mainFunction("jumpToHistoryStart"), /jumpHistory\(HISTORY_START, ""\)/)
-  assert.match(mainFunction("jumpHistory"), /Đã trở về mốc cũ nhất trong lịch sử\./)
+  // The copy lives in the catalogue now, so the jump names the key instead of a literal.
+  assert.match(mainFunction("jumpHistory"), /msg\("status\.history\.start"\)/)
+  assert.match(mainFunction("jumpHistory"), /msg\("status\.history\.head"\)/)
 })
 
 test("a pending nudge is finalized before the next action, a jump and a keyboard undo", () => {

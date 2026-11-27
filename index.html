@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#111418">
-  <title>Khung Thoại — Biên tập trang truyện</title>
+  <title data-i18n="app.title">Khung Thoại — Biên tập trang truyện</title>
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
@@ -12,18 +12,26 @@
   <p id="live-region-alert" class="sr-only" role="alert" aria-atomic="true"></p>
   <header class="app-header">
     <a class="wordmark" href="#editor" data-view="editor"><span>KT</span> Khung Thoại</a>
-    <nav aria-label="Không gian làm việc">
-      <a href="#editor" data-view="editor" aria-current="page">Biên tập</a>
-      <a href="#library" data-view="library">Thư viện chương</a>
+    <nav aria-label="Không gian làm việc" data-i18n-aria-label="nav.workspace">
+      <a href="#editor" data-view="editor" aria-current="page" data-i18n="nav.editor">Biên tập</a>
+      <a href="#library" data-view="library" data-i18n="nav.library">Thư viện chương</a>
     </nav>
     <div class="header-actions">
-      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
-      <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)">Trợ lý AI</button>
-      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H / Ctrl+F)">Tìm &amp; thay</button>
-      <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
-      <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại">Cập nhật</button>
-      <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" title="Trung tâm thông báo">Thông báo <span id="notif-badge" class="notif-badge" hidden>0</span></button>
-      <button type="button" class="button header-export" id="export-all">Xuất cả lượt</button>
+      <label class="header-locale" for="locale-select">
+        <span class="sr-only" data-i18n="header.locale">Ngôn ngữ giao diện</span>
+        <select id="locale-select" aria-label="Ngôn ngữ giao diện" data-i18n-aria-label="header.locale" title="Ngôn ngữ giao diện" data-i18n-title="header.locale">
+          <option value="vi">Tiếng Việt</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+        </select>
+      </label>
+      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối" data-i18n-title="header.theme.title">☾ Tối</button>
+      <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)" data-i18n-title="header.chat.title" data-i18n="header.chat">Trợ lý AI</button>
+      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H / Ctrl+F)" data-i18n-title="header.find.title" data-i18n="header.find">Tìm &amp; thay</button>
+      <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)" data-i18n-title="header.shortcuts.title" data-i18n="header.shortcuts">Phím tắt</button>
+      <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại" data-i18n-title="header.update.title" data-i18n="header.update">Cập nhật</button>
+      <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" data-i18n-aria-label="notifications.label" title="Trung tâm thông báo" data-i18n-title="notifications.label"><span data-i18n="notifications.title">Thông báo</span> <span id="notif-badge" class="notif-badge" hidden>0</span></button>
+      <button type="button" class="button header-export" id="export-all" data-i18n="header.export">Xuất cả lượt</button>
     </div>
   </header>
 
@@ -535,12 +543,12 @@
   </main>
 
   <dialog id="project-library">
-    <h2>Dự án gần đây và phục hồi</h2>
+    <h2 data-i18n="projectLibrary.title">Dự án gần đây và phục hồi</h2>
     <p id="project-library-busy" class="muted" hidden></p>
-    <p id="project-library-empty" class="muted">Chưa có dự án đã lưu.</p>
-    <button type="button" class="button" id="legacy-recovery" hidden>Khôi phục phiên tự lưu cũ</button>
+    <p id="project-library-empty" class="muted" data-i18n="projectLibrary.empty">Chưa có dự án đã lưu.</p>
+    <button type="button" class="button" id="legacy-recovery" hidden data-i18n="projectLibrary.legacy">Khôi phục phiên tự lưu cũ</button>
     <div id="recent-projects"></div>
-    <form method="dialog"><button class="button">Đóng</button></form>
+    <form method="dialog"><button class="button" data-i18n="dialog.close">Đóng</button></form>
   </dialog>
   <dialog id="ocr-review">
     <h2>Kiểm tra kết quả OCR</h2>
@@ -554,7 +562,7 @@
     <form method="dialog"><button class="button">Đóng</button></form>
   </dialog>
   <dialog id="preflight-dialog">
-    <h2>Rà trước khi xuất</h2>
+    <h2 data-i18n="preflight.title">Rà trước khi xuất</h2>
     <p id="preflight-summary" class="muted"></p>
     <div id="qa-filters">
       <label class="field" for="qa-filter-state">Trạng thái<select id="qa-filter-state"></select></label>
@@ -565,67 +573,67 @@
     <p id="qa-summary" class="muted" role="status"></p>
     <ol id="preflight-issues" class="box-list"></ol>
     <div class="form-actions">
-      <button type="button" id="close-preflight" class="button">Đóng</button>
-      <button type="button" id="continue-export" class="button primary">Vẫn xuất</button>
+      <button type="button" id="close-preflight" class="button" data-i18n="dialog.close">Đóng</button>
+      <button type="button" id="continue-export" class="button primary" data-i18n="preflight.continue">Vẫn xuất</button>
     </div>
   </dialog>
   <dialog id="style-guide-dialog">
-    <h2>Hướng dẫn phong cách dự án</h2>
-    <p class="muted">Quy tắc được lưu cùng tệp dự án, tự tiêm vào mọi lượt dịch và được Trợ lý AI dùng để rà lỗi tức thì (0-token).</p>
+    <h2 data-i18n="styleGuide.title">Hướng dẫn phong cách dự án</h2>
+    <p class="muted" data-i18n="styleGuide.description">Quy tắc được lưu cùng tệp dự án, tự tiêm vào mọi lượt dịch và được Trợ lý AI dùng để rà lỗi tức thì (0-token).</p>
     <div id="style-guide-fields"></div>
     <div class="form-actions">
-      <button type="button" id="save-style-guide" class="button primary">Lưu hướng dẫn</button>
-      <button type="button" id="clear-style-guide" class="button">Xóa toàn bộ</button>
-      <button type="button" id="close-style-guide" class="button">Đóng</button>
+      <button type="button" id="save-style-guide" class="button primary" data-i18n="styleGuide.save">Lưu hướng dẫn</button>
+      <button type="button" id="clear-style-guide" class="button" data-i18n="styleGuide.clear">Xóa toàn bộ</button>
+      <button type="button" id="close-style-guide" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="find-replace-dialog">
-    <h2>Tìm và thay thế trong chương</h2>
-    <label class="field" for="find-query">Tìm kiếm
-      <input id="find-query" type="search" placeholder="Nhập từ hoặc cụm thoại cần tìm">
+    <h2 data-i18n="find.title">Tìm và thay thế trong chương</h2>
+    <label class="field" for="find-query"><span data-i18n="find.query">Tìm kiếm</span>
+      <input id="find-query" type="search" placeholder="Nhập từ hoặc cụm thoại cần tìm" data-i18n-placeholder="find.queryPlaceholder">
     </label>
     <p id="find-error" class="find-error" role="alert"></p>
-    <label class="field" for="replace-text">Thay bằng
-      <input id="replace-text" type="text" placeholder="Nội dung thay thế">
+    <label class="field" for="replace-text"><span data-i18n="find.replace">Thay bằng</span>
+      <input id="replace-text" type="text" placeholder="Nội dung thay thế" data-i18n-placeholder="find.replacePlaceholder">
     </label>
     <div class="style-toggles">
-      <label class="choice"><input id="find-case" type="checkbox"> Phân biệt hoa/thường</label>
-      <label class="choice"><input id="find-word" type="checkbox"> Khớp nguyên từ</label>
-      <label class="choice"><input id="find-unplaced" type="checkbox"> Gồm câu chưa đặt</label>
+      <label class="choice"><input id="find-case" type="checkbox"> <span data-i18n="find.case">Phân biệt hoa/thường</span></label>
+      <label class="choice"><input id="find-word" type="checkbox"> <span data-i18n="find.word">Khớp nguyên từ</span></label>
+      <label class="choice"><input id="find-unplaced" type="checkbox"> <span data-i18n="find.unplaced">Gồm câu chưa đặt</span></label>
     </div>
     <p id="find-summary" class="muted" role="status"></p>
     <ol id="find-results" class="box-list"></ol>
     <div class="form-actions">
-      <button type="button" id="replace-all-btn" class="button primary">Thay tất cả</button>
-      <button type="button" id="close-find" class="button">Đóng</button>
+      <button type="button" id="replace-all-btn" class="button primary" data-i18n="find.replaceAll">Thay tất cả</button>
+      <button type="button" id="close-find" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="shortcuts-dialog">
-    <h2>Phím tắt biên tập</h2>
+    <h2 data-i18n="shortcuts.title">Phím tắt biên tập</h2>
     <dl class="shortcuts-list">
-      <div><dt>Ctrl / Cmd + Z</dt><dd>Hoàn tác</dd></div>
-      <div><dt>Ctrl / Cmd + Shift + Z / Y</dt><dd>Làm lại</dd></div>
-      <div><dt>Ctrl / Cmd + D</dt><dd>Nhân bản khung đang chọn</dd></div>
-      <div><dt>Ctrl / Cmd + H hoặc F</dt><dd>Tìm và thay thế trong chương</dd></div>
-      <div><dt>Ctrl / Cmd + Shift + H</dt><dd>Lịch sử thao tác có tên, nhảy tới mốc</dd></div>
-      <div><dt>Ctrl + Cuộn chuột</dt><dd>Thu phóng bản vẽ (25%–400%)</dd></div>
-      <div><dt>Giữ Space + Kéo / Chuột giữa</dt><dd>Kéo bàn vẽ (Pan)</dd></div>
-      <div><dt>Phím \</dt><dd>Bật/tắt so sánh với ảnh gốc</dd></div>
-      <div><dt>Shift + \</dt><dd>Bật/tắt thanh kéo so sánh gốc</dd></div>
-      <div><dt>Shift + Kéo tay cầm xoay</dt><dd>Xoay khung theo nấc 15°</dd></div>
-      <div><dt>Shift + Bấm khung</dt><dd>Chọn nhiều khung để kéo / căn hàng</dd></div>
-      <div><dt>Alt + Kéo khung</dt><dd>Tạm tắt hút lưới căn thẳng hàng</dd></div>
-      <div><dt>Alt + Bấm (Cọ sao chép)</dt><dd>Chọn điểm nguồn sao chép nền</dd></div>
-      <div><dt>Mũi tên (khi chọn khung)</dt><dd>Dịch khung 1 px (giữ Shift: 10 px), hút theo lưới căn thẳng hàng (giữ Alt: tắt hút)</dd></div>
-      <div><dt>Tab tới tay cầm rồi mũi tên</dt><dd>Co giãn khung 1 px (giữ Shift: 10 px); cả nhóm đang chọn co giãn theo</dd></div>
-      <div><dt>Mũi tên trên tay cầm xoay</dt><dd>Xoay khung 15° (giữ Shift: 45°)</dd></div>
-      <div><dt>G</dt><dd>Mở ô toạ độ khung: X, Y, rộng, cao</dd></div>
-      <div><dt>Esc (trong thao tác phím)</dt><dd>Huỷ lần dịch / co giãn / xoay vừa làm</dd></div>
-      <div><dt>Delete / Backspace</dt><dd>Xóa khung đang chọn</dd></div>
-      <div><dt>Enter (trên ảnh)</dt><dd>Thêm khung chữ ở giữa trang</dd></div>
+      <div><dt>Ctrl / Cmd + Z</dt><dd data-i18n="shortcuts.undo">Hoàn tác</dd></div>
+      <div><dt>Ctrl / Cmd + Shift + Z / Y</dt><dd data-i18n="shortcuts.redo">Làm lại</dd></div>
+      <div><dt>Ctrl / Cmd + D</dt><dd data-i18n="shortcuts.duplicate">Nhân bản khung đang chọn</dd></div>
+      <div><dt data-i18n="shortcuts.key.find">Ctrl / Cmd + H hoặc F</dt><dd data-i18n="shortcuts.find">Tìm và thay thế trong chương</dd></div>
+      <div><dt>Ctrl / Cmd + Shift + H</dt><dd data-i18n="shortcuts.history">Lịch sử thao tác có tên, nhảy tới mốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.zoom">Ctrl + Cuộn chuột</dt><dd data-i18n="shortcuts.zoom">Thu phóng bản vẽ (25%–400%)</dd></div>
+      <div><dt data-i18n="shortcuts.key.pan">Giữ Space + Kéo / Chuột giữa</dt><dd data-i18n="shortcuts.pan">Kéo bàn vẽ (Pan)</dd></div>
+      <div><dt data-i18n="shortcuts.key.compare">Phím \</dt><dd data-i18n="shortcuts.compare">Bật/tắt so sánh với ảnh gốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.splitCompare">Shift + \</dt><dd data-i18n="shortcuts.splitCompare">Bật/tắt thanh kéo so sánh gốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.rotate">Shift + Kéo tay cầm xoay</dt><dd data-i18n="shortcuts.rotate">Xoay khung theo nấc 15°</dd></div>
+      <div><dt data-i18n="shortcuts.key.multiSelect">Shift + Bấm khung</dt><dd data-i18n="shortcuts.multiSelect">Chọn nhiều khung để kéo / căn hàng</dd></div>
+      <div><dt data-i18n="shortcuts.key.noSnap">Alt + Kéo khung</dt><dd data-i18n="shortcuts.noSnap">Tạm tắt hút lưới căn thẳng hàng</dd></div>
+      <div><dt data-i18n="shortcuts.key.clone">Alt + Bấm (Cọ sao chép)</dt><dd data-i18n="shortcuts.clone">Chọn điểm nguồn sao chép nền</dd></div>
+      <div><dt data-i18n="shortcuts.key.nudge">Mũi tên (khi chọn khung)</dt><dd data-i18n="shortcuts.nudge">Dịch khung 1 px (giữ Shift: 10 px), hút theo lưới căn thẳng hàng (giữ Alt: tắt hút)</dd></div>
+      <div><dt data-i18n="shortcuts.resizeKey">Tab tới tay cầm rồi mũi tên</dt><dd data-i18n="shortcuts.resize">Co giãn khung 1 px (giữ Shift: 10 px); cả nhóm đang chọn co giãn theo</dd></div>
+      <div><dt data-i18n="shortcuts.rotateGripKey">Mũi tên trên tay cầm xoay</dt><dd data-i18n="shortcuts.rotateGrip">Xoay khung 15° (giữ Shift: 45°)</dd></div>
+      <div><dt data-i18n="shortcuts.geometryKey">G</dt><dd data-i18n="shortcuts.geometry">Mở ô toạ độ khung: X, Y, rộng, cao</dd></div>
+      <div><dt data-i18n="shortcuts.cancelGestureKey">Esc (trong thao tác phím)</dt><dd data-i18n="shortcuts.cancelGesture">Huỷ lần dịch / co giãn / xoay vừa làm</dd></div>
+      <div><dt>Delete / Backspace</dt><dd data-i18n="shortcuts.delete">Xóa khung đang chọn</dd></div>
+      <div><dt data-i18n="shortcuts.key.newBox">Enter (trên ảnh)</dt><dd data-i18n="shortcuts.newBox">Thêm khung chữ ở giữa trang</dd></div>
     </dl>
     <div class="form-actions">
-      <button type="button" id="close-shortcuts" class="button primary">Đóng</button>
+      <button type="button" id="close-shortcuts" class="button primary" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="zip-dialog">
@@ -748,16 +756,16 @@
     </form>
   </aside>
 
-  <aside id="notifications-panel" class="notifications-panel" aria-label="Trung tâm thông báo" hidden>
+  <aside id="notifications-panel" class="notifications-panel" aria-label="Trung tâm thông báo" data-i18n-aria-label="notifications.label" hidden>
     <div class="notifications-header">
-      <h2>Thông báo</h2>
+      <h2 data-i18n="notifications.title">Thông báo</h2>
       <div class="chat-header-actions">
-        <button type="button" id="notifications-check-update" class="button">Kiểm tra cập nhật</button>
-        <button type="button" id="notifications-clear" class="button">Xóa hết</button>
-        <button type="button" id="notifications-close" class="button" aria-label="Đóng trung tâm thông báo">×</button>
+        <button type="button" id="notifications-check-update" class="button" data-i18n="notifications.checkUpdate">Kiểm tra cập nhật</button>
+        <button type="button" id="notifications-clear" class="button" data-i18n="notifications.clear">Xóa hết</button>
+        <button type="button" id="notifications-close" class="button" aria-label="Đóng trung tâm thông báo" data-i18n-aria-label="notifications.close">×</button>
       </div>
     </div>
-    <p id="notifications-empty" class="muted notifications-empty">Chưa có thông báo nào trong phiên này.</p>
+    <p id="notifications-empty" class="muted notifications-empty" data-i18n="notifications.empty">Chưa có thông báo nào trong phiên này.</p>
     <ol id="notifications-list" class="notifications-list"></ol>
   </aside>
 
@@ -769,9 +777,9 @@
     <pre id="update-notes" class="update-notes"></pre>
     <div id="update-assets" class="update-assets" hidden></div>
     <div class="form-actions">
-      <button type="button" id="update-open-release" class="button primary">Mở trang phát hành</button>
-      <button type="button" id="update-dismiss-version" class="button">Bỏ qua bản này</button>
-      <button type="button" id="update-close" class="button">Đóng</button>
+      <button type="button" id="update-open-release" class="button primary" data-i18n="update.openRelease">Mở trang phát hành</button>
+      <button type="button" id="update-dismiss-version" class="button" data-i18n="update.dismiss">Bỏ qua bản này</button>
+      <button type="button" id="update-close" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
 
