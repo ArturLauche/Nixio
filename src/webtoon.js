@@ -156,9 +156,11 @@ export function findSmartSliceCuts(
  * Smart-slices a single tall webtoon page into clean PNG Files along detected empty gutters.
  *
  * Detection uses a bounded probe; requested heights stay in original image units and are
- * converted to probe rows before the cut search so wide pages are not sliced too tall.
+ * converted to probe rows before the cut search so wide pages are not sliced too tall. The
+ * target height falls back to the active export profile, so a platform's slice height drives
+ * the dialog instead of a hard-coded number.
  */
-export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
+export async function smartSlicePageImage(page, { targetHeight, profile } = {}) {
   const img = page?.image
   const width = Math.floor(Number(img?.naturalWidth))
   const height = Math.floor(Number(img?.naturalHeight))
@@ -171,7 +173,7 @@ export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
       `Kích thước ảnh (${width} px) vượt giới hạn canvas ${CANVAS_LIMITS.maxEdge} px / ${CANVAS_LIMITS.maxPixels} điểm ảnh để cắt.`,
     )
   }
-  const requestedTarget = Number(targetHeight)
+  const requestedTarget = Number(targetHeight ?? profile?.maxSliceHeight)
   const target = Math.max(1, Math.round(Number.isFinite(requestedTarget) && requestedTarget > 0 ? requestedTarget : 1600))
   const sliceTarget = Math.min(target, maxSliceHeight)
 
@@ -246,6 +248,65 @@ export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
     const num = String(files.length + 1).padStart(2, "0")
     files.push(new File([blob], `${stem}-${num}.png`, { type: "image/png" }))
     top = bottom
+  }
+  return files
+}
+
+/**
+ * Renders one planned export profile: every slice comes out at the profile's canvas width, scaled
+ * from the source image, padded by the profile's safe margins and encoded with the profile's
+ * format and quality. `onSlice` reports each produced file, in slice order.
+ */
+export async function renderExportSlices(image, plan, { background = "#ffffff", onSlice } = {}) {
+  const profile = plan?.profile
+  if (!profile?.format || !Array.isArray(plan?.slices) || !plan.slices.length) {
+    throw new Error("Kế hoạch xuất theo hồ sơ không hợp lệ.")
+  }
+  const width = Math.floor(Number(image?.naturalWidth))
+  const height = Math.floor(Number(image?.naturalHeight))
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error("Trang không có ảnh hợp lệ để xuất theo hồ sơ.")
+  }
+  // The plan is made from this image's size, so a plan that runs past it would cut the wrong rows.
+  for (const slice of plan.slices) {
+    if (slice.sourceY < 0 || slice.sourceY + slice.sourceHeight > height) {
+      throw new Error(`Kế hoạch xuất theo hồ sơ "${profile.name}" không khớp ảnh ${width}×${height}.`)
+    }
+  }
+  const mime = profile.format === "jpeg" ? "image/jpeg" : "image/png"
+  const quality = profile.format === "jpeg" ? profile.quality : undefined
+  const files = []
+  for (const slice of plan.slices) {
+    const canvas = document.createElement("canvas")
+    canvas.width = slice.canvasWidth
+    canvas.height = slice.canvasHeight
+    const context = canvas.getContext("2d")
+    if (profile.format === "jpeg") {
+      context.fillStyle = background
+      context.fillRect(0, 0, canvas.width, canvas.height)
+    }
+    context.drawImage(
+      image,
+      0,
+      slice.sourceY,
+      width,
+      slice.sourceHeight,
+      slice.destX,
+      slice.destY,
+      slice.destWidth,
+      slice.destHeight,
+    )
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, mime, quality))
+    if (!blob) throw new Error(`Không thể mã hóa mảnh ${slice.fileName}.`)
+    files.push(new File([blob], slice.fileName, { type: mime }))
+    onSlice?.({
+      index: slice.index,
+      total: plan.slices.length,
+      order: slice.order,
+      fileName: slice.fileName,
+      width: canvas.width,
+      height: canvas.height,
+    })
   }
   return files
 }

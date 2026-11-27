@@ -20,7 +20,7 @@ Dự án được xây dựng độc lập sau khi khảo sát luồng công kha
 | OCR cục bộ offline (Tesseract, tiền xử lý phóng lớn/giảm nhiễu/xoay 0–270°, chữ dọc Nhật `jpn_vert`, gom dòng & cửa sổ duyệt kết quả có độ tin cậy) | — | Có |
 | Tìm & thay thế toàn chương, xuất kịch bản (`TXT` / `CSV` / `JSON`), **Glossary & QA Linter 0-token** + rà trước khi xuất (**Export Preflight**) | Có | Có |
 | Lưu / mở dự án `.khungthoai` v2 (tương thích ngược v1) & tự lưu phục hồi | Tự lưu IndexedDB mỗi 20 giây & khi ẩn tab, mỗi tab/page instance một slot (không dọn bản của tab khác), chọn rõ bản để khôi phục | Dự án gần đây + tối đa 10 mốc tự lưu theo từng dự án, giữ bản `.bak`, tự lưu khi đóng app và bản lưu trình duyệt dự phòng khi worker C# chưa sẵn sàng |
-| Xuất tệp | PNG, PSD lớp chữ (kèm Photoshop Layer Style `stroke`/`dropShadow`), PSD lớp ảnh, ZIP | Như Web + ghép & xuất PNG/ZIP trực tiếp bằng C# kèm bảng Tác vụ tiến độ & Hủy |
+| Xuất tệp | PNG, PSD lớp chữ (kèm Photoshop Layer Style `stroke`/`dropShadow`), PSD lớp ảnh, ZIP theo hồ sơ nền tảng (chia mảnh + `manifest.json`) | Như Web + dựng trang và mã hóa PNG trực tiếp bằng C# kèm bảng Tác vụ tiến độ & Hủy |
 
 ---
 

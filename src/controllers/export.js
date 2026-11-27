@@ -16,6 +16,17 @@ import {
   qaReviewStateLabels,
   qaReviewSummary,
 } from "../qa-review.js"
+import {
+  describeExportProfile,
+  exportArchiveDate,
+  exportManifest,
+  exportManifestFileName,
+  loadGlobalExportProfileId,
+  planExportSlices,
+  resolveExportProfile,
+  serializeExportManifest,
+} from "../export-presets.js"
+import { renderExportSlices } from "../webtoon.js"
 import { desktop } from "../native.js"
 
 export function setupExports({
@@ -29,7 +40,6 @@ export function setupExports({
   listButton,
   projectBusy,
   readTranslationSettings,
-  isNativeReady,
   commitLiveForm,
   checkpoint,
   render,
@@ -41,6 +51,67 @@ export function setupExports({
     return format === "png" ? "png" : "psd"
   }
 
+  const profileSelect = byId("export-profile")
+  function activeProfile() {
+    return resolveExportProfile(profileSelect?.value || loadGlobalExportProfileId())
+  }
+  function syncProfileSummary() {
+    const summary = byId("export-profile-summary")
+    if (!summary) return
+    try {
+      summary.textContent = describeExportProfile(activeProfile())
+    } catch (error) {
+      summary.textContent = error.message
+    }
+  }
+  profileSelect?.addEventListener("change", syncProfileSummary)
+  syncProfileSummary()
+
+  // A composed page has to come back as an image before the profile can scale and cut it. The
+  // message names the reason instead of failing on an undefined global.
+  async function decodePageImage(blob) {
+    if (typeof createImageBitmap !== "function") {
+      throw new Error("Trình duyệt này không giải mã được ảnh để chia mảnh theo hồ sơ.")
+    }
+    return createImageBitmap(blob)
+  }
+
+  async function exportProfileZip(pages, profile) {
+    const { default: JSZip } = await import("jszip")
+    const zip = new JSZip()
+    const plans = []
+    let order = 1
+    for (const [index, page] of pages.entries()) {
+      status(`Đang xuất trang ${index + 1}/${pages.length} theo hồ sơ ${profile.name}…`)
+      const bitmap = await decodePageImage(await exportPage(page, "png"))
+      try {
+        const plan = planExportSlices(profile, {
+          width: bitmap.width,
+          height: bitmap.height,
+          order,
+          pageName: page.name,
+        })
+        const files = await renderExportSlices(bitmap, plan, {
+          onSlice: ({ index: sliceIndex, total, fileName, width, height }) => {
+            status(`Trang ${index + 1}/${pages.length} · mảnh ${sliceIndex}/${total}: ${fileName} (${width}×${height} px).`)
+          },
+        })
+        for (const file of files) zip.file(file.name, file, { date: exportArchiveDate })
+        plans.push({ pageName: page.name, plan })
+        order += files.length
+      } finally {
+        bitmap.close?.()
+      }
+    }
+    zip.file(
+      exportManifestFileName,
+      serializeExportManifest(exportManifest({ profile, plans })),
+      { date: exportArchiveDate },
+    )
+    saveFile(await zip.generateAsync({ type: "blob" }), `khung-thoai-${profile.id}.zip`)
+    return plans.reduce((total, { plan }) => total + plan.slices.length, 0)
+  }
+
   async function performExport(action, summaryLabel) {
     if (state.exporting || state.openingProject) return
     state.exporting = true
@@ -48,12 +119,13 @@ export function setupExports({
     try {
       const outcome = await action()
       if (outcome === false) return
+      const label = typeof summaryLabel === "function" ? summaryLabel() : summaryLabel
       status("Đã tạo tệp xuất.")
-      if (summaryLabel) {
+      if (label) {
         notify?.({
           kind: "success",
           title: "Xuất tệp hoàn tất",
-          message: summaryLabel,
+          message: label,
           key: "export-done",
         })
       }
@@ -350,64 +422,84 @@ export function setupExports({
   const zipDialog = byId("zip-dialog")
   byId("export-all").onclick = () => {
     zipDialog.returnValue = ""
+    syncProfileSummary()
     zipDialog.showModal()
   }
   zipDialog.addEventListener("close", () => {
     if (zipDialog.returnValue !== "export") return
     const format = byId("zip-format").value
-    requestExport(state.pages, () =>
-      performExport(async () => {
-        const pages = copyEditor({ pages: state.pages }).pages
-        // The native path composites one fixed order, so a stack with a reordered or translucent
-        // layer is exported by the renderer instead, exactly as the canvas shows it.
-        if (format === "png" && isNativeReady() && pages.every(layersNativeFriendly)) {
-          const transfer = await desktop.projectBegin(
-            "zip",
-            "khung-thoai-png.zip",
-          )
-          if (!transfer) return false
-          try {
-            for (const [index, page] of pages.entries()) {
-              status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
-              const { options, data } = await nativePageLayers(page)
-              const name =
-                String(index + 1).padStart(2, "0") +
-                "-" +
-                filenameStem(page.name) +
-                ".png"
-              await desktop.projectWrite(
-                transfer.id,
-                "zipPage",
-                { ...options, name },
-                data,
-              )
-            }
-            await desktop.projectWrite(transfer.id, "fileCommit")
-          } catch (error) {
-            await desktop
-              .projectWrite(transfer.id, "fileCancel")
-              .catch(() => {})
-            throw error
+    let profile
+    try {
+      profile = activeProfile()
+    } catch (error) {
+      return status(error.message, true)
+    }
+    let sliceCount = 0
+    const run = () =>
+      performExport(
+        async () => {
+          const pages = copyEditor({ pages: state.pages }).pages
+          if (format === "profile") {
+            sliceCount = await exportProfileZip(pages, profile)
+            return
           }
-          return
-        }
-        const { default: JSZip } = await import("jszip")
-        const zip = new JSZip()
-        for (const [index, page] of pages.entries()) {
-          status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
-          const name =
-            String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
-          zip.file(
-            name + "." + extensionFor(format),
-            await exportPage(page, format),
+          // The native path composites one fixed order, so a stack with a reordered or translucent
+          // layer is exported by the renderer instead, exactly as the canvas shows it.
+          if (format === "png" && isNativeReady() && pages.every(layersNativeFriendly)) {
+            const transfer = await desktop.projectBegin(
+              "zip",
+              "khung-thoai-png.zip",
+            )
+            if (!transfer) return false
+            try {
+              for (const [index, page] of pages.entries()) {
+                status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
+                const { options, data } = await nativePageLayers(page)
+                const name =
+                  String(index + 1).padStart(2, "0") +
+                  "-" +
+                  filenameStem(page.name) +
+                  ".png"
+                await desktop.projectWrite(
+                  transfer.id,
+                  "zipPage",
+                  { ...options, name },
+                  data,
+                )
+              }
+              await desktop.projectWrite(transfer.id, "fileCommit")
+            } catch (error) {
+              await desktop
+                .projectWrite(transfer.id, "fileCancel")
+                .catch(() => {})
+              throw error
+            }
+            return
+          }
+          const { default: JSZip } = await import("jszip")
+          const zip = new JSZip()
+          for (const [index, page] of pages.entries()) {
+            status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
+            const name =
+              String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
+            zip.file(
+              name + "." + extensionFor(format),
+              await exportPage(page, format),
+            )
+          }
+          saveFile(
+            await zip.generateAsync({ type: "blob" }),
+            "khung-thoai-" + format + ".zip",
           )
-        }
-        saveFile(
-          await zip.generateAsync({ type: "blob" }),
-          "khung-thoai-" + format + ".zip",
-        )
-      }, `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${state.pages.length} trang.`),
-    )
+        },
+        () =>
+          format === "profile"
+            ? `Đã xuất ${sliceCount} mảnh theo hồ sơ ${profile.name}.`
+            : `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${state.pages.length} trang.`,
+      )
+    // The profile decides whether the preflight report runs before the archive is built.
+    if (profile.preflight) requestExport(state.pages, run)
+    else run()
   })
 
   const exportScriptBtn = byId("export-script")
