@@ -18,7 +18,7 @@ import { copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
-import { alignBoxes, distributeBoxes, duplicateBox, nudgeBox, reorderBox } from "./tools.js"
+import { alignBoxes, distributeBoxes, duplicateBox, reorderBox } from "./tools.js"
 import { cleanRawPageImage, cleanRawPixels } from "./raw-cleanup.js"
 import { smartSlicePageImage, stitchPagesVertically } from "./webtoon.js"
 import { createNotificationCenter } from "./notifications.js"
@@ -38,6 +38,7 @@ import { setupOcr } from "./controllers/ocr.js"
 import { setupExports } from "./controllers/export.js"
 import { setupDialogs } from "./controllers/dialogs.js"
 import { setupGestures } from "./controllers/gestures.js"
+import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
 
 const history = new EditHistory()
@@ -77,8 +78,7 @@ byId("toggle-theme")?.addEventListener("click", () => {
 let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
-let nudgeSnapshot = null
-let nudgeTimer = null
+let shortcuts = null
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -94,15 +94,7 @@ function editorSnapshot() {
 }
 
 function commitNudgeCheckpoint() {
-  if (nudgeTimer) {
-    clearTimeout(nudgeTimer)
-    nudgeTimer = null
-  }
-  if (!nudgeSnapshot) return false
-  const before = nudgeSnapshot
-  nudgeSnapshot = null
-  checkpoint(before)
-  return true
+  return shortcuts ? shortcuts.commitNudge() : false
 }
 
 function commitLiveFormCheckpoint() {
@@ -126,9 +118,7 @@ function releaseUnusedImages() {
 
 function checkpoint(snapshot) {
   if (!snapshot) {
-    if (nudgeSnapshot) {
-      commitNudgeCheckpoint()
-    }
+    commitNudgeCheckpoint()
     if (formEditSnapshot) {
       const pending = formEditSnapshot
       formEditSnapshot = null
@@ -1526,90 +1516,6 @@ byId("cleanup-expand").onchange = () => {
   render()
 }
 
-// Global keyboard shortcuts.
-document.addEventListener("keydown", (event) => {
-  const editingText = Boolean(event.target.closest("input, textarea, select, [contenteditable]"))
-  const key = event.key.toLowerCase()
-  if (event.ctrlKey || event.metaKey) {
-    if (event.altKey) return
-    if ((key === "h" || key === "f") && !event.shiftKey) {
-      event.preventDefault()
-      dialogs.openFind()
-      return
-    }
-    if (editingText) return
-    if (key === "z" || key === "y") {
-      event.preventDefault()
-      restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
-      return
-    }
-    if (key === "d" && selectedBox()) {
-      event.preventDefault()
-      duplicateSelectedBox()
-      return
-    }
-    return
-  }
-  if (editingText) return
-  if (event.key === " " && !event.repeat && selectedPage()) {
-    event.preventDefault()
-    gestures.setSpaceHeld(true)
-    return
-  }
-  if ((event.key === "\\" || event.key === "|") && selectedPage()) {
-    event.preventDefault()
-    if (event.shiftKey || event.key === "|") {
-      state.splitCompare = !state.splitCompare
-      if (state.splitCompare) state.compareOriginal = false
-    } else {
-      state.compareOriginal = !state.compareOriginal
-      if (state.compareOriginal) state.splitCompare = false
-    }
-    renderCanvas()
-    return
-  }
-  if (event.key === "?") {
-    event.preventDefault()
-    dialogs.openShortcuts()
-    return
-  }
-  if ((event.key === "Delete" || event.key === "Backspace") && (state.boxId || state.selectedBoxIds.size)) {
-    event.preventDefault()
-    deleteSelectedBoxes()
-    return
-  }
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && event.target !== stage) {
-    const page = selectedPage()
-    const targets = page && state.selectedBoxIds.size > 1
-      ? page.boxes.filter((item) => state.selectedBoxIds.has(item.id))
-      : [selectedBox()].filter(Boolean)
-    if (!targets.length || projectBusy()) return
-    event.preventDefault()
-    const stepPx = event.shiftKey ? 10 : 1
-    const dx = (event.key === "ArrowRight" ? stepPx : event.key === "ArrowLeft" ? -stepPx : 0) / page.image.naturalWidth
-    const dy = (event.key === "ArrowDown" ? stepPx : event.key === "ArrowUp" ? -stepPx : 0) / page.image.naturalHeight
-    if (formEditSnapshot) commitLiveFormCheckpoint()
-    if (!nudgeSnapshot) nudgeSnapshot = editorSnapshot()
-    for (const item of targets) Object.assign(item, nudgeBox(item, dx, dy))
-    renderCanvas()
-    if (nudgeTimer) clearTimeout(nudgeTimer)
-    nudgeTimer = setTimeout(commitNudgeCheckpoint, 600)
-  }
-})
-
-document.addEventListener("keyup", (event) => {
-  if (event.key === " " && gestures.getSpaceHeld()) {
-    gestures.setSpaceHeld(false)
-  }
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
-    commitNudgeCheckpoint()
-  }
-})
-window.addEventListener("blur", () => {
-  if (gestures.getSpaceHeld()) gestures.setSpaceHeld(false)
-  commitNudgeCheckpoint()
-})
-
 const notifications = createNotificationCenter({ byId })
 const notify = (options) => notifications.notify(options)
 
@@ -1812,6 +1718,14 @@ const projects = setupProjects({
 })
 const dialogs = setupDialogs({
   ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,
+})
+shortcuts = setupShortcuts({
+  state, stage, gestures, dialogs,
+  selectedPage, selectedBox, projectBusy, editorSnapshot,
+  commitLiveForm: commitLiveFormCheckpoint,
+  formEditing: () => Boolean(formEditSnapshot),
+  checkpoint, renderCanvas,
+  restoreHistory, duplicateSelectedBox, deleteSelectedBoxes,
 })
 setupTasks(byId)
 setupOcr(shared)
