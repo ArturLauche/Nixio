@@ -80,6 +80,9 @@ h1, h2 { letter-spacing: -.02em; font-weight: 650; }
   position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap;
 }
+label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 .muted { color: var(--muted); font-size: .78rem; line-height: 1.45; }
 
 /* Slim thin scrollbars for workstation panels */
