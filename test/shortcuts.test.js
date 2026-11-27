@@ -64,7 +64,7 @@ function makeDeps(overrides = {}) {
     editorSnapshot: () => ({ snapshot: true }),
     commitLiveForm() {},
     formEditing: () => false,
-    checkpoint(snapshot) { calls.checkpoints.push(snapshot) },
+    recordNudge(snapshot) { calls.checkpoints.push(snapshot) },
     renderCanvas() { calls.rendered++ },
     restoreHistory(direction) { calls.restored.push(direction) },
     duplicateSelectedBox() { calls.duplicated++ },

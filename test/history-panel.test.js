@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises"
 import { copyEditor, EditHistory, HISTORY_HEAD } from "../src/history.js"
 
 const main = await readFile(new URL("../src/main.js", import.meta.url), "utf8")
+// The global keydown handler lives in its own controller, so its wiring is read from there.
+const shortcutSource = await readFile(new URL("../src/controllers/shortcuts.js", import.meta.url), "utf8")
 const markup = await readFile(new URL("../index.html", import.meta.url), "utf8")
 
 // src/main.js is a browser entry module, so the panel's own rule is read out of the real source
@@ -199,7 +201,7 @@ test("a row jump is guarded by busy, gesture and the open form edit", () => {
   // Toolbar and keyboard undo/redo keep their existing wiring.
   assert.match(main, /byId\("undo"\)\.onclick = \(\) => restoreHistory\("undo"\)/)
   assert.match(main, /byId\("redo"\)\.onclick = \(\) => restoreHistory\("redo"\)/)
-  assert.match(main, /restoreHistory\(key === "y" \|\| event\.shiftKey \? "redo" : "undo"\)/)
+  assert.match(shortcutSource, /restoreHistory\(key === "y" \|\| event\.shiftKey \? "redo" : "undo"\)/)
 })
 
 test("the panel lists the unfiltered timeline and derives every target from it", () => {
@@ -222,7 +224,7 @@ test("the panel lists the unfiltered timeline and derives every target from it",
 })
 
 test("keyboard search, jump and Escape drive the panel and hand focus back", () => {
-  assert.match(main, /if \(key === "h" && event\.shiftKey\) \{\n\s*event\.preventDefault\(\)\n\s*toggleHistoryPanel\(true\)/)
+  assert.match(shortcutSource, /if \(key === "h" && event\.shiftKey\) \{\n\s*event\.preventDefault\(\)\n\s*toggleHistoryPanel\?\.\(true\)/)
 
   const start = main.indexOf('byId("history-panel").addEventListener("keydown"')
   assert.ok(start > 0, "the panel must handle its own keys")
@@ -256,7 +258,7 @@ test("an open live form edit is still recorded as one named action", () => {
 })
 
 test("the panel keeps its own keys away from the nudging and shortcut handlers", () => {
-  assert.match(main, /if \(event\.target\.closest\("#history-panel"\)\) return/)
+  assert.match(shortcutSource, /if \(event\.target\.closest\("#history-panel"\)\) return/)
 })
 
 test("a row keeps its action id and resolves its target after the pending commit", () => {
@@ -321,7 +323,9 @@ test("the oldest state has its own control and reports when it is already curren
 test("a pending nudge is finalized before the next action, a jump and a keyboard undo", () => {
   const checkpoint = mainFunction("checkpoint")
   assert.match(checkpoint, /^function checkpoint\(snapshot, meta\) \{\n(?:  \/\/.*\n)*  commitNudgeCheckpoint\(\)/)
-  assert.match(mainFunction("commitNudgeCheckpoint"), /checkpoint\(before, NUDGE_META\)/)
+  assert.match(main, /const recordNudge = \(before\) => checkpoint\(before, NUDGE_META\)/)
+  assert.match(mainFunction("commitNudgeCheckpoint"), /shortcuts\.commitNudge\(\)/)
+  assert.match(shortcutSource, /recordNudge\(before\)/)
 
   // The form commit finalizes the nudge first, so the older action keeps the older boundary.
   const commit = mainFunction("commitLiveFormCheckpoint")

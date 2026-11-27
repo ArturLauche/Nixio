@@ -13,13 +13,12 @@ export function setupShortcuts({
   editorSnapshot,
   commitLiveForm,
   formEditing,
-  checkpoint,
   renderCanvas,
   restoreHistory,
   duplicateSelectedBox,
   deleteSelectedBoxes,
   toggleHistoryPanel,
-  nudgeMeta,
+  recordNudge,
 }) {
   let nudgeSnapshot = null
   let nudgeTimer = null
@@ -32,7 +31,7 @@ export function setupShortcuts({
     if (!nudgeSnapshot) return false
     const before = nudgeSnapshot
     nudgeSnapshot = null
-    checkpoint(before, nudgeMeta)
+    recordNudge(before)
     return true
   }
 

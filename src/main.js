@@ -1997,15 +1997,17 @@ const projects = setupProjects({
 const dialogs = setupDialogs({
   ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,
 })
+const recordNudge = (before) => checkpoint(before, NUDGE_META)
+
 shortcuts = setupShortcuts({
   state, stage, gestures, dialogs,
   selectedPage, selectedBox, projectBusy, editorSnapshot,
   commitLiveForm: commitLiveFormCheckpoint,
   formEditing: () => Boolean(formEditSnapshot),
-  checkpoint, renderCanvas,
+  renderCanvas,
   restoreHistory, duplicateSelectedBox, deleteSelectedBoxes,
   toggleHistoryPanel,
-  nudgeMeta: NUDGE_META,
+  recordNudge,
 })
 setupTasks(byId)
 setupOcr(shared)
