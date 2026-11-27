@@ -38,13 +38,6 @@ class CredentialStoreError extends Error {
 
 const corruptRecord = () => new CredentialStoreError(CREDENTIAL_CODES.CORRUPT, "The stored credential record is unreadable.")
 
-// OS error text is useful for diagnosis, but an encryption failure that quotes the plaintext must
-// not be attached as a cause: exceptions end up in logs and crash reports.
-function safeCause(error, secret) {
-  if (!error || typeof error !== "object") return undefined
-  return typeof secret === "string" && String(error.message ?? "").includes(secret) ? undefined : error
-}
-
 function protectionMessage({ reason, backend }) {
   if (reason === "api-unavailable") return "Electron safeStorage is unavailable; refusing to handle API keys without OS protection."
   if (reason === "unavailable") return "OS credential encryption is unavailable; refusing to handle API keys without OS protection."
@@ -188,8 +181,8 @@ class CredentialStore {
   async encrypt(secret) {
     let ciphertext
     try { ciphertext = await this.safeStorage.encryptStringAsync(secret) }
-    catch (error) {
-      throw new CredentialStoreError(CREDENTIAL_CODES.ENCRYPT, "OS credential encryption failed.", { cause: safeCause(error, secret) })
+    catch {
+      throw new CredentialStoreError(CREDENTIAL_CODES.ENCRYPT, "OS credential encryption failed.")
     }
     if (!(ciphertext instanceof Uint8Array) || !ciphertext.length) {
       throw new CredentialStoreError(CREDENTIAL_CODES.ENCRYPT, "OS credential encryption returned no ciphertext.")
@@ -200,8 +193,8 @@ class CredentialStore {
   async decrypt(ciphertext) {
     let outcome
     try { outcome = await this.safeStorage.decryptStringAsync(ciphertext) }
-    catch (error) {
-      throw new CredentialStoreError(CREDENTIAL_CODES.DECRYPT, "OS credential decryption failed.", { cause: safeCause(error) })
+    catch {
+      throw new CredentialStoreError(CREDENTIAL_CODES.DECRYPT, "OS credential decryption failed.")
     }
     if (!outcome || typeof outcome.result !== "string") {
       throw new CredentialStoreError(CREDENTIAL_CODES.DECRYPT, "OS credential decryption returned no value.")
