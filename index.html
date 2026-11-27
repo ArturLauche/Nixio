@@ -186,6 +186,7 @@
         <div class="canvas-actions">
           <button type="button" id="undo" aria-label="Hoàn tác (Ctrl+Z)" disabled>Hoàn tác</button>
           <button type="button" id="redo" aria-label="Làm lại (Ctrl+Shift+Z)" disabled>Làm lại</button>
+          <button type="button" id="history-toggle" aria-expanded="false" aria-controls="history-panel" title="Lịch sử thao tác có tên, nhảy tới mốc (Ctrl+Shift+H)">Lịch sử</button>
           <div class="zoom-group" role="group" aria-label="Thu phóng">
             <button type="button" id="zoom-out" aria-label="Thu nhỏ">−</button>
             <span id="zoom-level">Vừa trang</span>
@@ -230,6 +231,22 @@
         <label class="choice"><input type="checkbox" id="show-cleanup" checked>Redraw</label>
         <label class="choice"><input type="checkbox" id="show-text" checked>Chữ</label>
       </div>
+      <section id="history-panel" class="history-panel" aria-labelledby="history-title" hidden>
+        <div class="history-head">
+          <h2 id="history-title">Lịch sử thao tác</h2>
+          <span id="history-current" class="muted"></span>
+          <span id="history-count" class="muted" role="status" aria-live="polite"></span>
+          <button type="button" id="history-close" class="button" aria-label="Đóng lịch sử thao tác">Đóng</button>
+        </div>
+        <div class="history-search-row">
+          <label class="field" for="history-search">Tìm thao tác
+            <input id="history-search" type="search" autocomplete="off" spellcheck="false" placeholder="Ví dụ: làm sạch, dịch, khung">
+          </label>
+          <span class="history-hint muted">↑ ↓ chọn mốc · Enter để nhảy · Esc đóng</span>
+        </div>
+        <p id="history-empty" class="muted" hidden></p>
+        <ol id="history-list" class="history-list" aria-label="Các mốc lịch sử, mốc mới nhất ở cuối"></ol>
+      </section>
       <div class="workspace-body">
         <div class="tool-rail" id="tool-rail" role="toolbar" aria-label="Công cụ vẽ và chỉnh khung" aria-orientation="vertical">
           <button type="button" class="rail-btn" data-tool="text" aria-pressed="true" title="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)">
@@ -531,6 +548,7 @@
       <div><dt>Ctrl / Cmd + Shift + Z / Y</dt><dd>Làm lại</dd></div>
       <div><dt>Ctrl / Cmd + D</dt><dd>Nhân bản khung đang chọn</dd></div>
       <div><dt>Ctrl / Cmd + H hoặc F</dt><dd>Tìm và thay thế trong chương</dd></div>
+      <div><dt>Ctrl / Cmd + Shift + H</dt><dd>Lịch sử thao tác có tên, nhảy tới mốc</dd></div>
       <div><dt>Ctrl + Cuộn chuột</dt><dd>Thu phóng bản vẽ (25%–400%)</dd></div>
       <div><dt>Giữ Space + Kéo / Chuột giữa</dt><dd>Kéo bàn vẽ (Pan)</dd></div>
       <div><dt>Phím \</dt><dd>Bật/tắt so sánh với ảnh gốc</dd></div>

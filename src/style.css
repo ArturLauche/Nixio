@@ -521,6 +521,105 @@ details[open] > summary::after { transform: rotate(90deg); }
 #paint-color { width: 32px; height: 26px; padding: 2px; }
 #paint-opacity { width: 54px; }
 
+/* Named history timeline drawer */
+.history-panel {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+}
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.history-head h2 {
+  flex: 0 0 auto;
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+#history-current {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  font-size: .78rem;
+}
+#history-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.history-head .button { flex: 0 0 auto; min-height: 26px; font-size: .74rem; }
+.history-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+.history-search-row .field { flex: 1 1 220px; margin: 0; }
+.history-hint { flex: 0 0 auto; }
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  max-height: 24dvh;
+  overflow-y: auto;
+}
+.history-entry {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: .78rem;
+  text-align: left;
+}
+.history-entry:hover:not(:disabled) { background: var(--surface-hover); }
+.history-entry[aria-current] {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  font-weight: 600;
+  opacity: 1;
+}
+.history-entry[data-undone] .history-entry-label { color: var(--muted); }
+.history-entry-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.history-entry-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  font-size: .7rem;
+  font-variant-numeric: tabular-nums;
+}
+.history-entry-kind {
+  padding: 0 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-size: .66rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.history-entry-move { white-space: nowrap; }
+
 /* Workspace body: Vertical Tool Rail + Canvas Viewport */
 .workspace-body {
   flex: 1;

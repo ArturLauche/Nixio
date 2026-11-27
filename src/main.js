@@ -13,7 +13,7 @@ import {
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 
-import { checkUndoToken, copyEditor, EditHistory } from "./history.js"
+import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
@@ -79,6 +79,13 @@ let formEditSnapshot = null
 let nudgeSnapshot = null
 let nudgeTimer = null
 
+// One live form session is one action, so its deferred checkpoint keeps a name the timeline and
+// the one-click undo can show instead of the generic fallback.
+const FORM_EDIT_META = { label: "Sửa khung thoại", kind: "form" }
+// Timeline chips: only the kinds that exist today get a short label; every other kind stays bare
+// until the repository-wide label pass names it.
+const historyKindLabels = { form: "Khung", "raw-cleanup": "Raw" }
+
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
@@ -109,7 +116,7 @@ function commitLiveFormCheckpoint() {
   if (!formEditSnapshot) return false
   const before = formEditSnapshot
   formEditSnapshot = null
-  checkpoint(before)
+  checkpoint(before, FORM_EDIT_META)
   return true
 }
 
@@ -132,7 +139,7 @@ function checkpoint(snapshot, meta) {
       const pending = formEditSnapshot
       formEditSnapshot = null
       projects.changed()
-      const token = history.record(pending, meta)
+      const token = history.record(pending, { ...FORM_EDIT_META, ...meta })
       syncProjectActions()
       return token
     }
@@ -159,6 +166,13 @@ function restoreHistory(direction) {
   commitLiveFormCheckpoint()
   const snapshot = history[direction](editorSnapshot())
   if (!snapshot) return
+  applyHistorySnapshot(snapshot)
+  status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
+}
+
+// Undo, redo and a timeline jump all apply a snapshot through one path so selection, project
+// settings and asset release stay identical no matter how the playhead moved.
+function applyHistorySnapshot(snapshot) {
   const { settings, ...editor } = snapshot
   projects.changed()
   Object.assign(state, editor, { placing: false })
@@ -166,7 +180,6 @@ function restoreHistory(direction) {
   projectSettings.forEach((field) => { field.value = settings[field.id] })
   render()
   releaseUnusedImages()
-  status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
 }
 
 function pendingHistoryEdit() {
@@ -194,6 +207,178 @@ function undoCleanupAction(token) {
   restoreHistory("undo")
   return true
 }
+
+// A row names the state right after its action, while jump() addresses the boundary before an
+// action, so the target always comes from the next chronological entry of the unfiltered list.
+function historyJumpTarget(rows, row) {
+  return rows[row.index + 1]?.id ?? HISTORY_HEAD
+}
+
+function historyTime(at) {
+  const date = new Date(at)
+  const time = date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  if (date.toDateString() === new Date().toDateString()) return time
+  return `${date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })} ${time}`
+}
+
+function jumpHistory(id, label = "") {
+  if (projectBusy()) {
+    status("Chưa thể nhảy lịch sử khi đang có tác vụ khác chạy. Hãy đợi tác vụ xong rồi thử lại.", true)
+    return false
+  }
+  if (gestures.hasGesture()) {
+    status("Chưa thể nhảy lịch sử khi đang kéo/thao tác trên ảnh. Hãy kết thúc thao tác đó rồi thử lại.", true)
+    return false
+  }
+  // A form edit that is still open becomes its own named action before the playhead moves, so a
+  // jump never drops what the user just typed.
+  commitLiveFormCheckpoint()
+  const result = history.jump(id, editorSnapshot())
+  if (!result.ok) {
+    status(
+      result.reason === "current" ? "Đang ở đúng mốc lịch sử này." : "Mốc lịch sử này không còn trong danh sách.",
+      result.reason !== "current",
+    )
+    syncHistoryPanel()
+    return false
+  }
+  applyHistorySnapshot(result.snapshot)
+  status(label ? `Đã quay lại trạng thái sau "${label}".` : "Đã trở về mốc mới nhất.")
+  return true
+}
+
+// The panel lists every named action oldest first, marks where the playhead sits and keeps each
+// row's jump target independent of the search text: filtering only hides rows, it never
+// retargets one, because every target comes from the unfiltered timeline.
+function syncHistoryPanel() {
+  const list = byId("history-list")
+  if (!list || byId("history-panel").hidden) return
+  const focused = document.activeElement?.dataset?.historyId ?? ""
+  const rows = history.entries()
+  const shown = history.entries({ query: byId("history-search").value })
+  const applied = rows.filter((row) => row.applied).length
+  const current = rows[applied - 1]
+
+  byId("history-current").textContent = !rows.length
+    ? "Chưa có thao tác nào."
+    : current
+      ? `Hiện tại: sau "${current.label}"`
+      : "Đang ở trạng thái gốc."
+  byId("history-count").textContent = !rows.length
+    ? ""
+    : shown.length === rows.length
+      ? `${rows.length} thao tác`
+      : `${shown.length}/${rows.length} thao tác khớp`
+  const empty = byId("history-empty")
+  empty.hidden = shown.length > 0
+  empty.textContent = rows.length
+    ? `Không tìm thấy thao tác khớp "${byId("history-search").value.trim()}".`
+    : "Chưa có thao tác nào để hoàn tác."
+
+  list.replaceChildren(...shown.map((row) => {
+    const delta = applied - (row.index + 1)
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "history-entry"
+    button.dataset.historyId = row.id
+    if (!row.applied) button.dataset.undone = "true"
+    if (!delta) {
+      button.setAttribute("aria-current", "true")
+      button.disabled = true
+    }
+    button.setAttribute("aria-label", delta
+      ? `${row.label} lúc ${historyTime(row.at)}: ${delta > 0 ? `hoàn tác ${delta} thao tác` : `làm lại ${-delta} thao tác`}`
+      : `${row.label} lúc ${historyTime(row.at)}: trạng thái hiện tại`)
+    button.onclick = () => jumpHistory(historyJumpTarget(rows, row), row.label)
+
+    const label = document.createElement("span")
+    label.className = "history-entry-label"
+    label.textContent = row.label
+    const meta = document.createElement("span")
+    meta.className = "history-entry-meta"
+    const time = document.createElement("time")
+    time.dateTime = new Date(row.at).toISOString()
+    time.textContent = historyTime(row.at)
+    meta.append(time)
+    if (historyKindLabels[row.kind]) {
+      const kind = document.createElement("span")
+      kind.className = "history-entry-kind"
+      kind.textContent = historyKindLabels[row.kind]
+      meta.append(kind)
+    }
+    const move = document.createElement("span")
+    move.className = "history-entry-move"
+    move.textContent = delta > 0 ? `hoàn tác ${delta}` : delta < 0 ? `làm lại ${-delta}` : "hiện tại"
+    meta.append(move)
+    button.append(label, meta)
+    const li = document.createElement("li")
+    li.append(button)
+    return li
+  }))
+
+  if (!focused) return
+  const restored = list.querySelector(`[data-history-id="${focused}"]:not(:disabled)`)
+  ;(restored ?? byId("history-search")).focus()
+}
+
+function toggleHistoryPanel(open = byId("history-panel").hidden) {
+  const panel = byId("history-panel")
+  const button = byId("history-toggle")
+  panel.hidden = !open
+  button.setAttribute("aria-expanded", String(open))
+  if (open) {
+    syncHistoryPanel()
+    byId("history-search").focus()
+  } else {
+    button.focus()
+  }
+}
+
+// Enter jumps to the newest matching action that is not the current state: the search narrows
+// which action is chosen, never what that action means.
+function jumpToNewestMatch() {
+  const rows = history.entries()
+  const applied = rows.filter((row) => row.applied).length
+  const row = history.entries({ query: byId("history-search").value })
+    .filter((item) => applied !== item.index + 1)
+    .at(-1)
+  if (!row) return status("Không còn mốc nào khác để nhảy tới trong lịch sử.", true)
+  return jumpHistory(historyJumpTarget(rows, row), row.label)
+}
+
+byId("history-toggle").onclick = () => toggleHistoryPanel()
+byId("history-close").onclick = () => toggleHistoryPanel(false)
+byId("history-search").addEventListener("input", syncHistoryPanel)
+
+// Arrow keys walk the named timeline, Enter jumps, Escape closes the panel and hands focus back
+// to the toolbar button that opened it. The panel owns its keys, including undo and redo: while
+// the timeline holds focus the search box must not swallow Ctrl+Z as a text edit.
+byId("history-panel").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault()
+    return toggleHistoryPanel(false)
+  }
+  if ((event.ctrlKey || event.metaKey) && ["z", "y"].includes(event.key.toLowerCase())) {
+    event.preventDefault()
+    event.stopPropagation()
+    return restoreHistory(event.key.toLowerCase() === "y" || event.shiftKey ? "redo" : "undo")
+  }
+  if (event.key === "Enter" && event.target === byId("history-search")) {
+    event.preventDefault()
+    return jumpToNewestMatch()
+  }
+  const steps = { ArrowDown: 1, ArrowUp: -1 }
+  if (!(event.key in steps) && event.key !== "Home" && event.key !== "End") return
+  const buttons = [...byId("history-list").querySelectorAll(".history-entry:not(:disabled)")]
+  if (!buttons.length) return
+  event.preventDefault()
+  const from = buttons.indexOf(event.target)
+  const next = event.key === "Home" ? 0
+    : event.key === "End" ? buttons.length - 1
+      : from < 0 ? (steps[event.key] > 0 ? 0 : buttons.length - 1)
+        : from + steps[event.key]
+  buttons[clamp(next, 0, buttons.length - 1)].focus()
+})
 
 function renderFontOptions() {
   const select = byId("box-font")
@@ -320,6 +505,7 @@ function syncProjectActions() {
   byId("new-project").disabled = projectBusy()
   byId("images").disabled = projectBusy()
   byId("script-file").disabled = projectBusy()
+  syncHistoryPanel()
 }
 
 let chat
@@ -1562,6 +1748,11 @@ document.addEventListener("keydown", (event) => {
       dialogs.openFind()
       return
     }
+    if (key === "h" && event.shiftKey) {
+      event.preventDefault()
+      toggleHistoryPanel(true)
+      return
+    }
     if (editingText) return
     if (key === "z" || key === "y") {
       event.preventDefault()
@@ -1576,6 +1767,9 @@ document.addEventListener("keydown", (event) => {
     return
   }
   if (editingText) return
+  // The history panel handles its own arrows and Enter, so nudging, Space-panning or deleting a
+  // box from inside the timeline must not happen. Undo and redo shortcuts still work up above.
+  if (event.target.closest("#history-panel")) return
   if (event.key === " " && !event.repeat && selectedPage()) {
     event.preventDefault()
     gestures.setSpaceHeld(true)
