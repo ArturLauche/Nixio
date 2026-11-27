@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { detectBubbleRect } from "../src/bubble.js"
+import { detectAllBubbles, detectBubbleRect } from "../src/bubble.js"
 
 function makeScene(width, height, fill = [40, 40, 40, 255]) {
   const pixels = new Uint8Array(width * height * 4)
@@ -51,4 +51,30 @@ test("detectBubbleRect rejects dark artwork and open full-page white backgrounds
 
   const openWhite = makeScene(width, height, [255, 255, 255, 255])
   assert.equal(detectBubbleRect(openWhite, width, height, .5, .5), null)
+})
+
+test("detectAllBubbles finds multiple speech bubbles and sorts in RTL/LTR reading order", () => {
+  const width = 240
+  const height = 240
+  const pixels = makeScene(width, height, [28, 28, 28, 255])
+  // Top-left bubble
+  drawEllipse(pixels, width, height, 60, 60, 32, 24, [252, 252, 252, 255])
+  // Top-right bubble
+  drawEllipse(pixels, width, height, 180, 62, 32, 24, [252, 252, 252, 255])
+  // Bottom-center bubble
+  drawEllipse(pixels, width, height, 120, 175, 38, 26, [252, 252, 252, 255])
+  // Tiny noise dot (must be ignored)
+  drawEllipse(pixels, width, height, 20, 200, 3, 3, [255, 255, 255, 255])
+
+  const rtl = detectAllBubbles(pixels, width, height, { direction: "rtl" })
+  assert.equal(rtl.length, 3)
+  // RTL: top-right first, then top-left, then bottom
+  assert.ok(rtl[0].x > rtl[1].x)
+  assert.ok(rtl[2].y > rtl[0].y)
+
+  const ltr = detectAllBubbles(pixels, width, height, { direction: "ltr" })
+  assert.equal(ltr.length, 3)
+  // LTR: top-left first, then top-right, then bottom
+  assert.ok(ltr[0].x < ltr[1].x)
+  assert.ok(ltr[2].y > ltr[0].y)
 })

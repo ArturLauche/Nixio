@@ -1,8 +1,17 @@
 import { autoFitBox, clamp, drawPage, makeBox, textOverflows } from "./canvas.js"
-import { groupDialogue, isImageFile, readDialogueFile } from "./io.js"
+import { groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
 import { setupLibrary } from "./library.js"
-import { matchDialogue, toCoordinates, toRectangle } from "./placement.js"
+import { matchDialogue, overlapScore, toCoordinates, toRectangle } from "./placement.js"
 import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "./project.js"
+import { detectAllBubblesOnImage } from "./bubble.js"
+import {
+  loadGlobalPresets,
+  mergePresets,
+  parsePresetsJson,
+  saveGlobalPresets,
+  serializePresetsJson,
+} from "./presets.js"
+import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 
 import { copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -40,14 +49,29 @@ const form = byId("box-form")
 const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
-  pages: [], presets: [], pageId: null, boxId: null, selectedBoxIds: new Set(),
-  queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, cloneSource: null,
+  pages: [], presets: loadGlobalPresets(), pageId: null, boxId: null, selectedBoxIds: new Set(),
+  queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, splitCompare: false, splitPos: 50, cloneSource: null,
   exporting: false, importing: false, translating: false, importingScript: false,
   openingProject: false, processingNative: false, savingProject: false,
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
 let previewRedraw
+let cleanRawController = null
+
+let currentTheme = applyTheme(loadTheme())
+function syncThemeButton() {
+  const btn = byId("toggle-theme")
+  if (!btn) return
+  const isDark = currentTheme === "dark"
+  btn.textContent = isDark ? "☀ Sáng" : "☾ Tối"
+  btn.setAttribute("aria-pressed", String(isDark))
+}
+syncThemeButton()
+byId("toggle-theme")?.addEventListener("click", () => {
+  currentTheme = applyTheme(saveTheme(currentTheme === "dark" ? "light" : "dark"))
+  syncThemeButton()
+})
 let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
@@ -289,6 +313,13 @@ function syncToolControls() {
   byId("paint-color-field").hidden = tool !== "paint"
   byId("paint-opacity-field").hidden = !["paint", "clone", "inpaint", "retouch-erase"].includes(tool)
   byId("clean-raw").disabled = projectBusy() || !page
+  const cleanAllBtn = byId("clean-raw-all")
+  if (cleanAllBtn) {
+    cleanAllBtn.textContent = cleanRawController ? "Dừng làm sạch" : "Làm sạch cả chương"
+    cleanAllBtn.disabled = cleanRawController ? false : (projectBusy() || !state.pages.length)
+  }
+  const detectBtn = byId("detect-bubbles")
+  if (detectBtn) detectBtn.disabled = projectBusy() || !page
   byId("undo-retouch").hidden = !hasRetouch
   byId("clear-retouch").hidden = !hasRetouch
   byId("undo-retouch").disabled = projectBusy() || !hasRetouch
@@ -316,6 +347,7 @@ function renderPages() {
   byId("zoom-in").disabled = current < 0
   byId("zoom-out").disabled = current < 0
   byId("compare-original").disabled = current < 0
+  if (byId("split-compare")) byId("split-compare").disabled = current < 0
   byId("add-box").disabled = current < 0 || projectBusy()
   byId("autofit-page").disabled = current < 0 || !(selectedPage()?.boxes.length) || projectBusy()
   byId("export-all").disabled = !count || projectBusy()
@@ -373,6 +405,29 @@ function paintPreview(page) {
   })
 }
 
+function syncSplitCompare(page) {
+  const active = Boolean(page && state.splitCompare && !state.compareOriginal)
+  const compareCanvas = byId("compare-canvas")
+  const handle = byId("split-handle")
+  const splitBtn = byId("split-compare")
+  if (splitBtn) splitBtn.setAttribute("aria-pressed", String(active))
+  stage.classList.toggle("split-comparing", active)
+  stage.style.setProperty("--split-pos", `${state.splitPos}%`)
+  if (!compareCanvas || !handle) return
+  compareCanvas.hidden = !active
+  handle.hidden = !active
+  handle.setAttribute("aria-valuenow", String(Math.round(state.splitPos)))
+  if (active && page?.image) {
+    const w = page.image.naturalWidth
+    const h = page.image.naturalHeight
+    if (compareCanvas.width !== w || compareCanvas.height !== h) {
+      compareCanvas.width = w
+      compareCanvas.height = h
+    }
+    compareCanvas.getContext("2d").drawImage(page.image, 0, 0)
+  }
+}
+
 function renderCanvas() {
   gestures.cancelPendingPaint()
   const page = selectedPage()
@@ -391,6 +446,7 @@ function renderCanvas() {
     overlays.replaceChildren()
     pageCanvas.width = 1
     pageCanvas.height = 1
+    syncSplitCompare(null)
     return
   }
   const stageWidth = state.zoom
@@ -436,6 +492,7 @@ function renderCanvas() {
   }))
   renderCleanupOverlay()
   gestures.renderCloneMarker()
+  syncSplitCompare(page)
 }
 
 function freezeCleanup(box) {
@@ -478,6 +535,8 @@ function renderPresets() {
   byId("save-preset").disabled = !selectedBox() || projectBusy()
   byId("apply-preset").disabled = !state.presets.length || !state.pages.length || projectBusy()
   byId("delete-preset").disabled = !state.presets.length || projectBusy()
+  if (byId("export-presets")) byId("export-presets").disabled = !state.presets.length
+  if (byId("import-presets")) byId("import-presets").disabled = projectBusy()
 }
 
 byId("save-preset").onclick = () => {
@@ -488,12 +547,13 @@ byId("save-preset").onclick = () => {
   commitLiveFormCheckpoint()
   checkpoint()
   const preset = { name, style: projectStyle(box) }
-  const index = state.presets.findIndex((item) => item.name === name)
+  const index = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
   if (index < 0) state.presets.push(preset)
   else state.presets[index] = preset
+  saveGlobalPresets(state.presets)
   renderPresets()
   byId("style-preset").value = String(index < 0 ? state.presets.length - 1 : index)
-  status("Đã lưu mẫu " + name + ".")
+  status("Đã lưu mẫu toàn cục " + name + ".")
 }
 
 byId("apply-preset").onclick = () => {
@@ -527,8 +587,39 @@ byId("delete-preset").onclick = () => {
   if (projectBusy() || !state.presets.length) return
   checkpoint()
   state.presets.splice(Number(byId("style-preset").value), 1)
+  saveGlobalPresets(state.presets)
   renderPresets()
 }
+
+byId("export-presets")?.addEventListener("click", () => {
+  if (!state.presets.length) return status("Chưa có mẫu dàn chữ nào để xuất.", true)
+  const json = serializePresetsJson(state.presets)
+  saveFile(new Blob([json], { type: "application/json;charset=utf-8" }), "khung-thoai-presets.json")
+  status(`Đã xuất ${state.presets.length} mẫu dàn chữ ra tệp JSON.`)
+})
+
+byId("import-presets")?.addEventListener("click", () => {
+  if (!projectBusy()) byId("presets-file")?.click()
+})
+
+byId("presets-file")?.addEventListener("change", async (event) => {
+  const file = event.target.files[0]
+  event.target.value = ""
+  if (!file || projectBusy()) return
+  try {
+    const imported = parsePresetsJson(await file.text())
+    commitLiveFormCheckpoint()
+    checkpoint()
+    state.presets = mergePresets(state.presets, imported)
+    saveGlobalPresets(state.presets)
+    for (const preset of imported) registerFontName(preset.style.font)
+    renderFontOptions()
+    renderPresets()
+    status(`Đã nhập và gộp ${imported.length} mẫu dàn chữ (tổng ${state.presets.length} mẫu).`)
+  } catch (error) {
+    status("Không nhập được tệp mẫu. " + error.message, true)
+  }
+})
 
 byId("reset-cleanup").onclick = () => {
   const box = selectedBox()
@@ -592,6 +683,104 @@ byId("clean-raw").onclick = async () => {
     render()
   }
 }
+
+byId("clean-raw-all")?.addEventListener("click", async () => {
+  if (cleanRawController) {
+    cleanRawController.abort()
+    return
+  }
+  if (!state.pages.length || projectBusy()) return
+  commitLiveFormCheckpoint()
+  cleanRawController = new AbortController()
+  state.processingNative = true
+  renderPages()
+  const total = state.pages.length
+  let cleaned = 0
+  let engineLabel = "JS"
+  let recorded = false
+  try {
+    for (let i = 0; i < state.pages.length; i++) {
+      if (cleanRawController.signal.aborted) break
+      const page = state.pages[i]
+      status(`Đang làm sạch raw ${i + 1}/${total} trang (${page.name})…`)
+      const { file, engine } = await cleanRawPageImage(page, { strength: 0.7, denoise: true, sharpen: true })
+      if (cleanRawController.signal.aborted) break
+      const decoded = await openImage(file)
+      if (!recorded) {
+        checkpoint()
+        recorded = true
+      }
+      page.file = decoded.file
+      page.image = decoded.image
+      page.url = decoded.url
+      engineLabel = engine === "native-cs" ? "C#" : "JS"
+      cleaned++
+      if (selectedPage() === page) renderCanvas()
+    }
+    const stopped = cleanRawController.signal.aborted
+    status(
+      stopped
+        ? `Đã dừng làm sạch raw sau ${cleaned}/${total} trang.`
+        : `Đã làm sạch raw ${cleaned}/${total} trang (${engineLabel}). Nhấn Ctrl+Z để hoàn tác.`,
+    )
+    if (cleaned > 0) {
+      notify({
+        kind: "success",
+        title: stopped ? "Đã dừng làm sạch raw" : "Hoàn tất làm sạch raw cả chương",
+        message: `Đã xử lý ${cleaned}/${total} trang (${engineLabel}).`,
+        key: "clean-raw-chapter",
+        actions: [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }],
+      })
+    }
+  } catch (error) {
+    status(`Lỗi làm sạch raw sau ${cleaned}/${total} trang: ${error.message}`, true)
+  } finally {
+    cleanRawController = null
+    state.processingNative = false
+    render()
+  }
+})
+
+byId("detect-bubbles")?.addEventListener("click", () => {
+  const page = selectedPage()
+  if (!page || projectBusy()) return
+  const direction = byId("direction").value
+  const detected = detectAllBubblesOnImage(page.image, { direction })
+  if (!detected.length) {
+    return status("Không tìm thấy bong bóng thoại sáng tách biệt nào trên trang này.", true)
+  }
+  const fresh = detected.filter((cand) => {
+    const coords = toCoordinates(cand)
+    return !page.boxes.some((box) => overlapScore(coords, toCoordinates(box)) > 0.4)
+  })
+  const capacity = Math.max(0, 24 - page.boxes.length)
+  const chosen = fresh.slice(0, capacity)
+  if (!chosen.length) {
+    return status("Tất cả bong bóng phát hiện đã có khung hoặc trang đã đạt giới hạn 24 khung.")
+  }
+  commitLiveFormCheckpoint()
+  checkpoint()
+  let lastBox = null
+  for (let i = 0; i < chosen.length; i++) {
+    const queuedText = page.unplaced.length
+      ? page.unplaced.shift().text
+      : state.queue.length
+        ? state.queue.shift()
+        : `Thoại ${page.boxes.length + 1}`
+    const box = makeBox(page, chosen[i], queuedText)
+    box.fill = false
+    box.bubbleFit = true
+    page.boxes.push(box)
+    lastBox = box
+  }
+  if (lastBox) {
+    state.boxId = lastBox.id
+    state.selectedBoxIds.clear()
+    state.selectedBoxIds.add(lastBox.id)
+  }
+  render()
+  status(`Đã quét và tạo tự động ${chosen.length} khung bong bóng thoại trên trang.`)
+})
 
 byId("cleanup-tool").onchange = () => {
   state.placing = false
@@ -814,8 +1003,53 @@ byId("fit-page").onclick = () => {
 byId("compare-original").onclick = () => {
   if (!selectedPage()) return
   state.compareOriginal = !state.compareOriginal
+  if (state.compareOriginal) state.splitCompare = false
   renderCanvas()
   status(state.compareOriginal ? "Đang xem ảnh gốc (nhấn \\ để quay lại)." : "Đã quay lại bản biên tập.")
+}
+
+byId("split-compare")?.addEventListener("click", () => {
+  if (!selectedPage()) return
+  state.splitCompare = !state.splitCompare
+  if (state.splitCompare) state.compareOriginal = false
+  renderCanvas()
+  status(state.splitCompare ? "Đang bật thanh kéo so sánh gốc (kéo rèm hoặc nhấn Shift+\\ để tắt)." : "Đã tắt thanh kéo so sánh.")
+})
+
+const splitHandle = byId("split-handle")
+if (splitHandle) {
+  let draggingSplit = false
+  const updateSplitFromClientX = (clientX) => {
+    const rect = stage.getBoundingClientRect()
+    if (!rect.width) return
+    state.splitPos = clamp(Math.round(((clientX - rect.left) / rect.width) * 100), 0, 100)
+    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
+    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
+  }
+  splitHandle.addEventListener("pointerdown", (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    draggingSplit = true
+    splitHandle.setPointerCapture?.(event.pointerId)
+    updateSplitFromClientX(event.clientX)
+  })
+  splitHandle.addEventListener("pointermove", (event) => {
+    if (!draggingSplit) return
+    event.preventDefault()
+    updateSplitFromClientX(event.clientX)
+  })
+  const stopSplit = () => { draggingSplit = false }
+  splitHandle.addEventListener("pointerup", stopSplit)
+  splitHandle.addEventListener("pointercancel", stopSplit)
+  splitHandle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+    event.preventDefault()
+    event.stopPropagation()
+    const step = event.shiftKey ? 10 : 2
+    state.splitPos = clamp(state.splitPos + (event.key === "ArrowRight" ? step : -step), 0, 100)
+    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
+    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
+  })
 }
 
 byId("script-file").onchange = async (event) => {
@@ -1143,9 +1377,15 @@ document.addEventListener("keydown", (event) => {
     gestures.setSpaceHeld(true)
     return
   }
-  if (event.key === "\\" && selectedPage()) {
+  if ((event.key === "\\" || event.key === "|") && selectedPage()) {
     event.preventDefault()
-    state.compareOriginal = !state.compareOriginal
+    if (event.shiftKey || event.key === "|") {
+      state.splitCompare = !state.splitCompare
+      if (state.splitCompare) state.compareOriginal = false
+    } else {
+      state.compareOriginal = !state.compareOriginal
+      if (state.compareOriginal) state.splitCompare = false
+    }
     renderCanvas()
     return
   }

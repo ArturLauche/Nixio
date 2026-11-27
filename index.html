@@ -15,6 +15,7 @@
       <a href="#library" data-view="library">Thư viện chương</a>
     </nav>
     <div class="header-actions">
+      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
       <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)">Trợ lý AI</button>
       <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H)">Tìm &amp; thay</button>
       <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
@@ -184,6 +185,7 @@
           </div>
           <button type="button" id="fit-page">Vừa trang</button>
           <button type="button" id="compare-original" aria-pressed="false" title="Giữ hoặc bấm phím \ để xem ảnh gốc">So sánh gốc</button>
+          <button type="button" id="split-compare" aria-pressed="false" title="Kéo rèm so sánh ảnh gốc và bản biên tập (Shift + \)">Kéo so sánh</button>
           <button type="button" id="add-box" aria-pressed="false">+ Khung chữ</button>
         </div>
       </div>
@@ -208,6 +210,8 @@
         <label for="paint-opacity" id="paint-opacity-field">Độ đục (%)<input id="paint-opacity" type="number" min="5" max="100" value="100"></label>
         <span id="eyedropper-readout" class="muted" hidden></span>
         <button type="button" id="clean-raw" class="button" title="Làm sạch ảnh raw: trắng giấy, khử nhiễu JPEG giữ screentone và tăng sắc nét (Hoàn tác được)">Làm sạch raw</button>
+        <button type="button" id="clean-raw-all" class="button" title="Làm sạch ảnh raw cho toàn bộ các trang trong chương (1 bước Hoàn tác)">Làm sạch cả chương</button>
+        <button type="button" id="detect-bubbles" class="button" title="Quét tự động toàn bộ bong bóng thoại sáng trên trang hiện tại">Quét bong bóng</button>
         <button type="button" id="undo-retouch" class="button" hidden>Hoàn tác nét cọ</button>
         <button type="button" id="clear-retouch" class="button danger" hidden>Xóa nét vẽ tay</button>
         <label class="choice"><input type="checkbox" id="show-cleanup" checked>Hiện redraw</label>
@@ -221,8 +225,14 @@
         </div>
         <div id="stage" class="stage" tabindex="0" aria-label="Ảnh trang truyện, nhấn Enter để thêm khung chữ" hidden>
           <canvas id="page-canvas"></canvas>
+          <canvas id="compare-canvas" class="compare-canvas" aria-hidden="true" hidden></canvas>
           <canvas id="cleanup-overlay" aria-hidden="true"></canvas>
           <div id="overlays" class="overlays"></div>
+          <div id="split-handle" class="split-handle" role="slider" tabindex="0" aria-label="Thanh kéo so sánh ảnh gốc và bản biên tập" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden>
+            <span class="split-badge split-badge-before">Gốc</span>
+            <span class="split-thumb" aria-hidden="true">⇄</span>
+            <span class="split-badge split-badge-after">Biên tập</span>
+          </div>
         </div>
       </div>
       <section id="task-panel" class="side-section" hidden><h2>Tác vụ</h2><ol id="task-list"></ol></section>
@@ -345,6 +355,11 @@
           <button type="button" id="apply-preset" class="button">Áp dụng mẫu</button>
           <button type="button" id="delete-preset" class="button danger">Xóa mẫu</button>
         </div>
+        <div class="form-actions preset-io-actions">
+          <button type="button" id="export-presets" class="button" title="Xuất bộ mẫu dàn chữ ra tệp JSON để dùng chung">Xuất JSON</button>
+          <button type="button" id="import-presets" class="button" title="Nhập bộ mẫu dàn chữ từ tệp JSON">Nhập JSON</button>
+          <input type="file" id="presets-file" accept=".json,application/json" hidden>
+        </div>
       </section>
       <section class="side-section" id="cleanup-inspector" hidden>
         <h2>Vùng xóa chữ</h2>
@@ -450,6 +465,7 @@
       <div><dt>Ctrl + Cuộn chuột</dt><dd>Thu phóng bản vẽ (25%–400%)</dd></div>
       <div><dt>Giữ Space + Kéo / Chuột giữa</dt><dd>Kéo bàn vẽ (Pan)</dd></div>
       <div><dt>Phím \</dt><dd>Bật/tắt so sánh với ảnh gốc</dd></div>
+      <div><dt>Shift + \</dt><dd>Bật/tắt thanh kéo so sánh gốc</dd></div>
       <div><dt>Shift + Kéo tay cầm xoay</dt><dd>Xoay khung theo nấc 15°</dd></div>
       <div><dt>Shift + Bấm khung</dt><dd>Chọn nhiều khung để kéo / căn hàng</dd></div>
       <div><dt>Alt + Kéo khung</dt><dd>Tạm tắt hút lưới căn thẳng hàng</dd></div>
