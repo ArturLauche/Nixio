@@ -173,6 +173,7 @@ internal sealed class ProjectStorage : IDisposable
         {
             item.Zip?.Dispose();
             item.Stream.Flush(true);
+            item.Stream.Dispose();
         }
         catch (Exception error)
         {
