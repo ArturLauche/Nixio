@@ -521,6 +521,16 @@ window.addEventListener("hashchange", setView)
 if (typeof matchMedia === "function") {
   matchMedia("(max-width: 640px)").addEventListener("change", syncToolControls)
 }
+// The header wraps on narrow screens, so fixed drawers and the shell height track its real
+// measured height through --header-h instead of assuming the desktop 48px.
+const appHeader = document.querySelector(".app-header")
+if (appHeader && typeof ResizeObserver === "function") {
+  const syncHeaderHeight = () => {
+    document.documentElement.style.setProperty("--header-h", `${appHeader.offsetHeight}px`)
+  }
+  new ResizeObserver(syncHeaderHeight).observe(appHeader)
+  syncHeaderHeight()
+}
 setView()
 
 // Nixio #106: the page toolbar changes its index silently, so a page change is announced with the

@@ -27,6 +27,7 @@
   --danger-border: #f5c2c5;
   --warn: #b45309;
   --warn-bg: #fffbeb;
+  --header-h: 48px;
   --radius: 6px;
   --radius-sm: 4px;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, .06);
@@ -217,7 +218,7 @@ label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
 .editor-layout {
   display: grid;
   grid-template-columns: 258px minmax(360px, 1fr) 288px;
-  height: calc(100dvh - 48px);
+  height: calc(100dvh - var(--header-h, 48px));
   overflow: hidden;
 }
 .sidebar, .inspector {
@@ -945,7 +946,7 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 /* AI Assistant Drawer (Harness v3) */
 .chat-panel {
   position: fixed;
-  top: 48px;
+  top: var(--header-h, 48px);
   right: 0;
   bottom: 0;
   width: min(410px, 96vw);
@@ -1085,8 +1086,8 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
   background: #d97706; color: #ffffff; font-size: .66rem; font-weight: 700;
 }
 .notifications-panel {
-  position: fixed; top: 54px; right: 12px; width: min(370px, calc(100vw - 24px));
-  max-height: min(500px, calc(100vh - 70px)); z-index: 45;
+  position: fixed; top: calc(var(--header-h, 48px) + 6px); right: 12px; width: min(370px, calc(100vw - 24px));
+  max-height: min(500px, calc(100dvh - var(--header-h, 48px) - 24px)); z-index: 45;
   display: flex; flex-direction: column; background: var(--surface);
   border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: var(--shadow-md); overflow: hidden;
 }
@@ -1123,7 +1124,7 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
   width: min(350px, calc(100vw - 28px)); pointer-events: none;
 }
 .toast {
-  pointer-events: auto; display: flex; align-items: flex-start; gap: 8px;
+  pointer-events: none; display: flex; align-items: flex-start; gap: 8px;
   padding: 9px 11px; border-radius: 7px; background: var(--surface);
   border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
   box-shadow: var(--shadow-md); font-size: .78rem; line-height: 1.4;
@@ -1140,6 +1141,13 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
   line-height: 1; padding: 2px 4px; cursor: pointer;
 }
 .toast-close:hover { color: var(--ink); }
+.toast :is(.toast-close, .button, a) { pointer-events: auto; }
+/* With the chat drawer open its composer owns the bottom-right corner, so toasts drop from
+   under the header instead of covering the input. */
+body:has(#chat-panel:not([hidden])) .toast-container {
+  top: calc(var(--header-h, 48px) + 10px);
+  bottom: auto;
+}
 .notif-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .notif-actions .button { min-height: 24px; padding: 2px 8px; font-size: .72rem; }
 .update-version-row { font-size: .8rem; margin-bottom: 6px; }
@@ -1151,7 +1159,7 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
   .editor-layout {
     grid-template-columns: 230px 1fr;
     height: auto;
-    min-height: calc(100dvh - 48px);
+    min-height: calc(100dvh - var(--header-h, 48px));
     overflow: visible;
   }
   .sidebar, .inspector { overflow: visible; }
@@ -1168,6 +1176,8 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 @media (max-width: 640px) {
   .app-header { grid-template-columns: 1fr auto; gap: 6px; }
   .app-header nav { grid-row: 2; grid-column: 1 / -1; }
+  .header-actions { flex-wrap: nowrap; overflow-x: auto; }
+  .header-actions .button { flex: 0 0 auto; }
   .editor-layout { grid-template-columns: minmax(0, 1fr); }
   .workspace-body { flex-direction: column; }
   .tool-rail {
