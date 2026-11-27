@@ -5,6 +5,22 @@ using System.Text.Json.Nodes;
 internal static class NativeRpc
 {
     internal const int MaximumData = 512 * 1024 * 1024;
+    // The renderer declares the same range in `src/native.js` and the Electron client compares it in
+    // `desktop/native-worker.cjs`. Change both ends together and only for an incompatible framing
+    // change: every reply carries the full range so the other side can name both versions instead of
+    // half-parsing a frame it does not understand.
+    internal const int ProtocolVersion = 1;
+    internal const int ProtocolMinimum = 1;
+    internal static readonly string[] Operations =
+        ["redraw", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png", "zip", "project"];
+
+    internal static JsonObject OperationVersions()
+    {
+        var versions = new JsonObject();
+        foreach (var operation in Operations) versions[operation] = ProtocolVersion;
+        return versions;
+    }
+
     internal static async Task<int> Run()
     {
         using var input = Console.OpenStandardInput();
@@ -28,11 +44,23 @@ internal static class NativeRpc
             try
             {
                 var request = JsonNode.Parse(metadata)!.AsObject();
-                if (request["version"]?.GetValue<int>() != 1) throw new InvalidDataException("Unsupported protocol version.");
+                // The request states the range the app accepts. A worker that cannot serve it answers
+                // with its own range instead of failing an operation mid-stream, so the other side can
+                // keep this process alive for the project handles it owns.
+                var protocol = request["protocol"]?.AsObject();
+                var clientMinimum = ProtocolMinimum;
+                var clientMaximum = ProtocolVersion;
+                if (protocol?["min"] is JsonValue minimum && minimum.TryGetValue<int>(out var declaredMinimum)) clientMinimum = declaredMinimum;
+                if (protocol?["max"] is JsonValue maximum && maximum.TryGetValue<int>(out var declaredMaximum)) clientMaximum = declaredMaximum;
+                var declaredVersion = request["version"]?.GetValue<int>() ?? ProtocolVersion;
+                if (declaredVersion < ProtocolMinimum || declaredVersion > ProtocolVersion ||
+                    clientMinimum > ProtocolVersion || clientMaximum < ProtocolMinimum)
+                    throw new InvalidDataException(
+                        $"Native protocol incompatible: worker supports {ProtocolMinimum}-{ProtocolVersion}, app supports {clientMinimum}-{clientMaximum}.");
                 var options = request["options"]?.AsObject() ?? new JsonObject();
                 var operation = request["operation"]!.GetValue<string>();
                 NativeProgress.Report = (progress, stage) => Write(new JsonObject {
-                    ["version"] = 1, ["event"] = "progress", ["progress"] = progress, ["stage"] = stage,
+                    ["version"] = ProtocolVersion, ["event"] = "progress", ["progress"] = progress, ["stage"] = stage,
                 }, []);
                 (reply, bytes) = operation switch
                 {
@@ -55,7 +83,10 @@ internal static class NativeRpc
                 reply = new JsonObject { ["ok"] = false, ["error"] = error.Message };
             }
             NativeProgress.Report = null;
-            reply["version"] = 1;
+            reply["version"] = ProtocolVersion;
+            reply["protocolVersion"] = ProtocolVersion;
+            reply["minProtocol"] = ProtocolMinimum;
+            reply["maxProtocol"] = ProtocolVersion;
             Write(reply, bytes);
         }
         return 0;
