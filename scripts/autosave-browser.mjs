@@ -153,6 +153,24 @@ try {
     assert.deepEqual([...first.errors, ...second.errors], [])
   })
 
+  await scenario("duplicated tabs preserve all recoverable sessions at capacity", async (context) => {
+    const pages = []
+    for (let index = 0; index < 4; index++) {
+      const tab = await openTab(context)
+      await tab.evaluate(() => sessionStorage.setItem("khung-thoai:web-writer", "duplicated-recovery-tab"))
+      pages.push(tab)
+    }
+    for (let index = 0; index < 3; index++) {
+      assert.equal((await call(pages[index], "save", { projectId: projectA, payload: `page-${index}` })).ok, true)
+    }
+    const refused = await call(pages[3], "save", { projectId: projectA, payload: "fourth" })
+    assert.deepEqual(refused, { ok: false, reason: "project-capacity" })
+    const snapshots = await call(pages[3], "list")
+    const bodies = await Promise.all(snapshots.map((item) => call(pages[3], "loadText", item.id)))
+    assert.deepEqual(bodies.map((item) => item.body.slice(-6)).sort(), ["page-0", "page-1", "page-2"])
+    assert.deepEqual(pages.flatMap((page) => page.errors), [])
+  })
+
   await scenario("the legacy latest record and stored fonts survive the migration", async (context) => {
     const first = await openTab(context)
     const seeded = await call(first, "seedLegacy", { projectId: projectC, pageCount: 3 })
