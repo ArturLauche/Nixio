@@ -1,23 +1,11 @@
 import { imageMimeType } from "./io.js"
 import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { readOcrBox } from "./placement.js"
+import { callProvider, validateEndpointUrl } from "./provider-bridge.js"
 
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]", "::1"])
-
-export function validateEndpointUrl(rawUrl) {
-  let parsed
-  try {
-    parsed = new URL(String(rawUrl || "").trim())
-  } catch {
-    throw new Error("Base URL của LLM không hợp lệ (ví dụ: http://localhost:11434/v1).")
-  }
-  const isHttps = parsed.protocol === "https:"
-  const isLoopbackHttp = parsed.protocol === "http:" && loopbackHosts.has(parsed.hostname.toLowerCase())
-  if (!isHttps && !isLoopbackHttp) {
-    throw new Error("Chỉ cho phép HTTPS hoặc HTTP cục bộ (localhost / 127.0.0.1).")
-  }
-  return parsed.href.replace(/\/+$/, "")
-}
+// The endpoint guard lives with the transport adapter so the browser route and the desktop route
+// accept exactly the same base URLs; it stays exported here for the modules that already import it.
+export { validateEndpointUrl }
 
 export function extractJsonObject(rawText) {
   if (typeof rawText !== "string" || !rawText.trim()) {
@@ -54,28 +42,26 @@ function fileToDataUrl(file) {
 }
 
 async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800 }, messages) {
-  const endpoint = validateEndpointUrl(baseUrl) + "/chat/completions"
+  const endpoint = validateEndpointUrl(baseUrl)
   const model = String(llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model (ví dụ: qwen2.5:7b, hy-mt2-manga, gpt-4o-mini).")
-  const headers = { "Content-Type": "application/json" }
-  const token = String(apiKey || "").trim()
-  if (token) headers.Authorization = "Bearer " + token
 
-  const body = JSON.stringify({
+  const body = {
     model,
     temperature: 0.2,
     messages,
-  })
+  }
   return withLlmRetry(
     async () => {
-      const timeoutSignal = AbortSignal.timeout(120000)
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        credentials: "omit",
-        redirect: "error",
-        signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-        body,
+      // The adapter owns the URL, the auth header and the timeout: in the desktop app main attaches
+      // the stored key, so this call never carries one.
+      const response = await callProvider({
+        provider: "openai",
+        endpoint,
+        payload: body,
+        key: apiKey,
+        signal,
+        timeoutMs: 120000,
       })
       if (!response.ok) {
         const error = new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)

@@ -11,7 +11,7 @@ import {
 } from "./agent-context.js"
 import { RepeatToolGuard } from "./agent-guards.js"
 import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
-import { validateEndpointUrl } from "./openai-compat.js"
+import { callProvider, providerCredentialsInMain, validateEndpointUrl } from "./provider-bridge.js"
 
 export async function readSseEvents(body, onData) {
   const reader = body.getReader()
@@ -110,27 +110,26 @@ export function parseTextToolCalls(text) {
 
 async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, signal, stream = false, onDelta }) {
   const key = String(settings.key || "").trim()
-  if (!key) throw new Error("Hãy nhập khóa API Gemini ở mục Dịch ảnh & LLM.")
+  // On the desktop the key is read from the OS vault in main, so a missing settings value is not a
+  // configuration error there: main answers with a credential error only when nothing is stored.
+  if (!key && !providerCredentialsInMain()) throw new Error("Hãy nhập khóa API Gemini ở mục Dịch ảnh & LLM.")
   const models = geminiModelOptions[settings.model] ?? geminiModelOptions.auto
-  const body = JSON.stringify({
+  const payload = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents,
     ...(toolDefs.length && { tools: [{ functionDeclarations: toolDefs }] }),
-  })
+  }
   let response
   for (let i = 0; i < models.length; i++) {
     const model = models[i]
-    const timeoutSignal = AbortSignal.timeout(90000)
-    const endpoint = stream
-      ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`
-      : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      credentials: "omit",
-      redirect: "error",
-      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-      body,
+    response = await callProvider({
+      provider: "gemini",
+      model,
+      payload,
+      key,
+      stream,
+      signal,
+      timeoutMs: 90000,
     })
     if (response.ok) {
       const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
@@ -204,11 +203,9 @@ async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, sign
 }
 
 async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = false, onDelta }) {
-  const endpoint = validateEndpointUrl(settings.baseUrl) + "/chat/completions"
+  const endpoint = validateEndpointUrl(settings.baseUrl)
   const model = String(settings.llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model LLM ở mục Dịch ảnh & LLM.")
-  const headers = { "Content-Type": "application/json" }
-  if (settings.apiKey) headers.Authorization = "Bearer " + settings.apiKey
 
   const body = {
     model,
@@ -224,14 +221,14 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
     }),
   }
 
-  const timeoutSignal = AbortSignal.timeout(120000)
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    credentials: "omit",
-    redirect: "error",
-    signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-    body: JSON.stringify(body),
+  const response = await callProvider({
+    provider: "openai",
+    endpoint,
+    payload: body,
+    key: settings.apiKey,
+    stream,
+    signal,
+    timeoutMs: 120000,
   })
   if (!response.ok) {
     const err = new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)

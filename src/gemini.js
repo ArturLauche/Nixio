@@ -1,6 +1,7 @@
 import { imageMimeType } from "./io.js"
 import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { readOcrBox } from "./placement.js"
+import { callProvider } from "./provider-bridge.js"
 
 const modelOptions = {
   auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
@@ -36,22 +37,22 @@ function inlineImage(file) {
 }
 
 async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800 }, image, prompt, pageData, schema) {
-  const body = JSON.stringify({
+  const payload = {
     contents: [{ parts: [{ text: prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData) }, image] }],
     generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema },
-  })
+  }
   return withLlmRetry(
     async () => {
       let response
       for (let index = modelIndex; index < models.length; index++) {
         const model = models[index]
-        response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-          credentials: "omit",
-          redirect: "error",
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
-          body,
+        response = await callProvider({
+          provider: "gemini",
+          model,
+          payload,
+          key,
+          signal,
+          timeoutMs: 90000,
         })
         if (response.ok) {
           const payload = await response.json()
