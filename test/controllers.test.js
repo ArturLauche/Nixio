@@ -505,6 +505,13 @@ test("translation setup reads provider, endpoint, and target settings from the f
   assert.equal(settings.target, "vi")
   assert.equal(settings.notes, "ghi chú")
   assert.equal(typeof settings.skillPrompt, "string")
+
+  // The glossary stays one textarea; the status line reads the terminology graph out of it.
+  byId("translation-glossary").value = "五条悟 = Gojo Satoru\n@alias 五条先生\n先生 = Thầy"
+  assert.equal(api.refreshGlossaryStatus(), "2 thuật ngữ · 0 liên kết")
+  byId("translation-glossary").value = "五条悟 = Gojo Satoru\n@bogus x"
+  byId("translation-glossary").dispatch("input")
+  assert.match(byId("glossary-status").textContent, /^1 thuật ngữ · 0 liên kết · 1 dòng cần xem lại: Chỉ thị "@bogus" không được hỗ trợ\.$/)
 })
 
 function setupZoom({ state, page, canvasWidth }) {
