@@ -23,10 +23,13 @@ internal static class RawCleanup
         var histR = new int[256];
         var histG = new int[256];
         var histB = new int[256];
+        var visible = 0;
         var lowSatCount = 0;
         for (var i = 0; i < pixelCount; i++)
         {
             var o = i * 4;
+            if (output[o + 3] == 0) continue;
+            visible++;
             int r = output[o], g = output[o + 1], b = output[o + 2];
             var luma = (r * 77 + g * 150 + b * 29) >> 8;
             histL[luma]++;
@@ -38,9 +41,20 @@ internal static class RawCleanup
             if (maxC - minC <= 26) lowSatCount++;
         }
 
-        var isMostlyGrayscale = lowSatCount > pixelCount * 0.88;
-        var blackTarget = (int)(pixelCount * (0.012 * strength + 0.003));
-        var whiteTarget = (int)(pixelCount * (1.0 - (0.055 * strength + 0.01)));
+        var isMostlyGrayscale = lowSatCount > visible * 0.88;
+        JsonObject Metadata(int blackPoint, int whitePoint) => new()
+        {
+            ["width"] = width,
+            ["height"] = height,
+            ["blackPoint"] = blackPoint,
+            ["whitePoint"] = whitePoint,
+            ["grayscale"] = isMostlyGrayscale,
+        };
+        if (strength == 0 || visible == 0)
+            return (Metadata(0, 255), output);
+
+        var blackTarget = Math.Max(1, (int)(visible * (0.012 * strength + 0.003)));
+        var whiteTarget = Math.Max(1, (int)(visible * (1.0 - (0.055 * strength + 0.01))));
 
         static int Percentile(int[] hist, int target)
         {
@@ -79,6 +93,7 @@ internal static class RawCleanup
         for (var i = 0; i < pixelCount; i++)
         {
             var o = i * 4;
+            if (output[o + 3] == 0) continue;
             output[o] = lutR[output[o]];
             output[o + 1] = lutG[output[o + 1]];
             output[o + 2] = lutB[output[o + 2]];
@@ -96,6 +111,7 @@ internal static class RawCleanup
                 for (var x = 1; x < width - 1; x++)
                 {
                     var co = (row + x) * 4;
+                    if (src[co + 3] == 0) continue;
                     float cr = src[co], cg = src[co + 1], cb = src[co + 2];
                     float sr = 0, sg = 0, sb = 0, wSum = 0;
                     for (var dy = -1; dy <= 1; dy++)
@@ -104,6 +120,7 @@ internal static class RawCleanup
                         for (var dx = -1; dx <= 1; dx++)
                         {
                             var no = (nRow + x + dx) * 4;
+                            if (src[no + 3] == 0) continue;
                             float nr = src[no], ng = src[no + 1], nb = src[no + 2];
                             var dr = nr - cr;
                             var dg = ng - cg;
@@ -136,6 +153,7 @@ internal static class RawCleanup
                 for (var x = 1; x < width - 1; x++)
                 {
                     var co = (row + x) * 4;
+                    if (src[co + 3] == 0) continue;
                     var up = ((y - 1) * width + x) * 4;
                     var dn = ((y + 1) * width + x) * 4;
                     var lf = (row + x - 1) * 4;
@@ -143,7 +161,9 @@ internal static class RawCleanup
                     for (var c = 0; c < 3; c++)
                     {
                         var center = (float)src[co + c];
-                        var blur = (center * 4f + src[up + c] + src[dn + c] + src[lf + c] + src[rt + c]) * 0.125f;
+                        var blur = (center * 4f + (src[up + 3] != 0 ? src[up + c] : center) +
+                            (src[dn + 3] != 0 ? src[dn + c] : center) + (src[lf + 3] != 0 ? src[lf + c] : center) +
+                            (src[rt + 3] != 0 ? src[rt + c] : center)) * 0.125f;
                         var diff = center - blur;
                         // Threshold tiny differences so paper background stays noise-free.
                         if (MathF.Abs(diff) < 3f) continue;
@@ -153,14 +173,7 @@ internal static class RawCleanup
             }
         }
 
-        return (new JsonObject
-        {
-            ["width"] = width,
-            ["height"] = height,
-            ["blackPoint"] = low,
-            ["whitePoint"] = high,
-            ["grayscale"] = isMostlyGrayscale,
-        }, output);
+        return (Metadata(low, high), output);
     }
 
     private static byte ClampByte(float v) => v <= 0f ? (byte)0 : v >= 255f ? (byte)255 : (byte)MathF.Round(v);

@@ -30,11 +30,10 @@ class TaskQueue {
     if (this.active || !this.pending.length) return
     const job = this.pending.shift()
     this.active = job
-    const worker = this.createWorker()
-    job.worker = worker
-    this.emit(job, "running", 0, "Đang xử lý")
     try {
-      const result = await worker.call(job.operation, job.options, job.data,
+      job.worker = this.createWorker()
+      this.emit(job, "running", 0, "Đang xử lý")
+      const result = await job.worker.call(job.operation, job.options, job.data,
         (progress, stage) => this.emit(job, "running", progress, stage))
       if (job.cancelled) throw new Error("Đã hủy tác vụ.")
       this.emit(job, "done", 100, "Hoàn tất")
@@ -43,7 +42,7 @@ class TaskQueue {
       this.emit(job, job.cancelled ? "cancelled" : "error", job.progress, job.cancelled ? "Đã hủy" : error.message)
       job.reject(new Error(job.cancelled ? "Đã hủy tác vụ." : error.message))
     } finally {
-      worker.close()
+      job.worker?.close()
       this.jobs.delete(job.id)
       this.active = null
       this.drain()

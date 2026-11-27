@@ -249,3 +249,20 @@ test("native RawCleanup whitens yellowed scan paper and deepens faded ink while 
   const inkOff = (24 * width + 23) * 4
   assert.ok(data[inkOff] <= 20)
 })
+
+test("native raw cleanup preserves zero strength and excludes fully transparent pixels", { skip: !available }, async (t) => {
+  const worker = new native.NativeWorker(executable)
+  t.after(() => worker.close())
+  const raw = new Uint8Array(9 * 9 * 4)
+  raw.set([120, 123, 125, 255, 145, 149, 154, 255, 220, 211, 194, 255], 160)
+  const hiddenWhite = new Uint8Array(raw)
+  for (let offset = 0; offset < raw.length; offset += 4) {
+    if (!raw[offset + 3]) hiddenWhite.fill(255, offset, offset + 3)
+  }
+  const off = await worker.call("clean_raw", { width: 9, height: 9, strength: 0 }, raw)
+  assert.deepEqual([...off.data], [...raw])
+  const black = await worker.call("clean_raw", { width: 9, height: 9 }, raw)
+  const white = await worker.call("clean_raw", { width: 9, height: 9 }, hiddenWhite)
+  assert.deepEqual(black.data.subarray(160, 172), white.data.subarray(160, 172))
+  assert.deepEqual([...white.data.subarray(0, 4)], [255, 255, 255, 0])
+})

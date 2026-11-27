@@ -46,6 +46,7 @@ export function setupChat({
   projectBusy,
   commitLiveForm,
   readTranslationSettings,
+  onSkillChange,
   registerFontName,
   renderFontOptions,
   notify,
@@ -117,18 +118,20 @@ export function setupChat({
   }
   searchUrlInput.onchange = saveSearchConfig
 
+  function persistSkill() {
+    saveSkillPrefs({
+      skillId: skillSelect.value,
+      customInstructions: skillCustomInput?.value || "",
+    })
+    onSkillChange?.()
+  }
+
   // Populate & persist genre Skills.
   if (skillSelect) {
     skillSelect.replaceChildren(...BUILTIN_SKILLS.map((skill) => new Option(skill.name, skill.id)))
     const savedSkill = loadSkillPrefs()
     skillSelect.value = savedSkill.skillId
     if (skillCustomInput) skillCustomInput.value = savedSkill.customInstructions
-    const persistSkill = () => {
-      saveSkillPrefs({
-        skillId: skillSelect.value,
-        customInstructions: skillCustomInput?.value || "",
-      })
-    }
     skillSelect.onchange = persistSkill
     if (skillCustomInput) skillCustomInput.onchange = persistSkill
   }
@@ -590,7 +593,7 @@ export function setupChat({
         }
         if (skillSelect) {
           skillSelect.value = target.id
-          saveSkillPrefs({ skillId: target.id, customInstructions: skillCustomInput?.value || "" })
+          persistSkill()
         }
         renderSystemNotice(`Đã chuyển hồ sơ biên tập sang: ${target.name} — ${target.description}`)
         return

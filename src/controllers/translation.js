@@ -5,8 +5,8 @@ import {
   translateImageOpenAi,
   validateEndpointUrl,
 } from "../openai-compat.js"
-import { remainingTranslations, translationSignature } from "../translation.js"
-import { loadSkillPrefs, resolveSkillPrompt } from "../agent-skills.js"
+import { remainingTranslations, translationNotes, translationSignature } from "../translation.js"
+import { resolveSkillPrompt } from "../agent-skills.js"
 import { groupDialogue } from "../io.js"
 
 const llmStorageKey = "khung-thoai-llm-config"
@@ -98,8 +98,6 @@ export function setupTranslation({
 
   function readTranslationSettings() {
     const provider = byId("translation-provider").value
-    const skillPrefs = loadSkillPrefs()
-    const skillPrompt = resolveSkillPrompt(skillPrefs.skillId, skillPrefs.customInstructions)
     return {
       provider,
       model: byId("gemini-model").value,
@@ -108,35 +106,32 @@ export function setupTranslation({
       source: byId("source-language").value,
       target: byId("target-language").value,
       notes: byId("translation-notes").value.trim(),
+      skillPrompt: resolveSkillPrompt(byId("chat-skill")?.value, byId("chat-skill-custom")?.value),
       direction: byId("direction").value,
       glossary: byId("translation-glossary").value.trim(),
-      skillPrompt,
     }
   }
 
   function prepareCredentials(settings) {
-    const combinedNotes = [settings.notes, settings.skillPrompt].filter(Boolean).join("\n\n")
-    const enriched = combinedNotes ? { ...settings, notes: combinedNotes } : settings
-    if (enriched.provider === "openai") {
-      validateEndpointUrl(enriched.baseUrl)
-      if (!enriched.llmModel) throw new Error("Hãy nhập tên Model LLM.")
-      return { ...enriched, apiKey: byId("llm-key").value.trim() }
+    if (settings.provider === "openai") {
+      validateEndpointUrl(settings.baseUrl)
+      if (!settings.llmModel) throw new Error("Hãy nhập tên Model LLM.")
+      return { ...settings, apiKey: byId("llm-key").value.trim() }
     }
     const key = byId("gemini-key").value.trim()
     if (!key) throw new Error("Hãy nhập khóa API Gemini.")
-    return { ...enriched, key }
+    return { ...settings, key }
   }
 
   async function processPages(pages, read, action, kind = "translate") {
     if (projectBusy() || !pages.length) return
-    const rawSettings = readTranslationSettings()
     let settings
     try {
-      settings = prepareCredentials(rawSettings)
+      settings = prepareCredentials(readTranslationSettings())
     } catch (error) {
       return status(error.message, true)
     }
-    const signature = translationSignature(rawSettings)
+    const signature = translationSignature(settings)
     const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
     let context =
       previousPage?.translationContext?.signature === signature
@@ -161,6 +156,7 @@ export function setupTranslation({
         const report = (message) => status(page.name + " · " + message)
         const lines = await read(page, {
           ...settings,
+          notes: translationNotes(settings),
           context,
           report,
           signal: translationController.signal,
@@ -236,14 +232,13 @@ export function setupTranslation({
     const page = selectedPage()
     if (projectBusy() || !page) return
     if (!page.boxes.length) return status("Trang hiện tại chưa có khung chữ nào để dịch.", true)
-    const rawSettings = readTranslationSettings()
     let settings
     try {
-      settings = prepareCredentials(rawSettings)
+      settings = prepareCredentials(readTranslationSettings())
     } catch (error) {
       return status(error.message, true)
     }
-    const signature = translationSignature(rawSettings)
+    const signature = translationSignature(settings)
     const previousPage = state.pages[state.pages.indexOf(page) - 1]
     const context =
       previousPage?.translationContext?.signature === signature
@@ -257,7 +252,7 @@ export function setupTranslation({
     renderInspector()
     try {
       const report = (message) => status(page.name + " · " + message)
-      const requestSettings = { ...settings, context, report, signal: translationController.signal }
+      const requestSettings = { ...settings, notes: translationNotes(settings), context, report, signal: translationController.signal }
       const translated = settings.provider === "openai"
         ? await translateBoxesOpenAi(page.boxes, requestSettings)
         : await translateBoxesGemini(page, page.boxes, requestSettings)

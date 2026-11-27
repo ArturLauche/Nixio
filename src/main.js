@@ -272,11 +272,12 @@ function syncProjectActions() {
 
 let chat
 function syncTranslationActions() {
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
+  const settings = translation.settings()
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
   byId("pages").querySelectorAll(".page-job").forEach((element, index) => {
     const page = state.pages[index]
     element.dataset.state = page.translationJob?.state ?? "pending"
-    element.textContent = translationLabel(page, translation.settings())
+    element.textContent = translationLabel(page, settings)
   })
   chat?.refreshModelBadge()
 }
@@ -299,6 +300,7 @@ function renderPages() {
   projects.refreshDirty()
   const current = selectedIndex()
   const count = state.pages.length
+  const settings = translation.settings()
   if (!state.importing && !state.openingProject) releaseUnusedImages()
   byId("page-count").textContent = count + " / " + pageLimit
   byId("page-indicator").textContent = current === -1 ? "Chưa có trang" : `Trang ${current + 1} / ${count}`
@@ -322,7 +324,7 @@ function renderPages() {
   syncToolControls()
   byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
   byId("stop-translation").disabled = !state.translating
   renderPresets()
   byId("check-export").disabled = projectBusy()
@@ -345,7 +347,7 @@ function renderPages() {
     const job = document.createElement("span")
     job.className = "page-job"
     job.dataset.state = page.translationJob?.state ?? "pending"
-    job.textContent = translationLabel(page, translation.settings())
+    job.textContent = translationLabel(page, settings)
     li.append(button, up, down, remove, job)
     return li
   }))
@@ -1406,6 +1408,7 @@ chat = setupChat({
   selectPage,
   commitLiveForm: commitLiveFormCheckpoint,
   readTranslationSettings: translation.settings,
+  onSkillChange: syncTranslationActions,
   registerFontName,
   renderFontOptions,
   restoreHistory,

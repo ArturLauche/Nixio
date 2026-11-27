@@ -1,10 +1,11 @@
+export function translationNotes({ notes, skillPrompt }) {
+  return skillPrompt ? [notes, skillPrompt].filter(Boolean).join("\n\n") : notes
+}
+
 export function translationSignature(settings) {
-  const base = [settings.source, settings.target, settings.notes, settings.direction, settings.model, settings.glossary]
+  const base = [settings.source, settings.target, translationNotes(settings), settings.direction, settings.model, settings.glossary]
   if (settings.provider && settings.provider !== "gemini") {
     base.push(settings.provider, settings.baseUrl ?? "", settings.llmModel ?? "")
-  }
-  if (settings.skillPrompt) {
-    base.push(settings.skillPrompt)
   }
   return JSON.stringify(base)
 }

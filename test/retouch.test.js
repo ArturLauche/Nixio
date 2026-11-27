@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { paintRetouchStrokes, prepareNativeInpaint, samplePixelColor, validateRetouchStroke } from "../src/retouch.js"
+import { paintRetouchStrokes, samplePixelColor, validateRetouchStroke } from "../src/retouch.js"
 
 test("validateRetouchStroke validates paint and clone strokes and rejects malformed inputs", () => {
   assert.deepEqual(
@@ -69,7 +69,7 @@ test("paintRetouchStrokes renders paint and clone strokes, caches layer, and inv
   const page = {
     image: { naturalWidth: 100, naturalHeight: 100 },
     retouchStrokes: [
-      { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .2, y: .2 }, { x: .3, y: .3 }] },
+      { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .2, y: .2 }, { x: .25, y: .25 }, { x: .3, y: .3 }] },
       { mode: "clone", size: .1, offsetX: -.1, offsetY: .1, opacity: .5, points: [{ x: .5, y: .5 }] },
     ],
   }
@@ -86,77 +86,14 @@ test("paintRetouchStrokes renders paint and clone strokes, caches layer, and inv
   assert.equal(ops.length, opsAfterFirst)
   assert.equal(createdCanvases, canvasesAfterFirst)
 
-  // Popping a stroke invalidates the cache and re-renders.
-  page.retouchStrokes.pop()
+  page.retouchStrokes[0].points[1].y = .28
   assert.equal(paintRetouchStrokes(canvas, page), true)
   assert.equal(destBlits, 3)
   assert.ok(createdCanvases > canvasesAfterFirst)
 
-  // Changing only an intermediate point (same length, first, last) still invalidates cache.
-  page.retouchStrokes = [
-    { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .1, y: .1 }, { x: .2, y: .2 }, { x: .9, y: .9 }] },
-  ]
+  const canvasesAfterEdit = createdCanvases
+  page.retouchStrokes.pop()
   assert.equal(paintRetouchStrokes(canvas, page), true)
-  const canvasesBeforeMidEdit = createdCanvases
-  page.retouchStrokes = [
-    { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .1, y: .1 }, { x: .8, y: .2 }, { x: .9, y: .9 }] },
-  ]
-  assert.equal(paintRetouchStrokes(canvas, page), true)
-  assert.ok(createdCanvases > canvasesBeforeMidEdit)
-})
-
-test("prepareNativeInpaint cache survives structuredClone (Undo/Redo) on the same page image", async (t) => {
-  const originalDocument = globalThis.document
-  const originalDesktop = globalThis.khungThoaiDesktop
-  const originalImageData = globalThis.ImageData
-  let nativeCalls = 0
-
-  globalThis.ImageData = class {
-    constructor(data, width, height) {
-      this.data = data
-      this.width = width
-      this.height = height
-    }
-  }
-  globalThis.document = {
-    createElement() {
-      const c = {
-        width: 0, height: 0,
-        getContext() {
-          return {
-            save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
-            drawImage() {}, putImageData() {},
-            getImageData(_x, _y, w, h) {
-              const data = new Uint8ClampedArray(w * h * 4)
-              data.fill(255)
-              return { data }
-            },
-          }
-        },
-      }
-      return c
-    },
-  }
-  globalThis.khungThoaiDesktop = {
-    async native(op, opts) {
-      assert.equal(op, "inpaint")
-      nativeCalls++
-      return { data: new Uint8Array(opts.width * opts.height * 4).fill(200) }
-    },
-  }
-  t.after(() => {
-    globalThis.document = originalDocument
-    globalThis.khungThoaiDesktop = originalDesktop
-    globalThis.ImageData = originalImageData
-  })
-
-  const image = { naturalWidth: 100, naturalHeight: 100 }
-  const stroke = { mode: "inpaint", size: .1, points: [{ x: .4, y: .4 }, { x: .6, y: .6 }] }
-  assert.equal(await prepareNativeInpaint({ image }, stroke), true)
-  assert.equal(nativeCalls, 1)
-
-  // Simulate Undo/Redo cloning the stroke object while keeping the same page.image reference.
-  const clonedStroke = structuredClone(stroke)
-  assert.equal(await prepareNativeInpaint({ image }, clonedStroke), true)
-  assert.equal(nativeCalls, 1)
+  assert.equal(destBlits, 4)
+  assert.ok(createdCanvases > canvasesAfterEdit)
 })

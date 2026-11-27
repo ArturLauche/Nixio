@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { EditHistory } from "../src/history.js"
-import { remainingTranslations, translationSignature } from "../src/translation.js"
+import { remainingTranslations, translationLabel, translationNotes, translationSignature } from "../src/translation.js"
 
 test("undo restores removed pages and nested edits while sharing the original images", () => {
   const image = { naturalWidth: 300 }
@@ -46,4 +46,18 @@ test("resume skips completed pages and recomputes the suffix after a failure or 
   assert.deepEqual(remainingTranslations(pages, { ...settings, glossary: "先生 = cô" }), pages)
   pages[1].translationJob.kind = "align"
   assert.deepEqual(remainingTranslations(pages, settings), pages.slice(1))
+})
+
+test("translation status and resume use the same effective notes as the provider", () => {
+  const settings = { source: "Japanese", target: "Vietnamese", notes: "Use short dialogue", direction: "rtl", model: "auto", glossary: "" }
+  const styled = { ...settings, skillPrompt: "Use period-appropriate pronouns." }
+  const notes = translationNotes(styled)
+  assert.equal(notes, "Use short dialogue\n\nUse period-appropriate pronouns.")
+  assert.equal(translationSignature(styled), translationSignature({ ...settings, notes }))
+  assert.equal(translationSignature({ ...settings, skillPrompt: "" }), translationSignature(settings))
+  const pages = [{ translationJob: { kind: "translate", state: "done", signature: translationSignature(styled) } }]
+  assert.equal(translationLabel(pages[0], styled), "Đã dịch")
+  assert.deepEqual(remainingTranslations(pages, styled), [])
+  assert.equal(translationLabel(pages[0], settings), "Thiết lập đã đổi")
+  assert.deepEqual(remainingTranslations(pages, settings), pages)
 })

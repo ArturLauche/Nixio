@@ -80,6 +80,20 @@ test("cleanRawPixels whitens yellowed paper, deepens ink, and validates inputs",
   assert.throws(() => cleanRawPixels(new Uint8ClampedArray(10), 4, 4))
 })
 
+test("raw cleanup respects zero strength and ignores hidden RGB around visible pixels", () => {
+  const raw = new Uint8ClampedArray(9 * 9 * 4)
+  raw.set([120, 123, 125, 255, 145, 149, 154, 255, 220, 211, 194, 255], 4 * 40)
+  const hiddenWhite = new Uint8ClampedArray(raw)
+  for (let offset = 0; offset < raw.length; offset += 4) {
+    if (!raw[offset + 3]) hiddenWhite.fill(255, offset, offset + 3)
+  }
+  assert.deepEqual(cleanRawPixels(raw, 9, 9, { strength: 0 }).data, raw)
+  const black = cleanRawPixels(raw, 9, 9).data
+  const white = cleanRawPixels(hiddenWhite, 9, 9).data
+  assert.deepEqual(black.slice(160, 172), white.slice(160, 172))
+  assert.deepEqual(white.slice(0, 4), hiddenWhite.slice(0, 4))
+})
+
 test("validateRetouchStroke & paintRetouchStrokes support erase mode via destination-out", () => {
   const eraseStroke = validateRetouchStroke({
     mode: "erase",

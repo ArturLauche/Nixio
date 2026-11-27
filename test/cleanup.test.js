@@ -39,3 +39,12 @@ test("separable applyAlphaExpand matches brute-force 2D dilation and erosion exa
     )
   }
 })
+
+test("mask expansion handles one-pixel dimensions and radii wider than the image", () => {
+  for (const [width, height] of [[1, 1], [1, 5], [5, 1], [2, 3]]) {
+    const mask = Uint8Array.from({ length: width * height }, (_, index) => index * 29)
+    for (const radius of [-7, -1, 1, 7]) {
+      assert.deepEqual(applyAlphaExpand(mask, width, height, radius), bruteForceExpand(mask, width, height, radius))
+    }
+  }
+})

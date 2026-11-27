@@ -98,6 +98,18 @@ test("autoFitBox picks the largest non-overflowing font size for horizontal and 
   assert.equal(textOverflows(page, { ...vBox, size: fittedV + 1 }), true)
 })
 
+test("hiding cleanup paints the original page without sampling cleanup regions", (t) => {
+  const { restore } = installCanvasMock()
+  t.after(restore)
+  const canvas = document.createElement("canvas")
+  const page = {
+    image: { naturalWidth: 400, naturalHeight: 600 },
+    boxes: [{ cleanup: true, x: .1, y: .1, w: .3, h: .2 }],
+  }
+  // The fake Canvas intentionally has no getImageData method.
+  assert.equal(drawPage(canvas, page, { showCleanup: false, showText: false }), null)
+})
+
 test("fonts helper registers custom font names and maps PostScript font names safely", () => {
   assert.equal(psdFontName("Arial"), "ArialMT")
   assert.equal(registerFontName("Manga Comic!"), "Manga Comic!")
