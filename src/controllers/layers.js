@@ -62,7 +62,9 @@ export function setupLayers({
     li.className = "layer-row"
     li.dataset.layer = layer.id
     li.dataset.kind = layer.kind
-    const active = strokeTarget(page)?.id === layer.id
+    // New strokes go to the layer the user picked, so the marker has to follow that pick rather
+    // than falling back to the first retouch layer on every re-render.
+    const active = strokeTarget(page, state.layerId)?.id === layer.id
     if (active) li.setAttribute("aria-current", "true")
 
     const eye = document.createElement("input")
@@ -210,6 +212,8 @@ export function setupLayers({
       pageLayers(page).map((layer) => [layer.id, layer.name, layer.visible !== false, Math.round((layer.opacity ?? 1) * 100)]),
       (page.retouchStrokes ?? []).map((stroke) => [stroke.layerId ?? "", stroke.hidden === true, stroke.mode, stroke.points?.length ?? 0]),
       (page.retouchStrokes ?? []).indexOf(state.stroke),
+      // The current-layer marker is part of what the list shows, so a pick has to rebuild the rows.
+      strokeTarget(page, state.layerId)?.id ?? "",
       Boolean(page.originalFile),
       projectBusy(),
     ])

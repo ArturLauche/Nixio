@@ -198,3 +198,24 @@ test("a busy editor refuses layer edits and the original scan is one click away"
   harness.byId("restore-original").onclick()
   assert.deepEqual(harness.messages.at(-1), ["restored", false], "restoring is delegated to the stage")
 })
+
+test("the current-layer marker follows the layer the user picked (#review)", () => {
+  const harness = createHarness()
+  const first = harness.page.layers[1].id
+  harness.page.layers.push({ id: "retouch-2", kind: "retouch", name: "Cọ phụ", visible: true, opacity: 1 })
+  const current = () => layerRows(harness).filter((row) => row["aria-current"] === "true").map((row) => row.dataset.layer)
+
+  harness.layers.sync()
+  // No pick yet: new strokes go to the first retouch layer, and the marker says so.
+  assert.deepEqual(current(), [first])
+
+  harness.state.layerId = "retouch-2"
+  harness.layers.sync()
+  assert.deepEqual(current(), ["retouch-2"])
+
+  // Selecting a stroke on the other brush moves the marker with it, and a new stroke follows.
+  harness.state.layerId = first
+  harness.layers.sync()
+  assert.deepEqual(current(), [first])
+})
+
