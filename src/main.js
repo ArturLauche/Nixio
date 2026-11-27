@@ -1391,6 +1391,7 @@ chat = setupChat({
   selectPage,
   commitLiveForm: commitLiveFormCheckpoint,
   readTranslationSettings: translation.settings,
+  onSkillChange: syncTranslationActions,
   registerFontName,
   renderFontOptions,
   restoreHistory,
