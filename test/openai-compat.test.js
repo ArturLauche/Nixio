@@ -111,11 +111,45 @@ test("translateImageOpenAi sends image_url multimodal payload and normalizes box
   assert.deepEqual(lines, [{ id: "B1", box: [200, 100, 500, 300], source: "こんにちは", text: "Xin chào" }])
 })
 
-test("translationSignature stays backwards-compatible for Gemini and tracks OpenAI endpoint changes", () => {
+test("translationSignature stays backwards-compatible for Gemini and tracks OpenAI endpoint and skillPrompt changes", () => {
   const base = { source: "Japanese", target: "Vietnamese", notes: "", direction: "rtl", model: "auto", glossary: "" }
   assert.equal(translationSignature(base), translationSignature({ ...base, provider: "gemini" }))
+  assert.equal(translationSignature(base), translationSignature({ ...base, skillPrompt: "" }))
+  const withSkill = translationSignature({ ...base, skillPrompt: "Hồ sơ Shounen" })
+  assert.notEqual(withSkill, translationSignature(base))
   const ollama = translationSignature({ ...base, provider: "openai", baseUrl: "http://localhost:11434/v1", llmModel: "qwen2.5:7b" })
   const lmstudio = translationSignature({ ...base, provider: "openai", baseUrl: "http://localhost:1234/v1", llmModel: "hy-mt2" })
   assert.notEqual(ollama, translationSignature(base))
   assert.notEqual(ollama, lmstudio)
+})
+
+test("translateBoxesOpenAi retries transient 503 errors with backoff", async (t) => {
+  const originalFetch = globalThis.fetch
+  let calls = 0
+  const reports = []
+  globalThis.fetch = async () => {
+    calls++
+    if (calls === 1) return { ok: false, status: 503, headers: new Headers() }
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({ lines: [{ id: "B1", text: "Được rồi!" }] }) } }],
+      }),
+    }
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const result = await translateBoxesOpenAi([{ id: "box-1", text: "よし" }], {
+    provider: "openai",
+    baseUrl: "http://localhost:11434/v1",
+    llmModel: "qwen2.5:7b",
+    source: "Japanese",
+    target: "Vietnamese",
+    retryDelayMs: 5,
+    report: (msg) => reports.push(msg),
+  })
+
+  assert.equal(calls, 2)
+  assert.ok(reports.some((m) => m.includes("thử lại")))
+  assert.deepEqual(result, [{ id: "B1", boxId: "box-1", source: "よし", text: "Được rồi!" }])
 })

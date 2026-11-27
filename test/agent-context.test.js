@@ -200,8 +200,10 @@ test("Agent Tools v2: todo_write, submit_plan (Plan Mode), check_export_prefligh
   assert.equal(page1.boxes[0].size, 42)
   assert.equal(checkpoints, 2)
 
-  // navigate_page switches active page
+  // navigate_page switches active page and rejects out-of-range 0
   const nav = await tools.execute("navigate_page", { pageIndex: 2 })
   assert.equal(nav.ok, true)
   assert.equal(state.pageId, "p2")
+  const navZero = await tools.execute("navigate_page", { pageIndex: 0 })
+  assert.equal(navZero.ok, false)
 })

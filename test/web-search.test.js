@@ -111,3 +111,22 @@ test("searchWeb supports Wikipedia CORS fallback, Tavily and SearXNG", async (t)
   const searxng = await searchWeb("SFX", { provider: "searxng", searchUrl: "http://localhost:8080", limit: 2 })
   assert.equal(searxng.results[0].snippet, "SFX")
 })
+
+test("fetchWebPage and searchWeb enforce redirect: error on external fetches", async (t) => {
+  const originalFetch = globalThis.fetch
+  const seenRedirects = []
+  globalThis.fetch = async (_url, options) => {
+    seenRedirects.push(options?.redirect)
+    return {
+      ok: true,
+      text: async () => "<html><title>Test</title><body>Hello</body></html>",
+      json: async () => ({ results: [] }),
+    }
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const { fetchWebPage } = await import("../src/web-search.js")
+  await fetchWebPage("https://example.org/article")
+  await searchWeb("test", { provider: "searxng", searchUrl: "http://localhost:8080" })
+  assert.deepEqual(seenRedirects, ["error", "error"])
+})

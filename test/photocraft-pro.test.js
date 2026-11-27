@@ -68,6 +68,15 @@ test("cleanRawPixels whitens yellowed paper, deepens ink, and validates inputs",
   assert.ok(data[0] >= 245 && data[1] >= 245 && data[2] >= 245)
   const inkO = (16 * width + 15) * 4
   assert.ok(data[inkO] <= 20)
+  // Explicit strength: 0 must not be coerced to default 0.7 (skips denoise & sharpen).
+  const noisy = new Uint8ClampedArray(raw)
+  const midO = (4 * width + 4) * 4
+  noisy[midO] = 205
+  noisy[midO + 1] = 200
+  noisy[midO + 2] = 190
+  const zeroRes = cleanRawPixels(noisy, width, height, { strength: 0, denoise: true, sharpen: true })
+  const defaultRes = cleanRawPixels(noisy, width, height, { strength: 0.7, denoise: true, sharpen: true })
+  assert.notEqual(zeroRes.data[midO], defaultRes.data[midO])
   assert.throws(() => cleanRawPixels(new Uint8ClampedArray(10), 4, 4))
 })
 

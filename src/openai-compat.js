@@ -1,4 +1,5 @@
 import { imageMimeType } from "./io.js"
+import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { readOcrBox } from "./placement.js"
 
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]", "::1"])
@@ -52,7 +53,7 @@ function fileToDataUrl(file) {
   })
 }
 
-async function chatCompletion({ baseUrl, apiKey, llmModel, signal }, messages) {
+async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800 }, messages) {
   const endpoint = validateEndpointUrl(baseUrl) + "/chat/completions"
   const model = String(llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model (ví dụ: qwen2.5:7b, hy-mt2-manga, gpt-4o-mini).")
@@ -60,32 +61,48 @@ async function chatCompletion({ baseUrl, apiKey, llmModel, signal }, messages) {
   const token = String(apiKey || "").trim()
   if (token) headers.Authorization = "Bearer " + token
 
-  const timeoutSignal = AbortSignal.timeout(120000)
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    credentials: "omit",
-    redirect: "error",
-    signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      messages,
-    }),
+  const body = JSON.stringify({
+    model,
+    temperature: 0.2,
+    messages,
   })
-  if (!response.ok) {
-    throw new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)
-  }
-  const payload = await response.json()
-  const content = payload.choices?.[0]?.message?.content
-  const text = Array.isArray(content)
-    ? content.filter((part) => part?.type === "text" && part.text).map((part) => part.text).join("")
-    : String(content ?? "")
-  const parsed = extractJsonObject(text)
-  if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
-    throw new Error("LLM trả danh sách thoại sai định dạng.")
-  }
-  return parsed.lines
+  return withLlmRetry(
+    async () => {
+      const timeoutSignal = AbortSignal.timeout(120000)
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        credentials: "omit",
+        redirect: "error",
+        signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
+        body,
+      })
+      if (!response.ok) {
+        const error = new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)
+        error.status = response.status
+        error.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
+        throw error
+      }
+      const payload = await response.json()
+      const content = payload.choices?.[0]?.message?.content
+      const text = Array.isArray(content)
+        ? content.filter((part) => part?.type === "text" && part.text).map((part) => part.text).join("")
+        : String(content ?? "")
+      const parsed = extractJsonObject(text)
+      if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
+        throw new Error("LLM trả danh sách thoại sai định dạng.")
+      }
+      return parsed.lines
+    },
+    {
+      maxRetries,
+      initialDelayMs: retryDelayMs,
+      signal,
+      onRetry: ({ attempt, maxRetries: total, delayMs }) => {
+        report?.(`LLM tạm lỗi, đang thử lại (${attempt}/${total}) sau ${(delayMs / 1000).toFixed(1)}s…`)
+      },
+    },
+  )
 }
 
 export async function translateBoxesOpenAi(boxes, settings) {

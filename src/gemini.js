@@ -1,4 +1,5 @@
 import { imageMimeType } from "./io.js"
+import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { readOcrBox } from "./placement.js"
 
 const modelOptions = {
@@ -34,45 +35,60 @@ function inlineImage(file) {
   })
 }
 
-async function requestLines({ key, models, modelIndex, report, signal }, image, prompt, pageData, schema) {
+async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800 }, image, prompt, pageData, schema) {
   const body = JSON.stringify({
     contents: [{ parts: [{ text: prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData) }, image] }],
     generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema },
   })
-  let response
-  for (let index = modelIndex; index < models.length; index++) {
-    const model = models[index]
-    response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      credentials: "omit",
-      redirect: "error",
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
-      body,
-    })
-    if (response.ok) {
-      const payload = await response.json()
-      const candidate = payload.candidates?.[0]
-      if (candidate?.finishReason && candidate.finishReason !== "STOP") throw new Error("Gemini chưa xử lý hết nội dung trang.")
-      const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
-      if (!text) throw new Error("Gemini không trả dữ liệu.")
-      const clean = text.trim()
-      let parsed
-      try {
-        parsed = JSON.parse(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i.exec(clean)?.[1] ?? clean)
-      } catch {
-        throw new Error("Gemini trả dữ liệu JSON không hợp lệ.")
+  return withLlmRetry(
+    async () => {
+      let response
+      for (let index = modelIndex; index < models.length; index++) {
+        const model = models[index]
+        response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          credentials: "omit",
+          redirect: "error",
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
+          body,
+        })
+        if (response.ok) {
+          const payload = await response.json()
+          const candidate = payload.candidates?.[0]
+          if (candidate?.finishReason && candidate.finishReason !== "STOP") throw new Error("Gemini chưa xử lý hết nội dung trang.")
+          const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
+          if (!text) throw new Error("Gemini không trả dữ liệu.")
+          const clean = text.trim()
+          let parsed
+          try {
+            parsed = JSON.parse(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i.exec(clean)?.[1] ?? clean)
+          } catch {
+            throw new Error("Gemini trả dữ liệu JSON không hợp lệ.")
+          }
+          if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
+            throw new Error("Gemini trả danh sách thoại sai định dạng.")
+          }
+          return { lines: parsed.lines, modelIndex: index }
+        }
+        const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && index + 1 < models.length
+        if (!canFallback) break
+        report?.("Đang thử " + models[index + 1] + "…")
       }
-      if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
-        throw new Error("Gemini trả danh sách thoại sai định dạng.")
-      }
-      return { lines: parsed.lines, modelIndex: index }
-    }
-    const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && index + 1 < models.length
-    if (!canFallback) break
-    report("Đang thử " + models[index + 1] + "…")
-  }
-  throw new Error(`Gemini trả lỗi ${response.status}. Kiểm tra khóa API, hạn mức và khu vực sử dụng.`)
+      const error = new Error(`Gemini trả lỗi ${response.status}. Kiểm tra khóa API, hạn mức và khu vực sử dụng.`)
+      error.status = response.status
+      error.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
+      throw error
+    },
+    {
+      maxRetries,
+      initialDelayMs: retryDelayMs,
+      signal,
+      onRetry: ({ attempt, maxRetries: total, delayMs }) => {
+        report?.(`Gemini tạm lỗi, đang thử lại (${attempt}/${total}) sau ${(delayMs / 1000).toFixed(1)}s…`)
+      },
+    },
+  )
 }
 
 async function recognize(file, image, settings, request) {
@@ -98,7 +114,15 @@ async function recognizeImage(page, settings) {
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   const report = settings.report
   const models = modelOptions[settings.model] ?? modelOptions.auto
-  const request = { key: settings.key, models, modelIndex: 0, report, signal: settings.signal }
+  const request = {
+    key: settings.key,
+    models,
+    modelIndex: 0,
+    report,
+    signal: settings.signal,
+    maxRetries: settings.maxRetries,
+    retryDelayMs: settings.retryDelayMs,
+  }
   const image = await inlineImage(page.file)
   const recognized = await recognize(page.file, image, settings, request)
   return { image, recognized, request: { ...request, modelIndex: recognized.modelIndex } }
@@ -171,7 +195,15 @@ export async function translateBoxesGemini(page, boxes, settings) {
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   settings.report?.("Đang dịch các khung hiện có bằng Gemini…")
   const models = modelOptions[settings.model] ?? modelOptions.auto
-  const request = { key: settings.key, models, modelIndex: 0, report: settings.report ?? (() => {}), signal: settings.signal }
+  const request = {
+    key: settings.key,
+    models,
+    modelIndex: 0,
+    report: settings.report ?? (() => {}),
+    signal: settings.signal,
+    maxRetries: settings.maxRetries,
+    retryDelayMs: settings.retryDelayMs,
+  }
   const image = await inlineImage(page.file)
   const items = boxes.map((box, index) => ({ id: "B" + (index + 1), text: box.text }))
   const prompt = "Translate every transcribed comic line from " + settings.source + " to " + settings.target + ". " +
