@@ -153,20 +153,17 @@ jobs:
           - **Windows 10/11**: Cài [UB-Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) hoặc \`winget install UB-Mannheim.TesseractOCR\`
 
           ## Điểm nổi bật trong ${TAG}
-          - **PhotoCraft C# Pro (Xử lý ảnh & Redraw)**:
-            - **Seamless Healing Clone Stamp (Poisson Blending C#)**: Cọ sao chép nền tự động hòa khớp ánh sáng/chuyển sắc viền ghép bằng bộ giải màng điều hòa đa luồng (\`Parallel.For\`), đồng bộ qua Undo/Redo và tự đợi hoàn tất khi xuất PNG/PSD/ZIP.
-            - **PatchMatch nhận biết cấu trúc nét & tăng tốc SIMD**: Bổ sung gradient cấu trúc (\`structureWeight\`) giữ liền nét viền khung/tóc, tăng tốc bằng \`System.Numerics.Vector<float>\` (SIMD) và song song hóa \`RawCleanup\` / \`ComputeCosts\` trên .NET 10.
-            - **Làm sạch ảnh Raw cả chương & Web Worker**: Chạy lọc raw hàng loạt cho toàn bộ chương (có dừng giữa chừng & 1 bước Hoàn tác), bỏ qua pixel trong suốt chuẩn xác, và đẩy xử lý bản Web sang Web Worker không đơ giao diện.
-            - **Tăng tốc nở/co mặt nạ** bằng thuật toán cửa sổ trượt.
-          - **Quy trình Biên tập & Giao diện Pro**:
-            - **Chế độ tối (Dark Mode)** toàn giao diện và **Thanh kéo so sánh gốc (Split-screen Before/After)** bằng phím \`Shift + \\\`.
-            - **Bộ Mẫu dàn chữ toàn cục (Global Presets) + Xuất/Nhập JSON**: 4 mẫu khởi đầu sẵn có, tự lưu xuyên suốt các dự án và chia sẻ được trong nhóm dịch.
-            - **Quét tự động toàn bộ bong bóng trên trang**: Nhận diện hàng loạt bong bóng thoại sáng và sắp xếp theo thứ tự đọc RTL/LTR.
-          - **Trợ lý AI · Agent Harness v3 (DeepSeek Harness) & Bảo mật Web**:
-            - **SSE Token & Reasoning Streaming**: Hiển thị từng chữ câu trả lời và suy luận (\`reasoning_content\` / \`thought\`) theo thời gian thực cho cả Gemini và OpenAI/Local LLM.
-            - **Đo ngân sách ngữ cảnh thực tế (\`Context Budget Meter\`)**: Theo dõi token sử dụng thực từ API kèm cảnh báo trực quan.
-            - **Gom 1 mốc Undo cho cả lượt AI + Thẻ tóm tắt Diff**: Xem nhanh mọi khung AI vừa thêm/sửa/xóa và hoàn tác trọn lượt chỉ với 1 bấm.
-            - **Tự thử lại (\`withLlmRetry\`)** cho cả bộ dịch Gemini & OpenAI-compat; **chống DNS Rebinding (IP Pinning)** và tự động yêu cầu duyệt thao tác ghi sau khi AI đọc nội dung web.
+          - **Giao diện Pro Workstation (Figma / Clip Studio style)**:
+            - Tân trang toàn bộ Light Mode (xám lạnh / trắng tinh khiết) và Dark Mode (matte graphite) với điểm nhấn emerald mảnh, bố cục 3 cột cố định tối ưu diện tích bàn vẽ lưới chấm và thanh tiêu đề 48px siêu gọn.
+            - **Thanh công cụ dọc 44px (Tool Rail)** bám cạnh trái bàn vẽ với 11 icon SVG nét mảnh đồng bộ 2 chiều, ẩn/hiện cỡ cọ theo ngữ cảnh và nhóm thuộc tính Inspector thu gọn dạng Accordion.
+          - **Trợ lý AI Vision & Glossary/QA Linter 0-token**:
+            - **AI Vision (\`inspect_page_image\`)**: Trợ lý AI Agent có thể soi trực tiếp vùng ảnh trang truyện đa phương thức (Gemini \`inlineData\` & OpenAI \`image_url\`) để đối chiếu biểu cảm, SFX, ngữ cảnh tranh và tự tỉa ảnh cũ tiết kiệm token.
+            - **Glossary & QA Linter 0-token (\`lint_chapter_qa\`)**: Rà tức thì chữ chưa dịch, lệch từ điển thuật ngữ, placeholder còn sót và lỗi dấu câu (kèm \`autoFixPunctuation\`), tích hợp thẳng vào Export Preflight và 21 công cụ Agent.
+          - **Webtoon & Redraw Pro (C#/.NET 10)**:
+            - **Ghép & Cắt Webtoon**: Hộp thoại chuyên biệt ghép dọc dải trang thành dải Webtoon dài và cắt thông minh dọc khoảng trống (smart gutter slicing) không làm đứt khung tranh.
+            - **C# Auto Content-Aware Cleanup (\`content_aware_cleanup\`)**: Chọn trực tiếp chế độ lấp nền thông minh PatchMatch C# ngay trên từng khung thoại.
+            - **Xem trước Xử lý Raw 60fps**: Hộp thoại kéo ngưỡng làm sạch raw trực quan theo thời gian thực trước khi áp dụng cho trang hoặc cả chương.
+          - **Hạ tầng CI/CD Node 24**: Nâng cấp toàn bộ GitHub Actions lên các bản major hỗ trợ Node 24 (\`checkout@v7\`, \`setup-node@v7\`, \`setup-dotnet@v6\`, \`upload-artifact@v7\`, \`download-artifact@v8\`).
 
           Kiểm tra toàn vẹn tệp bằng \`SHA256SUMS.txt\`.
           EOF
