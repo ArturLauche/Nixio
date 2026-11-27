@@ -346,17 +346,20 @@ async function eventResponse(api, started, requestId, signal) {
     throw new TypeError("The desktop bridge cannot deliver provider stream frames.")
   }
   if (signal?.aborted) throw abortError()
-  const ticket = String(started.ticket)
+  const ticket = started.ticket
+  if (typeof ticket !== "string" || !ticket) throw new TypeError("The desktop bridge returned no stream ticket.")
   const status = safeStatus(started.status, 200)
   const current = ensureChannel(api)
   const sink = openSink(api, { ticket, requestId, signal })
   current.tickets.set(ticket, sink)
   try {
-    await api.providerActivate(ticket)
+    const activated = await untilAborted(api.providerActivate(ticket), signal, () => {})
+    if (!activated?.ok || !(activated.active || activated.finished)) {
+      throw new TypeError("Provider stream is no longer available.")
+    }
   } catch {
-    current.tickets.delete(ticket)
     sink.discard()
-    try { Promise.resolve(api.providerCancel({ requestId })).catch(() => {}) } catch {}
+    if (signal?.aborted) throw abortError()
     throw new TypeError("The desktop bridge could not activate the provider stream.")
   }
   if (!bodyAllowed(status)) {
@@ -390,7 +393,12 @@ async function desktopCall(api, spec) {
     if (outcome.response) return outcome.response
     throw outcome.error
   }
-  return eventResponse(api, started, requestId, spec.signal)
+  try {
+    return await eventResponse(api, started, requestId, spec.signal)
+  } catch (error) {
+    cancel()
+    throw error
+  }
 }
 
 /**

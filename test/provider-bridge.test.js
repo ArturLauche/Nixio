@@ -319,6 +319,15 @@ test("an activation failure is reported and the exchange is cancelled", async (t
   assert.equal(bridge.listeners.size, 0)
 })
 
+test("an expired ticket rejects activation and removes its listener", async (t) => {
+  const bridge = fakeBridge()
+  bridge.api.providerActivate = async () => ({ ok: true, active: false })
+  installBridge(t, bridge)
+  await assert.rejects(callProvider(geminiSpec({ stream: true })), /could not activate/)
+  assert.equal(bridge.cancels.length, 1)
+  assert.equal(bridge.listeners.size, 0)
+})
+
 test("the bridge codes mirror the main-process transport codes exactly", () => {
   assert.deepEqual(Object.keys(PROVIDER_BRIDGE_CODES).sort(), Object.keys(PROVIDER_CODES).sort())
   for (const [name, code] of Object.entries(PROVIDER_CODES)) {
