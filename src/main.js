@@ -37,12 +37,14 @@ import {
   openExternalUrl,
 } from "./updater.js"
 
+import { defaultLayers } from "./layers.js"
 import { setupTasks } from "./controllers/tasks.js"
 import { setupProjects } from "./controllers/project.js"
 import { setupTranslation } from "./controllers/translation.js"
 import { setupOcr } from "./controllers/ocr.js"
 import { setupExports } from "./controllers/export.js"
 import { setupDialogs } from "./controllers/dialogs.js"
+import { setupLayers } from "./controllers/layers.js"
 import { setupGestures } from "./controllers/gestures.js"
 import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
@@ -67,7 +69,7 @@ const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
   pages: [], presets: loadGlobalPresets(), pageId: null, boxId: null, selectedBoxIds: new Set(),
   queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, splitCompare: false,
-  compareRestore: "edit", splitPos: 50, cloneSource: null,
+  compareRestore: "edit", splitPos: 50, cloneSource: null, layerId: null, stroke: null,
   exporting: false, importing: false, translating: false, importingScript: false,
   openingProject: false, processingNative: false, savingProject: false,
 }
@@ -81,6 +83,7 @@ const settingLabels = new Map(projectSettings.map((field) => [
 ]))
 let previewRedraw
 let cleanRawController = null
+let syncLayers = () => {}
 
 let currentTheme = applyTheme(loadTheme())
 function syncThemeButton() {
@@ -113,7 +116,7 @@ const NUDGE_META = { label: "Đẩy khung bằng phím", kind: "nudge" }
 const historyKindLabels = {
   form: "Khung", box: "Khung", gesture: "Bàn vẽ", nudge: "Phím", page: "Trang", "raw-cleanup": "Raw",
   preset: "Mẫu", settings: "Cài đặt", translate: "Dịch", ocr: "OCR", ai: "AI",
-  find: "Tìm", retouch: "Cọ", cleanup: "Nền", layout: "Canh", script: "Kịch bản", text: "Chữ",
+  find: "Tìm", retouch: "Cọ", cleanup: "Nền", layout: "Canh", script: "Kịch bản", text: "Chữ", layer: "Lớp",
 }
 const alignLabels = { left: "trái", centerX: "giữa ngang", right: "phải", top: "trên", centerY: "giữa dọc", bottom: "dưới" }
 const distributeLabels = { horizontal: "ngang", vertical: "dọc" }
@@ -149,7 +152,7 @@ function commitLiveFormCheckpoint() {
 
 function releaseUnusedImages() {
   const snapshots = [state, ...history.snapshots()]
-  const used = new Set(snapshots.flatMap(({ pages }) => pages.map(({ url }) => url)))
+  const used = new Set(snapshots.flatMap(({ pages }) => pages.flatMap(({ url, originalUrl }) => [url, originalUrl].filter(Boolean))))
   for (const url of ownedUrls) {
     if (used.has(url)) continue
     URL.revokeObjectURL(url)
@@ -733,9 +736,9 @@ function rectStyle(element, rect) {
 }
 
 function paintPreview(page) {
-  const showCleanup = !state.compareOriginal && byId("show-cleanup").checked
-  const showText = !state.compareOriginal && byId("show-text").checked
-  const pending = drawPage(pageCanvas, page, { showCleanup, showText })
+  // Compare mode hides every layer; otherwise the layer stack decides what shows and in what order.
+  const showLayers = !state.compareOriginal
+  const pending = drawPage(pageCanvas, page, { showCleanup: showLayers, showText: showLayers })
   if (!pending || previewRedraw === pending) return
   previewRedraw = pending
   pending.then(() => {
@@ -1023,6 +1026,34 @@ byId("clear-retouch").onclick = () => {
   status("Đã xóa toàn bộ nét vẽ tay trên trang.")
 }
 
+// The scan the page arrived with is kept before a cleaned copy replaces it, so the original is one
+// action away instead of a whole undo chain.
+function replaceScan(page, decoded) {
+  if (!page.originalFile) {
+    page.originalFile = page.file
+    page.originalImage = page.image
+    page.originalUrl = page.url
+  }
+  page.file = decoded.file
+  page.image = decoded.image
+  page.url = decoded.url
+}
+
+function restoreOriginalScan() {
+  const page = selectedPage()
+  if (!page?.originalFile || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint(undefined, { label: `Lấy lại ảnh gốc trang ${page.name}`, kind: "raw-cleanup" })
+  page.file = page.originalFile
+  page.image = page.originalImage
+  page.url = page.originalUrl
+  delete page.originalFile
+  delete page.originalImage
+  delete page.originalUrl
+  render()
+  status("Đã trả trang về ảnh quét gốc trước khi làm sạch raw.")
+}
+
 async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true, sharpen: true }) {
   if (!page || projectBusy()) return
   commitLiveFormCheckpoint()
@@ -1033,9 +1064,7 @@ async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true,
     const { file, engine } = await cleanRawPageImage(page, options)
     const decoded = await openImage(file)
     const token = checkpoint(undefined, { label: `Làm sạch raw trang ${page.name}`, kind: "raw-cleanup" })
-    page.file = decoded.file
-    page.image = decoded.image
-    page.url = decoded.url
+    replaceScan(page, decoded)
     render()
     status(`Đã làm sạch ảnh raw (${engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS"}). Nhấn Ctrl+Z nếu muốn hoàn tác.`)
     notify({
@@ -1080,9 +1109,7 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
         token = checkpoint(undefined, { label: `Làm sạch raw cả chương (${total} trang)`, kind: "raw-cleanup" })
         recorded = true
       }
-      page.file = decoded.file
-      page.image = decoded.image
-      page.url = decoded.url
+      replaceScan(page, decoded)
       engineLabel = engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS"
       cleaned++
       if (selectedPage() === page) renderCanvas()
@@ -1315,8 +1342,6 @@ document.querySelectorAll("#tool-rail .rail-btn").forEach((btn) => {
   })
   btn.addEventListener("blur", () => syncToolControls())
 })
-byId("show-cleanup").onchange = renderCanvas
-byId("show-text").onchange = renderCanvas
 
 function selectBox(box) {
   commitLiveFormCheckpoint()
@@ -1343,7 +1368,7 @@ function toggleSelectBox(box) {
 }
 
 function renderInspector() {
-  const restoreFocus = holdFocus(byId("boxes"), byId("queue"))
+  const restoreFocus = holdFocus(byId("boxes"), byId("queue"), byId("layers-panel"))
   const page = selectedPage()
   const box = selectedBox()
   const boxes = page?.boxes ?? []
@@ -1444,6 +1469,7 @@ function renderInspector() {
     li.append(button)
     return li
   }))
+  syncLayers()
   restoreFocus()
 }
 
@@ -1462,7 +1488,7 @@ async function openImage(file) {
   try {
     await image.decode()
     if (image.naturalWidth * image.naturalHeight > 28000000) throw new Error("Ảnh vượt giới hạn kích thước.")
-    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [], retouchStrokes: [] }
+    return { id: crypto.randomUUID(), name: file.name, file, image, url, boxes: [], unplaced: [], retouchStrokes: [], layers: defaultLayers() }
   } catch (error) {
     URL.revokeObjectURL(url)
     ownedUrls.delete(url)
@@ -2131,6 +2157,12 @@ shortcuts = setupShortcuts({
 })
 setupTasks(byId)
 setupOcr(shared)
+const layers = setupLayers({
+  ...shared, editorSnapshot,
+  commitLiveForm: commitLiveFormCheckpoint,
+  restoreOriginal: restoreOriginalScan,
+})
+syncLayers = layers.sync
 setupExports({
   ...shared, selectPage, selectBox, listButton,
   readTranslationSettings: translation.settings,

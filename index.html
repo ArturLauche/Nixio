@@ -242,9 +242,6 @@
         <button type="button" id="detect-bubbles" class="button" title="Quét tự động toàn bộ bong bóng thoại sáng trên trang hiện tại">Quét bong bóng</button>
         <button type="button" id="undo-retouch" class="button" hidden>Hoàn tác nét cọ</button>
         <button type="button" id="clear-retouch" class="button danger" hidden>Xóa nét vẽ tay</button>
-        <span class="toolbar-spacer" aria-hidden="true"></span>
-        <label class="choice"><input type="checkbox" id="show-cleanup" checked>Redraw</label>
-        <label class="choice"><input type="checkbox" id="show-text" checked>Chữ</label>
       </div>
       <section id="history-panel" class="history-panel" aria-labelledby="history-title" hidden>
         <div class="history-head">
@@ -472,6 +469,18 @@
           <input id="cleanup-expand" type="number" min="-8" max="8" value="0">
         </label>
         <button type="button" class="button" id="reset-cleanup">Đặt lại vùng xóa</button>
+      </section>
+      <section class="side-section" id="layers-panel">
+        <h2>Lớp</h2>
+        <p class="muted">Ghép từ dưới lên. Bật/tắt nền, cọ và chữ riêng từng lớp; đổi độ đục, đổi tên hoặc đổi thứ tự.</p>
+        <ol id="layer-list" class="layer-list"></ol>
+        <div class="form-actions">
+          <button type="button" id="add-layer" class="button" title="Thêm một lớp cọ trống ở trên cùng">+ Lớp cọ</button>
+          <button type="button" id="restore-original" class="button" title="Trả trang về ảnh quét gốc trước khi làm sạch raw" hidden>Lấy lại ảnh gốc</button>
+        </div>
+        <h3>Nét cọ</h3>
+        <p class="muted">Bấm một nét để chọn, ẩn, xoá hoặc chuyển sang lớp cọ khác.</p>
+        <ol id="stroke-list" class="stroke-list"></ol>
       </section>
       <section id="queue-section" class="side-section" hidden>
         <div class="section-heading"><h2>Chưa đặt</h2></div>

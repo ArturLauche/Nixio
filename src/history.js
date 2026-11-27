@@ -4,10 +4,15 @@ import { shareInpaintOrigins } from "./retouch.js"
 export function copyEditor(editor) {
   return {
     ...structuredClone({ ...editor, pages: undefined }),
-    pages: editor.pages.map(({ image, file, url, ...data }) => {
+    pages: editor.pages.map(({ image, file, url, originalImage, originalFile, originalUrl, ...data }) => {
       const copy = structuredClone(data)
       shareInpaintOrigins(data.retouchStrokes, copy.retouchStrokes)
-      return { ...copy, image, file, url }
+      // The untouched scan a raw cleanup kept is shared like the working one, so undo never copies
+      // the image bytes and still puts the original back with the page.
+      return {
+        ...copy, image, file, url,
+        ...(originalFile && { originalFile, originalImage, originalUrl }),
+      }
     }),
   }
 }

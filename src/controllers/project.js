@@ -1,4 +1,5 @@
 import { readProject, writeProject, projectExtension } from "../project.js"
+import { defaultLayers } from "../layers.js"
 import { filenameStem, saveFile } from "../io.js"
 import { loadGlobalPresets, mergePresets } from "../presets.js"
 import {
@@ -215,6 +216,8 @@ export function setupProjects({
         })
         page.unplaced = saved.unplaced
         page.retouchStrokes = saved.retouchStrokes ?? []
+        // A project saved before layers opens as the implicit stack: one layer per effect.
+        page.layers = saved.layers ?? defaultLayers()
         page.translationContext = saved.translationContext
         page.translationJob = saved.translationJob
         loaded.push(page)
