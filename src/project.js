@@ -184,8 +184,9 @@ function projectStyleGuide(raw) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory, styleGuide }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, templateId, translationMemory, styleGuide }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
+  if (templateId !== undefined && (typeof templateId !== "string" || !templateId.trim() || templateId.length > 100)) throw invalidProject()
   settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
@@ -198,6 +199,7 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
   const guide = projectStyleGuide(styleGuide)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
+    ...(templateId && { templateId }),
     ...(memory && { translationMemory: memory }),
     ...(guide && { styleGuide: guide }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
@@ -214,7 +216,7 @@ export function writeProject(project) {
   // A file only claims the version it needs: a project without remembered pairs stays readable by
   // builds that predate the translation memory.
   const manifest = encoder.encode(JSON.stringify({
-    version: data.translationMemory?.entries.length ? 3 : 2,
+    version: data.translationMemory?.entries.length || data.templateId ? 3 : 2,
     ...data,
   }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")

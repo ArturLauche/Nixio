@@ -434,7 +434,7 @@ export function createAgentTools({
         const y = clamp(Number.isFinite(args?.y) ? args.y : .42, 0, Math.max(0, 1 - h))
         commitLiveForm?.()
         checkpoint()
-        const box = makeBoxFn(page, { x, y, w, h }, text)
+        const box = makeBoxFn(page, { x, y, w, h }, text, state.defaultFont)
         if (typeof args?.fill === "boolean") box.fill = args.fill
         if (typeof args?.cleanup === "boolean") box.cleanup = args.cleanup
         page.boxes.push(box)

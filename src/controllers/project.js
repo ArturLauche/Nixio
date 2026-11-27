@@ -1,6 +1,19 @@
 import { readProject, writeProject, projectExtension } from "../project.js"
 import { filenameStem, saveFile } from "../io.js"
-import { loadGlobalPresets, mergePresets } from "../presets.js"
+import { loadGlobalPresets, mergePresets, saveGlobalPresets } from "../presets.js"
+import {
+  loadProjectTemplates,
+  mergeTemplates,
+  overwriteTemplate,
+  parseProjectTemplatesJson,
+  removeTemplate,
+  renameTemplate,
+  saveProjectTemplates,
+  serializeProjectTemplatesJson,
+  TEMPLATE_SETTING_IDS,
+  templateByName,
+  upsertTemplate,
+} from "../templates.js"
 import {
   desktop,
   nativeCapabilities,
@@ -29,6 +42,8 @@ export function setupProjects({
   updateFitLabel,
   releaseUnusedImages,
   renderPages,
+  render,
+  checkpoint,
   status,
   projectBusy,
   hasGesture,
@@ -98,6 +113,7 @@ export function setupProjects({
       settings,
       currentPage: selectedIndex(),
       fit: state.fit,
+      templateId: state.templateId ?? undefined,
       // The pairs travel with the project: a reopened file can reuse them without the provider.
       translationMemory: translationMemory?.snapshot?.(),
       styleGuide: state.styleGuide,
@@ -258,6 +274,8 @@ export function setupProjects({
       state.queue = project.queue
       state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
+      state.templateId = project.templateId ?? null
+      state.defaultFont = "Arial"
       // A file that predates the memory carries no pairs, so the store is replaced with whatever
       // this project has: never with the previous project's pairs.
       translationMemory?.replace?.(project.translationMemory)
@@ -383,7 +401,66 @@ export function setupProjects({
     openNativeProject("recovery")
   }
   byId("recent-projects-button").onclick = showLibrary
-  byId("new-project").onclick = async () => {
+
+  let projectTemplates = loadProjectTemplates()
+
+  function currentTemplateDraft(name) {
+    const settings = {}
+    for (const field of projectSettings) {
+      if (TEMPLATE_SETTING_IDS.includes(field.id)) settings[field.id] = field.value
+    }
+    const format = byId("zip-format")?.value
+    return {
+      name,
+      settings,
+      presets: state.presets,
+      fit: state.fit,
+      font: state.defaultFont,
+      ...(format ? { exportProfile: { format } } : {}),
+    }
+  }
+
+  // A template only rewrites settings, presets, view defaults and the export
+  // pick: pages, their files and the queue stay exactly as they are, and the
+  // whole change lands as one named history entry.
+  function applyTemplate(template) {
+    if (!template || projectBusy() || hasGesture?.()) return false
+    commitLiveForm?.()
+    if (checkpoint) checkpoint(undefined, { label: `Áp dụng mẫu dự án "${template.name}"`, kind: "template" })
+    for (const field of projectSettings) {
+      const value = template.settings?.[field.id]
+      if (value === undefined) continue
+      if (field.options && ![...field.options].some((option) => option.value === value)) continue
+      field.value = value
+    }
+    if (template.presets?.length) {
+      state.presets = saveGlobalPresets(mergePresets(state.presets, template.presets))
+      for (const preset of template.presets) registerFontName?.(preset.style.font)
+    }
+    if (typeof template.fit === "boolean") {
+      state.fit = template.fit
+      updateFitLabel?.()
+    }
+    if (template.font) {
+      state.defaultFont = template.font
+      registerFontName?.(template.font)
+    }
+    const zipFormat = byId("zip-format")
+    const format = template.exportProfile?.format
+    if (
+      format && zipFormat &&
+      (!zipFormat.options || [...zipFormat.options].some((option) => option.value === format))
+    ) {
+      zipFormat.value = format
+    }
+    state.templateId = template.id ?? null
+    ;(render ?? renderPages)?.()
+    onProjectSwitch?.()
+    status(`Đã áp dụng mẫu dự án "${template.name}".`)
+    return true
+  }
+
+  async function startNewProject(template = null) {
     if (projectBusy()) return
     commitLiveForm?.()
     if (
@@ -401,6 +478,8 @@ export function setupProjects({
     projectName = undefined
     translationMemory?.clear?.()
     state.styleGuide = null
+    state.templateId = null
+    state.defaultFont = "Arial"
     generation++
     lastWebSnapshot = null
     savedKind = null
@@ -415,7 +494,136 @@ export function setupProjects({
     releaseUnusedImages()
     refreshDirty()
     onProjectSwitch?.()
+    if (template) applyTemplate(template)
   }
+  byId("new-project").onclick = () => startNewProject()
+
+  const templateDialog = byId("template-dialog")
+  const templateSelect = byId("template-select")
+  const templateNameInput = byId("template-name")
+
+  function selectedTemplate() {
+    return templateByName(projectTemplates, templateSelect.value) ?? null
+  }
+
+  function syncTemplateNameField() {
+    const template = selectedTemplate()
+    if (templateNameInput) templateNameInput.value = template?.name ?? ""
+    const locked = Boolean(template?.builtin) || projectBusy()
+    for (const id of ["rename-template", "overwrite-template", "delete-template"]) {
+      const button = byId(id)
+      if (button) button.disabled = locked
+    }
+    const save = byId("save-template")
+    if (save) save.disabled = projectBusy()
+  }
+
+  function refreshTemplateDialog() {
+    const selected = templateSelect.value
+    templateSelect.replaceChildren(
+      ...projectTemplates.map((template) =>
+        new Option(template.name + (template.builtin ? " · dựng sẵn" : ""), template.name)),
+    )
+    templateSelect.value = projectTemplates.some((template) => template.name === selected)
+      ? selected
+      : projectTemplates[0]?.name ?? ""
+    syncTemplateNameField()
+  }
+
+  byId("open-templates").onclick = () => {
+    refreshTemplateDialog()
+    templateDialog.showModal()
+  }
+  if (templateSelect) templateSelect.onchange = syncTemplateNameField
+
+  byId("apply-template").onclick = () => {
+    const template = selectedTemplate()
+    if (!template) return status("Hãy chọn một mẫu dự án.", true)
+    applyTemplate(template)
+  }
+  byId("new-project-template").onclick = () => {
+    const template = selectedTemplate()
+    if (!template) return status("Hãy chọn một mẫu dự án.", true)
+    templateDialog.close()
+    startNewProject(template)
+  }
+
+  function persistTemplates(next, selectName) {
+    projectTemplates = saveProjectTemplates(next)
+    refreshTemplateDialog()
+    if (projectTemplates.some((item) => item.name === selectName)) {
+      templateSelect.value = selectName
+    }
+    return projectTemplates
+  }
+
+  byId("save-template").onclick = () => {
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    const name = templateNameInput?.value.trim() ?? ""
+    if (!name) return status("Nhập tên cho mẫu dự án.", true)
+    try {
+      persistTemplates(upsertTemplate(projectTemplates, currentTemplateDraft(name)), name)
+      status(`Đã lưu mẫu dự án "${name}".`)
+    } catch (error) {
+      status(error.message, true)
+    }
+  }
+
+  byId("rename-template").onclick = () => {
+    if (projectBusy()) return
+    try {
+      persistTemplates(renameTemplate(projectTemplates, templateSelect.value, templateNameInput?.value ?? ""), templateNameInput?.value.trim())
+      status("Đã đổi tên mẫu dự án.")
+    } catch (error) {
+      status(error.message, true)
+    }
+  }
+
+  byId("overwrite-template").onclick = () => {
+    if (projectBusy()) return
+    const name = templateSelect.value
+    try {
+      persistTemplates(overwriteTemplate(projectTemplates, name, currentTemplateDraft(name)), name)
+      status(`Đã ghi đè mẫu dự án "${name}".`)
+    } catch (error) {
+      status(error.message, true)
+    }
+  }
+
+  byId("delete-template").onclick = () => {
+    if (projectBusy()) return
+    const name = templateSelect.value
+    if (!window.confirm(`Xóa mẫu dự án "${name}"?`)) return
+    try {
+      persistTemplates(removeTemplate(projectTemplates, name))
+      status(`Đã xóa mẫu dự án "${name}".`)
+    } catch (error) {
+      status(error.message, true)
+    }
+  }
+
+  byId("export-templates").onclick = () => {
+    const json = serializeProjectTemplatesJson(projectTemplates)
+    saveFile(new Blob([json], { type: "application/json;charset=utf-8" }), "khung-thoai-templates.json")
+    status("Đã xuất danh sách mẫu dự án ra tệp JSON.")
+  }
+
+  byId("import-templates").onclick = () => {
+    if (!projectBusy()) byId("templates-file")?.click()
+  }
+  byId("templates-file")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ""
+    if (!file || projectBusy()) return
+    try {
+      const imported = parseProjectTemplatesJson(await file.text())
+      projectTemplates = saveProjectTemplates(mergeTemplates(projectTemplates, imported))
+      refreshTemplateDialog()
+      status(`Đã nhập ${imported.length} mẫu dự án (tổng ${projectTemplates.filter((item) => !item.builtin).length} mẫu của bạn).`)
+    } catch (error) {
+      status("Không nhập được tệp mẫu dự án. " + error.message, true)
+    }
+  })
 
   async function refreshRecovery() {
     const info = await desktop.projectStatus()
