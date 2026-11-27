@@ -290,3 +290,76 @@ test("fetchWebPage and searchWeb enforce redirect: error on external fetches", a
   await searchWeb("test", { provider: "searxng", searchUrl: "http://localhost:8080" })
   assert.deepEqual(seenRedirects, ["error", "error"])
 })
+
+test("desktop search and fetch abort through the bridge instead of resolving late results", async (t) => {
+  const calls = []
+  const aborts = []
+  let resolveSearch
+  let resolveFetch
+  const bridge = {
+    webSearch: (query, options) => {
+      calls.push({ method: "webSearch", target: query, options })
+      return new Promise((resolve) => { resolveSearch = resolve })
+    },
+    fetchUrl: (url, options) => {
+      calls.push({ method: "fetchUrl", target: url, options })
+      return new Promise((resolve) => { resolveFetch = resolve })
+    },
+    abortRequest: async (id) => { aborts.push(id); return true },
+  }
+  globalThis.khungThoaiDesktop = bridge
+  t.after(() => { delete globalThis.khungThoaiDesktop })
+
+  const { fetchWebPage } = await import("../src/web-search.js")
+  const controller = new AbortController()
+  const search = searchWeb("manga", { signal: controller.signal, limit: 3 })
+  const page = fetchWebPage("https://example.org/page", { signal: controller.signal })
+
+  // The signal itself cannot cross IPC; the renderer tags the request so main can abort it.
+  assert.equal(calls.length, 2)
+  for (const call of calls) assert.equal(typeof call.options.id, "string")
+  assert.equal(calls[0].options.limit, 3)
+  assert.equal(calls[1].options.maxChars, 8000)
+
+  controller.abort()
+  await assert.rejects(search, { name: "AbortError" })
+  await assert.rejects(page, { name: "AbortError" })
+  assert.deepEqual(aborts, [calls[0].options.id, calls[1].options.id])
+
+  // A late main-process reply must not resurrect a request the agent already cancelled.
+  resolveSearch({ results: [{ title: "Late", url: "https://example.org/late" }] })
+  resolveFetch({ url: "https://example.org/page", title: "Late", text: "late" })
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(search, { name: "AbortError" })
+  await assert.rejects(page, { name: "AbortError" })
+
+  // An already-aborted turn never reaches the bridge at all.
+  const cancelled = new AbortController()
+  cancelled.abort()
+  await assert.rejects(searchWeb("manga", { signal: cancelled.signal }), { name: "AbortError" })
+  assert.equal(calls.length, 2)
+
+  // Without a signal the bridge keeps its plain contract: no id, unchanged pass-through.
+  bridge.webSearch = async (query, options) => {
+    calls.push({ method: "webSearch", target: query, options })
+    return { results: [{ title: "Manga", url: "https://example.org/manga" }] }
+  }
+  bridge.fetchUrl = async (url, options) => {
+    calls.push({ method: "fetchUrl", target: url, options })
+    return { url, title: "Trang", text: "Nội dung" }
+  }
+  assert.deepEqual(await searchWeb("manga"), {
+    query: "manga",
+    provider: "desktop",
+    results: [{ title: "Manga", url: "https://example.org/manga" }],
+  })
+  assert.deepEqual(calls.at(-1).options, { limit: 5 })
+  const live = new AbortController()
+  assert.deepEqual(await fetchWebPage("https://example.org/page", { signal: live.signal, maxChars: 1200 }), {
+    url: "https://example.org/page",
+    title: "Trang",
+    text: "Nội dung",
+  })
+  assert.equal(calls.at(-1).options.maxChars, 1200)
+  assert.equal(typeof calls.at(-1).options.id, "string")
+})

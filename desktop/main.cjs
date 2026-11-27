@@ -117,8 +117,19 @@ app.whenReady().then(() => {
     return projects.begin(mode, name, projectId)
   })
   handle("khung-thoai:project-write", (id, operation, options, data) => projects.write(id, operation, options, data))
-  handle("khung-thoai:web-search", (query, options) => webSearch(query, options))
-  handle("khung-thoai:fetch-url", (url, options) => fetchUrl(url, options))
+  // An AbortSignal cannot travel through IPC, so the renderer sends a request id and aborts
+  // the in-flight desktop request by that id when the agent turn is cancelled.
+  const egressRequests = new Map()
+  const cancelable = (options, run) => {
+    const id = typeof options?.id === "string" ? options.id : ""
+    if (!id) return run(undefined)
+    const controller = new AbortController()
+    egressRequests.set(id, controller)
+    return run(controller.signal).finally(() => { egressRequests.delete(id) })
+  }
+  handle("khung-thoai:web-search", (query, options) => cancelable(options, (signal) => webSearch(query, { ...options, signal })))
+  handle("khung-thoai:fetch-url", (url, options) => cancelable(options, (signal) => fetchUrl(url, { ...options, signal })))
+  handle("khung-thoai:abort-request", (id) => { egressRequests.get(id)?.abort(); return true })
   handle("khung-thoai:app-info", () => ({
     version: app.getVersion(),
     platform: process.platform,
