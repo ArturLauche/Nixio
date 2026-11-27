@@ -572,6 +572,8 @@ function syncProjectActions() {
   byId("open-project").disabled = projectBusy()
   byId("save-project").disabled = projectBusy()
   byId("new-project").disabled = projectBusy()
+  byId("open-find").disabled = projectBusy()
+  byId("recent-projects-button").disabled = projectBusy()
   byId("images").disabled = projectBusy()
   byId("script-file").disabled = projectBusy()
   syncHistoryPanel()

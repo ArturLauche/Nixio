@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 const desktopCalls = { tasks: [], cancelled: [] }
@@ -237,15 +238,36 @@ test("find and replace renders matches, jumps to boxes, and reports replacements
 
   events.length = 0
   query.value = ""
+  query.focused = false
   byId("replace-all-btn").onclick()
-  assert.deepEqual(events, [["status", "Hãy nhập nội dung cần tìm.", true]])
+  assert.deepEqual(events, [], "validation errors render inside the dialog, not the status bar")
+  assert.equal(byId("find-error").textContent, "Hãy nhập nội dung cần tìm.")
+  assert.equal(query.getAttribute("aria-invalid"), "true")
+  assert.equal(query.focused, true)
+
+  query.value = "anh"
+  query.oninput()
+  assert.equal(byId("find-error").textContent, "")
 
   busy = true
   events.length = 0
   api.openFind()
   byId("replace-all-btn").onclick()
-  assert.deepEqual(events, [], "busy projects ignore find and replace actions")
+  assert.deepEqual(events, [
+    ["status", "Hãy chờ tác vụ hiện tại hoàn tất.", true],
+    ["status", "Hãy chờ tác vụ hiện tại hoàn tất.", true],
+  ], "busy projects explain why find and replace did nothing")
   assert.equal(byId("open-shortcuts").onclick, api.openShortcuts)
+})
+
+test("the find dialog ships an in-dialog alert region for validation errors", async () => {
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8")
+  const dialog = html.slice(
+    html.indexOf('id="find-replace-dialog"'),
+    html.indexOf('id="shortcuts-dialog"'),
+  )
+  assert.match(dialog, /<p id="find-error"[^>]*role="alert"/)
+  assert.match(html, /id="open-find"[^>]*Ctrl\+H \/ Ctrl\+F/)
 })
 
 test("chat setup exposes its panel controls and resolves the active skill", async () => {
