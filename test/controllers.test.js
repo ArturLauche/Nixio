@@ -59,6 +59,13 @@ function createById() {
   return { byId, elements }
 }
 
+const liveRegions = new Map()
+
+function liveRegion(id) {
+  if (!liveRegions.has(id)) liveRegions.set(id, { id, textContent: "" })
+  return liveRegions.get(id)
+}
+
 function installBrowserGlobals() {
   globalThis.document = {
     createElement: (tag) => fakeElement(tag),
@@ -67,6 +74,7 @@ function installBrowserGlobals() {
     querySelector: () => fakeElement(),
     addEventListener() {},
     visibilityState: "visible",
+    getElementById: (id) => (id === "live-region" || id === "live-region-alert" ? liveRegion(id) : null),
   }
   globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
   globalThis.window = {
@@ -128,6 +136,8 @@ test("task panel renders native progress, hides cancel for finished work, and ke
   emit({ id: "a", operation: "ocr", stage: "đọc chữ", progress: 40, state: "running" })
   assert.equal(panel.hidden, false)
   assert.equal(list.children.length, 1)
+  // #107: the task panel is a visual list, so its state changes are also announced.
+  assert.equal(liveRegion("live-region").textContent, "ocr: đọc chữ.")
   const row = list.children[0]
   assert.equal(row.children[0].textContent, "ocr · đọc chữ")
   assert.equal(row.children[1].value, 40)
@@ -136,9 +146,14 @@ test("task panel renders native progress, hides cancel for finished work, and ke
   assert.ok(cancel, "running tasks expose a cancel button")
   cancel.click()
   assert.deepEqual(desktopCalls.cancelled, ["a"])
+  emit({ id: "a", operation: "ocr", stage: "vẫn đang đọc", progress: 55, state: "running" })
+  assert.equal(liveRegion("live-region").textContent, "ocr: đọc chữ.", "progress ticks stay silent")
 
   emit({ id: "a", operation: "ocr", stage: "xong", progress: 100, state: "done" })
   assert.equal(list.children[0].children.length, 2, "finished tasks drop the cancel button")
+  assert.equal(liveRegion("live-region").textContent, "ocr: xong.")
+  emit({ id: "b", operation: "redraw", stage: "hết bộ nhớ", progress: 10, state: "error" })
+  assert.equal(liveRegion("live-region-alert").textContent, "redraw: hết bộ nhớ.", "errors are assertive")
 
   for (let index = 0; index < 11; index++) {
     emit({ id: `job-${index}`, operation: "redraw", stage: "chạy", progress: index, state: "running" })
@@ -351,6 +366,41 @@ test("OCR setup wires its dialog controls and stops without a selected page", as
   assert.equal(byId("ocr-review").open, false)
 })
 
+test("OCR review announces its result because the dialog leaves the status line inert", async () => {
+  const { byId } = createById()
+  const state = { pages: [], processingNative: false }
+  const page = {
+    id: "p1",
+    name: "1.png",
+    boxes: [],
+    unplaced: [],
+    image: { naturalWidth: 100, naturalHeight: 100 },
+  }
+  const statuses = []
+  const previousNative = globalThis.khungThoaiDesktop.native
+  globalThis.khungThoaiDesktop.native = async () => ({
+    result: { lines: [{ text: "Xin chào", confidence: 90, box: [100, 100, 400, 200] }] },
+  })
+  const { setupOcr } = await controllers("ocr")
+  setupOcr({
+    ...baseArguments(byId, state),
+    selectedPage: () => page,
+    status: (message, error) => statuses.push([message, error]),
+    notifyOverflowIfAny() {},
+  })
+  byId("direction").value = "rtl"
+
+  await byId("run-local-ocr").onclick()
+  globalThis.khungThoaiDesktop.native = previousNative
+
+  assert.equal(byId("ocr-review").open, true)
+  assert.equal(statuses.some(([, error]) => error), false, "the review path reports success instead of an error")
+  assert.equal(
+    liveRegion("live-region").textContent,
+    "Đã nhận dạng 1 vùng chữ trên máy. Sửa nội dung trước khi đặt lên trang.",
+  )
+})
+
 test("project setup assigns a project id and exposes dirty state helpers", async () => {
   const { byId } = createById()
   const state = { pages: [], projectId: undefined }
@@ -370,6 +420,8 @@ test("project setup assigns a project id and exposes dirty state helpers", async
   })
   assert.match(state.projectId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   assert.equal(api.ready, false)
+  assert.equal(byId("native-status").getAttribute("role"), "status")
+  assert.equal(byId("native-status").getAttribute("aria-live"), "polite")
   assert.equal(typeof api.changed, "function")
   assert.equal(typeof api.refreshDirty, "function")
   assert.equal(typeof byId("new-project").onclick, "function")

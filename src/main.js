@@ -40,6 +40,7 @@ import { setupDialogs } from "./controllers/dialogs.js"
 import { setupGestures } from "./controllers/gestures.js"
 import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
+import { announce } from "./live-region.js"
 import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
 
 const history = new EditHistory()
@@ -514,6 +515,13 @@ function setView() {
 window.addEventListener("hashchange", setView)
 setView()
 
+// Nixio #106: the page toolbar changes its index silently, so a page change is announced with the
+// name the page list shows instead of only its position.
+function pageAnnouncement() {
+  const index = selectedIndex()
+  return index < 0 ? "Chưa có trang" : `Trang ${index + 1} / ${state.pages.length}: ${state.pages[index].name}`
+}
+
 function selectPage(page) {
   commitLiveFormCheckpoint()
   const aborted = gestures.abortGesture()
@@ -528,6 +536,7 @@ function selectPage(page) {
   state.placing = false
   state.cloneSource = null
   render()
+  announce(pageAnnouncement())
 }
 
 function changePage(delta) {
@@ -1252,6 +1261,13 @@ document.querySelectorAll("#tool-rail .rail-btn").forEach((btn) => {
     select.value = btn.dataset.tool
     select.onchange?.()
   })
+  // Nixio #105: a title tooltip never opens for keyboard focus, so focusing a rail button previews the
+  // same name in the pill that already names the active tool.
+  btn.addEventListener("focus", () => {
+    const label = byId("active-tool-label")
+    if (label) label.textContent = btn.getAttribute("aria-label") || btn.title
+  })
+  btn.addEventListener("blur", () => syncToolControls())
 })
 byId("show-cleanup").onchange = renderCanvas
 byId("show-text").onchange = renderCanvas

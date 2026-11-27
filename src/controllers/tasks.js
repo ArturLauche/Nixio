@@ -1,10 +1,22 @@
 import { desktop } from "../native.js"
+import { announce } from "../live-region.js"
 
 export function setupTasks(byId) {
   if (!desktop?.onTask) return
   const tasks = new Map()
+  const announcedStates = new Map()
   desktop.onTask((update) => {
     tasks.set(update.id, update)
+    // Nixio #107: progress ticks stay visual, while a task that starts or stops working changes what
+    // the reader can do, so each state change is announced once and an error is assertive.
+    if (announcedStates.get(update.id) !== update.state) {
+      announcedStates.set(update.id, update.state)
+      // The queue names its own stages ("Đang xử lý", "Hoàn tất", "Đã hủy"), so the announcement is
+      // the operation plus that stage.
+      if (["running", "done", "error", "cancelled"].includes(update.state)) {
+        announce(`${update.operation}: ${update.stage}.`, { assertive: update.state === "error" })
+      }
+    }
     const rows = [...tasks.values()].slice(-10)
     byId("task-panel").hidden = false
     byId("task-list").replaceChildren(
@@ -28,8 +40,10 @@ export function setupTasks(byId) {
       }),
     )
     for (const [id, task] of tasks) {
-      if (!rows.includes(task) && !["running", "queued"].includes(task.state))
+      if (!rows.includes(task) && !["running", "queued"].includes(task.state)) {
         tasks.delete(id)
+        announcedStates.delete(id)
+      }
     }
   })
 }

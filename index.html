@@ -8,6 +8,8 @@
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
+  <p id="live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+  <p id="live-region-alert" class="sr-only" role="alert" aria-atomic="true"></p>
   <header class="app-header">
     <a class="wordmark" href="#editor" data-view="editor"><span>KT</span> Khung Thoại</a>
     <nav aria-label="Không gian làm việc">
@@ -165,7 +167,7 @@
       </section>
       <section class="side-section" id="local-processing" hidden>
         <h2>OCR trên máy</h2>
-        <p class="muted" id="native-status"></p>
+        <p class="muted" id="native-status" role="status" aria-live="polite"></p>
         <label class="field" for="local-ocr-language">Ngôn ngữ đã cài<select id="local-ocr-language"></select></label>
         <label class="field" for="local-ocr-layout">Bố cục
           <select id="local-ocr-layout"><option value="11">Chữ rải rác</option><option value="6">Một khối chữ</option><option value="5">Chữ dọc Nhật (jpn_vert)</option><option value="3">Tự động toàn trang</option></select>
@@ -260,39 +262,39 @@
       </section>
       <div class="workspace-body">
         <div class="tool-rail" id="tool-rail" role="toolbar" aria-label="Công cụ vẽ và chỉnh khung" aria-orientation="vertical">
-          <button type="button" class="rail-btn" data-tool="text" aria-pressed="true" title="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)">
+          <button type="button" class="rail-btn" data-tool="text" aria-pressed="true" aria-label="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)" title="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2l9 6.5-4.2.7L6 13.5 3 2z"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="pan" aria-pressed="false" title="Kéo bàn vẽ (Hand / giữ Space)">
+          <button type="button" class="rail-btn" data-tool="pan" aria-pressed="false" aria-label="Kéo bàn vẽ (Hand / giữ Space)" title="Kéo bàn vẽ (Hand / giữ Space)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 8V3.2a.8.8 0 0 1 1.6 0V7m0-2.6a.8.8 0 0 1 1.6 0V7.5m0-1.9a.8.8 0 0 1 1.6 0V9.5c0 2.5-1.6 4.5-4 4.5-1.8 0-3-1-3.8-2.6L2.2 8.7a.85.85 0 0 1 1.3-1l1.4 1.3V4.5a.8.8 0 0 1 1.6 0"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="bubble" aria-pressed="false" title="Chấm bong bóng thoại tự động">
+          <button type="button" class="rail-btn" data-tool="bubble" aria-pressed="false" aria-label="Chấm bong bóng thoại tự động" title="Chấm bong bóng thoại tự động">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5c3.3 0 6 2 6 4.6 0 2.6-2.7 4.6-6 4.6-.9 0-1.8-.1-2.5-.4L2.5 13l.8-2.6C2.5 9.5 2 8.4 2 7.1c0-2.6 2.7-4.6 6-4.6z"/></svg>
           </button>
           <hr class="rail-divider">
-          <button type="button" class="rail-btn" data-tool="region" aria-pressed="false" title="Khoanh vùng xóa chữ cho khung đang chọn">
+          <button type="button" class="rail-btn" data-tool="region" aria-pressed="false" aria-label="Khoanh vùng xóa chữ cho khung đang chọn" title="Khoanh vùng xóa chữ cho khung đang chọn">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.5 2" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="erase" aria-pressed="false" title="Cọ giữ nền gốc (bảo vệ nét vẽ)">
+          <button type="button" class="rail-btn" data-tool="erase" aria-pressed="false" aria-label="Cọ giữ nền gốc (bảo vệ nét vẽ)" title="Cọ giữ nền gốc (bảo vệ nét vẽ)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2l5 2v3.6c0 3.1-2.1 5.1-5 6-2.9-.9-5-2.9-5-6V4.2l5-2z"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="restore" aria-pressed="false" title="Cọ thêm vùng xóa chữ">
+          <button type="button" class="rail-btn" data-tool="restore" aria-pressed="false" aria-label="Cọ thêm vùng xóa chữ" title="Cọ thêm vùng xóa chữ">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
           </button>
           <hr class="rail-divider">
-          <button type="button" class="rail-btn" data-tool="paint" aria-pressed="false" title="Cọ vẽ che chữ">
+          <button type="button" class="rail-btn" data-tool="paint" aria-pressed="false" aria-label="Cọ vẽ che chữ" title="Cọ vẽ che chữ">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 2.5l1 1-6.2 6.2-1.8.8.8-1.8 6.2-6.2z"/><path d="M5.5 10.5c-1.4 0-2.5.9-2.8 2.5 1.7.3 3.3-.2 3.8-1.5"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="clone" aria-pressed="false" title="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)">
+          <button type="button" class="rail-btn" data-tool="clone" aria-pressed="false" aria-label="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)" title="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.2 7.5a2 2 0 1 1 3.6 0l-.6 2.5H6.8l-.6-2.5z"/><path d="M3.5 10h9v2.2h-9V10zM3 13.8h10"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="inpaint" aria-pressed="false" title="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)">
+          <button type="button" class="rail-btn" data-tool="inpaint" aria-pressed="false" aria-label="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)" title="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5l6.5-6.5M9.5 3v2M9.5 8v1.5M6.5 6H5M12.5 6H14M11.6 3.9l1-1"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="retouch-erase" aria-pressed="false" title="Cọ tẩy nét redraw (lộ lại ảnh gốc)">
+          <button type="button" class="rail-btn" data-tool="retouch-erase" aria-pressed="false" aria-label="Cọ tẩy nét redraw (lộ lại ảnh gốc)" title="Cọ tẩy nét redraw (lộ lại ảnh gốc)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 3.2l3.2 3.2-5.6 5.6H4l-1.5-1.5 7.1-7.3zM7.2 12h6.3"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="eyedropper" aria-pressed="false" title="Hút màu (Shift+bấm để đổi màu chữ)">
+          <button type="button" class="rail-btn" data-tool="eyedropper" aria-pressed="false" aria-label="Hút màu (Shift+bấm để đổi màu chữ)" title="Hút màu (Shift+bấm để đổi màu chữ)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 2.5l3 3-1.4 1.4-3-3 1.4-1.4zM9.8 6.2L4.2 11.8l-.9 1.7 1.7-.9 5.6-5.6"/></svg>
           </button>
         </div>
@@ -655,6 +657,7 @@
       <span id="chat-stats" class="chat-stats muted" hidden></span>
     </div>
     <form id="chat-form" class="chat-composer">
+      <label class="sr-only" for="chat-input">Tin nhắn cho trợ lý AI</label>
       <textarea id="chat-input" rows="2" placeholder="Hỏi AI hoặc gõ lệnh nhanh: /qc, /plan, /autofit, /compact ai, /help…"></textarea>
       <div class="form-actions">
         <button type="submit" id="chat-send" class="button primary">Gửi</button>
