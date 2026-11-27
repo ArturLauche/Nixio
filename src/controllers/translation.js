@@ -290,7 +290,7 @@ export function setupTranslation({
     let completed = 0
     let placed = 0
     let skipped = 0
-    checkpoint()
+    checkpoint(undefined, { label: `Dịch ${pages.length} trang`, kind: "translate" })
     translationController = new AbortController()
     state.translating = true
     for (const page of pages)
@@ -395,7 +395,7 @@ export function setupTranslation({
       previousPage?.translationContext?.signature === signature
         ? previousPage.translationContext.lines
         : []
-    checkpoint()
+    checkpoint(undefined, { label: `Dịch trang ${page.name}`, kind: "translate" })
     translationController = new AbortController()
     state.translating = true
     page.translationJob = { kind: "translate", signature, state: "running" }

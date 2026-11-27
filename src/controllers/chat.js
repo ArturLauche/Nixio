@@ -479,16 +479,19 @@ export function setupChat({
 
   let turnBeforeSnapshot = null
   let turnCheckpointRecorded = false
+  // One AI turn is one named action: every tool edit inside the turn lands on the same entry, so
+  // the timeline shows the turn instead of one anonymous row per tool call.
+  const AI_TURN_META = { label: "Chỉnh sửa từ Trợ lý AI", kind: "ai" }
 
   function turnCheckpoint(snapshot) {
     if (turnBeforeSnapshot) {
       if (!turnCheckpointRecorded) {
         turnCheckpointRecorded = true
-        checkpoint(turnBeforeSnapshot)
+        checkpoint(turnBeforeSnapshot, AI_TURN_META)
       }
       return
     }
-    checkpoint(snapshot)
+    checkpoint(snapshot, AI_TURN_META)
   }
 
   function updateContextMeter(budget) {
