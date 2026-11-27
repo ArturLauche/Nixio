@@ -57,6 +57,9 @@
           <small>PNG, JPEG hoặc WebP</small>
           <input id="images" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" multiple>
         </label>
+        <div class="form-actions webtoon-trigger-row">
+          <button type="button" id="open-webtoon" class="button full" title="Ghép dọc hoặc cắt thông minh trang Webtoon/Manhwa theo rãnh trống">Ghép &amp; Cắt Webtoon</button>
+        </div>
         <ol id="pages" class="page-list" aria-label="Thứ tự trang"></ol>
       </section>
 
@@ -365,6 +368,12 @@
       <section class="side-section" id="cleanup-inspector" hidden>
         <h2>Vùng xóa chữ</h2>
         <p class="muted">Khoanh vùng trên ảnh. Dùng cọ giữ nét vẽ hoặc thêm lại vùng xóa trong khung.</p>
+        <label class="field" for="cleanup-mode">Chế độ xóa chữ
+          <select id="cleanup-mode">
+            <option value="auto">Tự động (Nền trơn / Screentone)</option>
+            <option value="content-aware">Nền tranh phức tạp (PatchMatch C#)</option>
+          </select>
+        </label>
         <label class="field" id="native-mask-control" for="cleanup-expand" hidden>Nới / thu mặt nạ (px)
           <input id="cleanup-expand" type="number" min="-8" max="8" value="0">
         </label>
@@ -586,6 +595,48 @@
       <button type="button" id="update-open-release" class="button primary">Mở trang phát hành</button>
       <button type="button" id="update-dismiss-version" class="button">Bỏ qua bản này</button>
       <button type="button" id="update-close" class="button">Đóng</button>
+    </div>
+  </dialog>
+
+  <dialog id="webtoon-dialog">
+    <h2>Ghép &amp; Cắt Webtoon / Manhwa</h2>
+    <section class="dialog-group">
+      <h3>Ghép trang dọc</h3>
+      <p class="muted">Gộp các trang liên tiếp theo chiều dọc để xử lý lời thoại bị cắt ngang mép nối (hoàn tác được).</p>
+      <div class="two-fields">
+        <label class="field" for="webtoon-stitch-from">Từ trang<input id="webtoon-stitch-from" type="number" min="1" value="1"></label>
+        <label class="field" for="webtoon-stitch-to">Đến trang<input id="webtoon-stitch-to" type="number" min="1" value="2"></label>
+      </div>
+      <button type="button" id="webtoon-stitch-run" class="button primary full">Ghép các trang đã chọn</button>
+    </section>
+    <section class="dialog-group">
+      <h3>Cắt thông minh trang hiện tại</h3>
+      <p class="muted">Tự tìm rãnh trống hoặc nền phẳng để cắt dải ảnh dài mà không chém ngang bong bóng thoại.</p>
+      <label class="field" for="webtoon-slice-height">Chiều cao mục tiêu mỗi mảnh (px)
+        <input id="webtoon-slice-height" type="number" min="600" max="4000" step="100" value="1600">
+      </label>
+      <button type="button" id="webtoon-slice-run" class="button full">Cắt thông minh trang đang mở</button>
+    </section>
+    <div class="form-actions">
+      <button type="button" id="webtoon-close" class="button">Đóng</button>
+    </div>
+  </dialog>
+
+  <dialog id="raw-cleanup-dialog">
+    <h2>Tinh chỉnh Làm sạch ảnh Raw</h2>
+    <canvas id="raw-preview-canvas" class="raw-preview-canvas"></canvas>
+    <p id="raw-preview-meta" class="muted"></p>
+    <label class="field" for="raw-strength">Cường độ làm sạch: <span id="raw-strength-val">70%</span>
+      <input id="raw-strength" type="range" min="0" max="100" step="5" value="70">
+    </label>
+    <div class="style-toggles">
+      <label class="choice"><input id="raw-denoise" type="checkbox" checked> Khử nhiễu JPEG giữ screentone</label>
+      <label class="choice"><input id="raw-sharpen" type="checkbox" checked> Tăng sắc nét nhẹ</label>
+    </div>
+    <div class="form-actions">
+      <button type="button" id="raw-apply-page" class="button primary">Áp dụng trang này</button>
+      <button type="button" id="raw-apply-chapter" class="button">Áp dụng cả chương</button>
+      <button type="button" id="raw-close" class="button">Đóng</button>
     </div>
   </dialog>
 

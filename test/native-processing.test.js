@@ -307,3 +307,38 @@ test("native seamless_clone harmonizes luminance across seam and preserves unmas
   const centerOff = (20 * width + 20) * 4
   assert.ok(data[centerOff] > data[rimOff] + 20)
 })
+
+test("native content_aware_cleanup removes interior lettering while protecting crossing border artwork", { skip: !available }, async (t) => {
+  const worker = new native.NativeWorker(executable)
+  t.after(() => worker.close())
+  const width = 96
+  const height = 96
+  const inner = { left: 24, top: 24, right: 72, bottom: 72 }
+  const rgba = new Uint8Array(width * height * 4)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4
+      // Warm textured gradient background
+      let r = 170 + Math.round((x / width) * 45)
+      let g = 140 + Math.round((y / height) * 40)
+      let b = 120
+      // Crossing dark artwork line from x=0..95 at y=30 (must be protected!)
+      if (y >= 29 && y <= 31) { r = 20; g = 20; b = 20 }
+      // Isolated interior lettering blob centered at (48, 52) (must be cleaned!)
+      if (x >= 44 && x <= 52 && y >= 48 && y <= 56) { r = 15; g = 15; b = 15 }
+      rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = 255
+    }
+  }
+  const { result, data } = await worker.call("content_aware_cleanup", { width, height, inner }, rgba)
+  const iw = inner.right - inner.left
+  const ih = inner.bottom - inner.top
+  assert.ok(result.filled > 0)
+  assert.equal(data.length, iw * ih * 4)
+  // Crossing artwork line at inner y=30-24=6, x=48-24=24 must remain untouched (alpha 0).
+  const borderLineOff = (6 * iw + 24) * 4
+  assert.equal(data[borderLineOff + 3], 0)
+  // Interior lettering center at inner y=52-24=28, x=48-24=24 must be filled (alpha 255, close to background).
+  const letterOff = (28 * iw + 24) * 4
+  assert.equal(data[letterOff + 3], 255)
+  assert.ok(data[letterOff] > 150, `Expected cleaned red > 150, got ${data[letterOff]}`)
+})

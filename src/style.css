@@ -822,3 +822,23 @@ dialog::backdrop { background: #16352dae; }
 :root[data-theme="dark"] .chat-diff-card summary { color: var(--accent); }
 :root[data-theme="dark"] .chat-diff-list li[data-kind="added"] { color: #9fd884; }
 :root[data-theme="dark"] .chat-diff-list li[data-kind="removed"] { color: #f28b92; }
+
+/* Webtoon & Raw Cleanup preview dialogs */
+.webtoon-trigger-row { margin-top: 8px; }
+#webtoon-dialog, #raw-cleanup-dialog { width: min(520px, 94vw); }
+.dialog-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.dialog-group h3 { margin: 0 0 4px; font-size: .92rem; }
+.raw-preview-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 46vh;
+  object-fit: contain;
+  margin: 10px auto 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+}

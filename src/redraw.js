@@ -45,7 +45,7 @@ function estimatePaper(pixels, width, height, inner) {
   return [red / bright, green / bright, blue / bright]
 }
 
-function cleanupPatch(image, rect) {
+function cleanupPatch(image, rect, mode = "auto") {
   const { naturalWidth, naturalHeight } = image
   const left = Math.max(0, Math.floor(rect.x * naturalWidth))
   const top = Math.max(0, Math.floor(rect.y * naturalHeight))
@@ -55,7 +55,9 @@ function cleanupPatch(image, rect) {
   const height = bottom - top
   if (width < 2 || height < 2 || width * height > Math.min(1_250_000, naturalWidth * naturalHeight * .32)) return null
 
-  const margin = Math.max(3, Math.min(24, Math.ceil(Math.min(width, height) * .18)))
+  const margin = mode === "content-aware"
+    ? Math.max(16, Math.min(48, Math.ceil(Math.min(width, height) * .35)))
+    : Math.max(3, Math.min(24, Math.ceil(Math.min(width, height) * .18)))
   const sampleX = Math.max(0, left - margin)
   const sampleY = Math.max(0, top - margin)
   const sampleWidth = Math.min(naturalWidth, right + margin) - sampleX
@@ -70,6 +72,20 @@ function cleanupPatch(image, rect) {
   const useCanvas = () => {
     const result = cleanupPaper(context, data, sampleWidth, sampleHeight, inner)
     return result ? createPatch(result, left, top) : null
+  }
+  if (mode === "content-aware" && globalThis.khungThoaiDesktop?.native && sampleWidth * sampleHeight <= 1_600_000) {
+    return globalThis.khungThoaiDesktop
+      .native(
+        "content_aware_cleanup",
+        { width: sampleWidth, height: sampleHeight, inner },
+        new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+      )
+      .then((response) => {
+        const bytes = response?.data
+        if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
+        return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
+      })
+      .catch(() => null)
   }
   const redraw = globalThis.khungThoaiDesktop?.redrawTexture
   if (!redraw || sampleWidth * sampleHeight > 1_600_000) return useCanvas()
@@ -120,12 +136,17 @@ export function redrawLayout(page, { cancellable = true } = {}) {
   const boxes = page.boxes.filter((box) => box.cleanup)
   const rectangles = boxes.map(cleanupRectangle)
   if (!rectangles.length) return emptyLayout
-  const signature = JSON.stringify(rectangles.map(({ x, y, w, h }, index) => [x, y, w, h, boxes[index].cleanupStrokes, boxes[index].cleanupExpand]))
+  const signature = JSON.stringify(
+    rectangles.map(({ x, y, w, h }, index) => [
+      x, y, w, h, boxes[index].cleanupMode ?? "auto", boxes[index].cleanupStrokes, boxes[index].cleanupExpand,
+    ]),
+  )
   const cached = cachedRedraw.get(page.image)
   if (cached?.signature === signature) {
     if (!cancellable) cached.cancellable = false
     return cached
   }
+  const modes = boxes.map((box) => box.cleanupMode ?? "auto")
   const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes), cleanupExpand: box.cleanupExpand }))
   if (cached?.cancellable && cached.pending) cached.superseded = true
   // Schedule native samples serially and keep the initial canvas paint independent of native I/O.
@@ -135,7 +156,7 @@ export function redrawLayout(page, { cancellable = true } = {}) {
       try {
         for (const [index, rectangle] of rectangles.entries()) {
           if (layout.superseded && layout.cancellable) return
-          const patch = await cleanupPatch(page.image, rectangle)
+          const patch = await cleanupPatch(page.image, rectangle, modes[index])
           if (layout.superseded && layout.cancellable) return
           if (patch) layout.patches.push(await nativeMaskCleanup(patch, masks[index], page.image))
         }
@@ -146,7 +167,7 @@ export function redrawLayout(page, { cancellable = true } = {}) {
     layout.pending = task
     desktopQueue = task.catch(() => {})
   } else {
-    layout.patches = rectangles.map((rect, index) => maskCleanup(cleanupPatch(page.image, rect), masks[index], page.image)).filter(Boolean)
+    layout.patches = rectangles.map((rect, index) => maskCleanup(cleanupPatch(page.image, rect, modes[index]), masks[index], page.image)).filter(Boolean)
   }
   cachedRedraw.delete(page.image)
   cachedRedraw.set(page.image, layout)
