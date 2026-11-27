@@ -222,9 +222,10 @@ function projectStyleGuide(raw) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, templateId, translationMemory, styleGuide, qaReview }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, templateId, defaultFont, translationMemory, styleGuide, qaReview }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
   if (templateId !== undefined && (typeof templateId !== "string" || !templateId.trim() || templateId.length > 100)) throw invalidProject()
+  if (defaultFont !== undefined && (typeof defaultFont !== "string" || !defaultFont.trim() || defaultFont.length > 100)) throw invalidProject()
   settings = { "translation-glossary": "", "export-profile": DEFAULT_EXPORT_PROFILE_ID, ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
@@ -239,6 +240,7 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
     ...(templateId && { templateId }),
+    ...(defaultFont && { defaultFont: defaultFont.trim() }),
     ...(memory && { translationMemory: memory }),
     ...(guide && { styleGuide: guide }),
     ...(review && { qaReview: review }),

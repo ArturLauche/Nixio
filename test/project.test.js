@@ -239,6 +239,19 @@ test("QA triage decisions round-trip in a version 4 manifest, and older files st
   assert.equal(reopened.pages.length, project.pages.length)
 })
 
+test("the font a template installed is saved, so a reopen keeps typesetting with it (#review)", async () => {
+  const project = sampleProject()
+  const file = writeProject({ ...project, defaultFont: "  Georgia  " })
+  // A reader that predates the field ignores it, so the file claims nothing new.
+  assert.equal((await readManifest(file)).manifest.version, 2)
+  assert.equal((await readProject(file)).defaultFont, "Georgia")
+
+  const plain = await readProject(writeProject(project))
+  assert.equal(plain.defaultFont, undefined, "a project without a template font carries no field")
+  assert.throws(() => writeProject({ ...project, defaultFont: "   " }), /không hợp lệ/)
+  assert.throws(() => writeProject({ ...project, defaultFont: 5 }), /không hợp lệ/)
+})
+
 test("a malformed QA decision cannot be saved", () => {
   const project = sampleProject()
   const entry = { id: "1:0:empty_or_placeholder", state: "fixed", note: "", updatedAt: 3 }

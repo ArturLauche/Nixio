@@ -118,6 +118,9 @@ export function setupProjects({
       currentPage: selectedIndex(),
       fit: state.fit,
       templateId: state.templateId ?? undefined,
+      // The font a template installed is part of the project, so a reopen keeps typesetting the
+      // same way instead of falling back to Arial while still claiming the template.
+      defaultFont: state.defaultFont,
       // The pairs travel with the project: a reopened file can reuse them without the provider.
       translationMemory: translationMemory?.snapshot?.(),
       styleGuide: state.styleGuide,
@@ -252,6 +255,11 @@ export function setupProjects({
         revision !== diskRevision ||
         state.queue.length ||
         state.styleGuide ||
+        state.templateId ||
+        // Pairs and triage decisions outlive their pages: deleting every page still leaves data
+        // that replacing the session would throw away, so they count as content too.
+        qaReview?.size ||
+        translationMemory?.size ||
         projectSettings.some(
           ({ value }, index) => value !== defaultProjectSettings[index],
         )
@@ -284,7 +292,7 @@ export function setupProjects({
       state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
       state.templateId = project.templateId ?? null
-      state.defaultFont = "Arial"
+      state.defaultFont = project.defaultFont ?? "Arial"
       // A file that predates the memory carries no pairs, so the store is replaced with whatever
       // this project has: never with the previous project's pairs. The triage decisions follow the
       // same rule.

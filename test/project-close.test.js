@@ -470,3 +470,79 @@ test("a storage failure is reported in Vietnamese and keeps the edits dirty", as
     globalThis.indexedDB = indexedDb
   }
 })
+test("a session holding only triage decisions, template font or memory pairs still asks before being replaced (#review)", async () => {
+  const importFile = (project) => {
+    const projectFile = harness.byId("project-file")
+    projectFile.files = [
+      new File([writeProject(project)], "khac.khungthoai", { type: "application/octet-stream" }),
+    ]
+    projectFile.onchange()
+  }
+  const project = (font) => ({
+    pages: harness.pages(1),
+    presets: [],
+    queue: [],
+    settings: Object.fromEntries(settingIds.map((id) => [id, ""])),
+    currentPage: 0,
+    fit: true,
+    ...(font && { defaultFont: font }),
+  })
+
+  // Nothing worth keeping: the import replaces the session without a question.
+  harness.reset()
+  harness.start(setupProjects)
+  harness.confirm.value = false
+  importFile(project())
+  await settleUntil(() => harness.lastStatus()?.text?.startsWith("Đã mở dự án"))
+  assert.equal(harness.confirm.calls.length, 0)
+
+  // The three kinds of data that outlive their pages each count on their own.
+  const kept = [
+    ["templateId", () => { harness.state.templateId = "shonen" }],
+    ["qaReview", null],
+    ["translationMemory", null],
+  ]
+  for (const [kind, prepare] of kept) {
+    harness.reset()
+    const overrides = kind === "qaReview"
+      ? { qaReview: { size: 2, snapshot: () => ({ version: 1, entries: [] }), replace() {} } }
+      : kind === "translationMemory"
+        ? { translationMemory: { size: 3, snapshot: () => ({ version: 1, entries: [] }), replace() {} } }
+        : {}
+    harness.start(setupProjects, overrides)
+    prepare?.()
+    const pagesBefore = harness.state.pages.length
+    harness.confirm.value = false
+    importFile(project())
+    await settleUntil(() => harness.lastStatus()?.text === "Đã hủy mở dự án.")
+    assert.equal(harness.confirm.calls.length, 1, kind + " asks before it is thrown away")
+    assert.equal(harness.state.pages.length, pagesBefore, kind + " keeps the session when the user says no")
+  }
+})
+
+test("a reopened project restores the font its template installed (#review)", async () => {
+  harness.reset()
+  harness.start(setupProjects)
+  const projectFile = harness.byId("project-file")
+  projectFile.files = [
+    new File(
+      [writeProject({ ...portableProject(harness), defaultFont: "Georgia" })],
+      "mau.khungthoai",
+      { type: "application/octet-stream" },
+    ),
+  ]
+  projectFile.onchange()
+  await settleUntil(() => harness.lastStatus()?.text?.startsWith("Đã mở dự án"))
+  assert.equal(harness.state.defaultFont, "Georgia")
+})
+
+function portableProject(harness) {
+  return {
+    pages: harness.pages(1),
+    presets: [],
+    queue: [],
+    settings: Object.fromEntries(settingIds.map((id) => [id, ""])),
+    currentPage: 0,
+    fit: true,
+  }
+}
