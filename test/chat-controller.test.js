@@ -35,7 +35,7 @@ function fakeElement(tag = "div") {
     removeAttribute(name) { delete element[name] },
     querySelectorAll() { return [] },
     querySelector() { return null },
-    focus() { element.focused = true },
+    focus() { element.focused = true; globalThis.document.activeElement = element },
     remove() { element.removed = true },
     click() { if (!element.disabled) element.onclick?.() },
     requestSubmit() { element.submitted = true },
@@ -63,12 +63,15 @@ function textOf(node) {
 
 function installBrowserGlobals() {
   const store = new Map()
+  const listeners = new Map()
   globalThis.document = {
     createElement: (tag) => fakeElement(tag),
     createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
     querySelectorAll: () => [],
     querySelector: () => null,
-    addEventListener() {},
+    activeElement: null,
+    addEventListener(type, handler) { listeners.set(type, handler) },
+    dispatch(type, event) { return listeners.get(type)?.(event) },
   }
   globalThis.localStorage = {
     getItem: (key) => (store.has(key) ? store.get(key) : null),
@@ -183,6 +186,7 @@ async function createHarness({ prepareStorage } = {}) {
   return {
     byId,
     chips,
+    document: globalThis.document,
     fetchCalls,
     panel,
     state,
@@ -532,4 +536,72 @@ test("a desktop chat turn with no stored key reports the vault in Vietnamese", a
     false,
     "main's own wording is not shown",
   )
+})
+
+test("a finished AI turn leaves the caret in the field the user moved to", async () => {
+  const harness = await createHarness()
+  harness.setFetch(() => geminiText("Đã kiểm tra trang 1."))
+  const input = harness.byId("chat-input")
+  const editorField = harness.byId("box-text")
+  harness.document.activeElement = input
+
+  harness.submit("Rà lỗi chính tả trang 1.")
+  // The user leaves the composer for the inspector while the turn is still running.
+  harness.document.activeElement = editorField
+  await drain()
+  assert.equal(input.focused, false, "the turn must not pull the caret out of the inspector")
+  assert.equal(harness.document.activeElement, editorField)
+  assert.match(harness.status(), /Hoàn tất/)
+})
+
+test("the composer takes the caret back while the user stays in the panel", async () => {
+  const harness = await createHarness()
+  harness.setFetch(() => geminiText("Đã kiểm tra trang 1."))
+  const input = harness.byId("chat-input")
+  harness.panel.contains = (node) => node === input
+  harness.document.activeElement = input
+
+  harness.submit("Rà lỗi chính tả trang 1.")
+  await drain()
+
+  assert.equal(input.focused, true, "typing the next message must not need another click")
+})
+
+test("closing the chat panel hands the caret back to its toggle and Escape closes it too", async () => {
+  const harness = await createHarness()
+  const toggle = harness.byId("open-chat")
+  const close = harness.byId("chat-close")
+  const panel = harness.panel
+  panel.hidden = false
+  panel.contains = (node) => node === close
+  harness.document.activeElement = close
+
+  close.onclick()
+  assert.equal(panel.hidden, true)
+  assert.equal(toggle.getAttribute("aria-pressed"), "false")
+  assert.equal(toggle.focused, true, "the × hands the caret back to the button that opened the panel")
+
+  toggle.onclick()
+  assert.equal(panel.hidden, false)
+  assert.equal(harness.byId("chat-input").focused, true, "opening still moves into the composer")
+
+  harness.document.activeElement = close
+  harness.document.dispatch("keydown", { key: "Escape" })
+  assert.equal(panel.hidden, true, "Escape is the keyboard twin of the ×")
+  assert.equal(toggle.focused, true)
+})
+
+test("an Escape that belongs to the editor closes the panel without stealing the caret", async () => {
+  const harness = await createHarness()
+  const panel = harness.panel
+  const editorField = harness.byId("box-text")
+  panel.hidden = false
+  harness.document.activeElement = editorField
+
+  harness.document.dispatch("keydown", { key: "Escape" })
+  assert.equal(panel.hidden, true)
+  assert.equal(harness.byId("open-chat").focused, false, "a field outside the panel keeps the caret")
+
+  harness.document.dispatch("keydown", { key: "Escape" })
+  assert.equal(panel.hidden, true, "Escape on a closed panel changes nothing")
 })
