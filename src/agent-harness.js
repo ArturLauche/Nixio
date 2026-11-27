@@ -87,6 +87,20 @@ export function stripReasoning(raw) {
   return { thought: thoughts.join("\n\n"), answer: cleaned }
 }
 
+// Text-form tool calls follow the OpenAI function-call convention, so `arguments` is often a
+// JSON-encoded string emitted by local/quantized models. Decode it instead of dropping it.
+function decodeToolArgs(value) {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === "object" ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof value === "object" && value !== null ? value : {}
+}
+
 export function parseTextToolCalls(text) {
   const calls = []
   const pattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi
@@ -98,7 +112,7 @@ export function parseTextToolCalls(text) {
         calls.push({
           id: "tc_" + (calls.length + 1),
           name: parsed.name,
-          args: typeof parsed.arguments === "object" && parsed.arguments !== null ? parsed.arguments : {},
+          args: decodeToolArgs(parsed.arguments),
         })
       }
     } catch {

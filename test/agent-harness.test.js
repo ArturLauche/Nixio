@@ -371,3 +371,13 @@ test("tools.execute fails closed when a write needs approval but no approver is 
   assert.equal(tools.needsApproval("update_box", {}, { confirmBulkEdits: false, forceWriteApproval: false }), false)
   assert.equal(tools.needsApproval("delete_box", {}, { confirmBulkEdits: true }), true)
 })
+test("parseTextToolCalls decodes JSON-string arguments from text-form tool calls", () => {
+  const [call] = parseTextToolCalls('<tool_call>{"name":"update_box","arguments":"{\\"boxId\\":\\"b1\\",\\"text\\":\\"hi\\"}"}</tool_call>')
+  assert.equal(call.name, "update_box")
+  assert.deepEqual(call.args, { boxId: "b1", text: "hi" })
+  // Undecodable or non-object arguments degrade to {} instead of throwing.
+  assert.deepEqual(parseTextToolCalls('<tool_call>{"name":"web_search","arguments":"{bad"}</tool_call>')[0].args, {})
+  assert.deepEqual(parseTextToolCalls('<tool_call>{"name":"list_boxes","arguments":"5"}</tool_call>')[0].args, {})
+})
+
+
