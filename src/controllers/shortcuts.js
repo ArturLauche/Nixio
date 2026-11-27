@@ -1,4 +1,5 @@
 import { nudgeBox } from "../tools.js"
+import { toggleCompare } from "../compare.js"
 
 const arrowKeys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]
 
@@ -76,13 +77,9 @@ export function setupShortcuts({
     }
     if ((event.key === "\\" || event.key === "|") && selectedPage()) {
       event.preventDefault()
-      if (event.shiftKey || event.key === "|") {
-        state.splitCompare = !state.splitCompare
-        if (state.splitCompare) state.compareOriginal = false
-      } else {
-        state.compareOriginal = !state.compareOriginal
-        if (state.compareOriginal) state.splitCompare = false
-      }
+      // The key pair drives the same toggles as the buttons, so a second press restores the view
+      // the first one replaced instead of dropping the user in the edit view.
+      Object.assign(state, toggleCompare(state, event.shiftKey || event.key === "|" ? "split" : "original"))
       renderCanvas()
       return
     }

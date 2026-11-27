@@ -14,6 +14,7 @@ import {
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 import { holdFocus } from "./focus.js"
+import { compareMode, toggleCompare } from "./compare.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -56,7 +57,8 @@ const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
   pages: [], presets: loadGlobalPresets(), pageId: null, boxId: null, selectedBoxIds: new Set(),
-  queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, splitCompare: false, splitPos: 50, cloneSource: null,
+  queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, splitCompare: false,
+  compareRestore: "edit", splitPos: 50, cloneSource: null,
   exporting: false, importing: false, translating: false, importingScript: false,
   openingProject: false, processingNative: false, savingProject: false,
 }
@@ -1507,20 +1509,27 @@ byId("fit-page").onclick = () => {
   updateFitLabel()
   renderCanvas()
 }
+// Every path that switches a compare view reports the view the editor ends up in, so turning a
+// toggle off names the restored view instead of claiming the edit view came back.
+function compareStatus() {
+  const mode = compareMode(state)
+  if (mode === "original") return "Đang xem ảnh gốc (nhấn \\ để quay lại)."
+  if (mode === "split") return "Đang bật thanh kéo so sánh gốc (kéo rèm hoặc nhấn Shift+\\ để tắt)."
+  return "Đã quay lại bản biên tập."
+}
+
 byId("compare-original").onclick = () => {
   if (!selectedPage()) return
-  state.compareOriginal = !state.compareOriginal
-  if (state.compareOriginal) state.splitCompare = false
+  Object.assign(state, toggleCompare(state, "original"))
   renderCanvas()
-  status(state.compareOriginal ? "Đang xem ảnh gốc (nhấn \\ để quay lại)." : "Đã quay lại bản biên tập.")
+  status(compareStatus())
 }
 
 byId("split-compare")?.addEventListener("click", () => {
   if (!selectedPage()) return
-  state.splitCompare = !state.splitCompare
-  if (state.splitCompare) state.compareOriginal = false
+  Object.assign(state, toggleCompare(state, "split"))
   renderCanvas()
-  status(state.splitCompare ? "Đang bật thanh kéo so sánh gốc (kéo rèm hoặc nhấn Shift+\\ để tắt)." : "Đã tắt thanh kéo so sánh.")
+  status(compareStatus())
 })
 
 byId("script-file").onchange = async (event) => {
