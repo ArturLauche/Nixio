@@ -9,7 +9,8 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
   if (!rgba || rgba.length !== pixelCount * 4 || pixelCount <= 0) {
     throw new Error("Dữ liệu ảnh không hợp lệ để làm sạch raw.")
   }
-  const s = Math.min(1, Math.max(0, Number(strength) || 0.7))
+  const requested = Number(strength ?? 0.7)
+  const s = Number.isFinite(requested) ? Math.min(1, Math.max(0, requested)) : 0.7
   const out = new Uint8ClampedArray(rgba)
 
   // 1. Luminance + per-channel histograms & near-grayscale detection.
@@ -17,9 +18,12 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
   const histR = new Int32Array(256)
   const histG = new Int32Array(256)
   const histB = new Int32Array(256)
+  let visible = 0
   let lowSatCount = 0
   for (let i = 0; i < pixelCount; i++) {
     const o = i * 4
+    if (!out[o + 3]) continue
+    visible++
     const r = out[o], g = out[o + 1], b = out[o + 2]
     const luma = (r * 77 + g * 150 + b * 29) >> 8
     histL[luma]++
@@ -31,9 +35,10 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
     if (maxC - minC <= 26) lowSatCount++
   }
 
-  const isMostlyGrayscale = lowSatCount > pixelCount * 0.88
-  const blackTarget = Math.floor(pixelCount * (0.012 * s + 0.003))
-  const whiteTarget = Math.floor(pixelCount * (1 - (0.055 * s + 0.01)))
+  const isMostlyGrayscale = lowSatCount > visible * 0.88
+  if (!s || !visible) return { data: out, blackPoint: 0, whitePoint: 255, grayscale: isMostlyGrayscale }
+  const blackTarget = Math.max(1, Math.floor(visible * (0.012 * s + 0.003)))
+  const whiteTarget = Math.max(1, Math.floor(visible * (1 - (0.055 * s + 0.01))))
 
   const percentile = (hist, target) => {
     let acc = 0
@@ -66,6 +71,7 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
 
   for (let i = 0; i < pixelCount; i++) {
     const o = i * 4
+    if (!out[o + 3]) continue
     out[o] = lutR[out[o]]
     out[o + 1] = lutG[out[o + 1]]
     out[o + 2] = lutB[out[o + 2]]
@@ -80,12 +86,14 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
       const row = y * width
       for (let x = 1; x < width - 1; x++) {
         const co = (row + x) * 4
+        if (!src[co + 3]) continue
         const cr = src[co], cg = src[co + 1], cb = src[co + 2]
         let sr = 0, sg = 0, sb = 0, wSum = 0
         for (let dy = -1; dy <= 1; dy++) {
           const nRow = (y + dy) * width
           for (let dx = -1; dx <= 1; dx++) {
             const no = (nRow + x + dx) * 4
+            if (!src[no + 3]) continue
             const nr = src[no], ng = src[no + 1], nb = src[no + 2]
             const dr = nr - cr, dg = ng - cg, db = nb - cb
             const distSq = (dr * dr + dg * dg + db * db) / 3
@@ -113,13 +121,16 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
       const row = y * width
       for (let x = 1; x < width - 1; x++) {
         const co = (row + x) * 4
+        if (!src[co + 3]) continue
         const up = ((y - 1) * width + x) * 4
         const dn = ((y + 1) * width + x) * 4
         const lf = (row + x - 1) * 4
         const rt = (row + x + 1) * 4
         for (let c = 0; c < 3; c++) {
           const center = src[co + c]
-          const blur = (center * 4 + src[up + c] + src[dn + c] + src[lf + c] + src[rt + c]) * 0.125
+          const blur = (center * 4 + (src[up + 3] ? src[up + c] : center) +
+            (src[dn + 3] ? src[dn + c] : center) + (src[lf + 3] ? src[lf + c] : center) +
+            (src[rt + 3] ? src[rt + c] : center)) * 0.125
           const diff = center - blur
           if (Math.abs(diff) < 3) continue
           out[co + c] = Math.round(center + diff * amount)
