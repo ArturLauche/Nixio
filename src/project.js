@@ -67,11 +67,27 @@ function projectStroke(stroke) {
   return { mode: stroke.mode, size: stroke.size, points: stroke.points.map(({ x, y }) => ({ x, y })) }
 }
 
+// The stamp an incremental box job leaves behind: which source line the text came from, which
+// glossary pairs applied, and the digest of every other input. It has to survive a save exactly,
+// because the next run compares against it to decide what is stale. Only the shapes are checked —
+// a long line or a large glossary must never make an otherwise valid project unsavable.
+function projectStamp(stamp) {
+  if (stamp === undefined) return undefined
+  if (!isText(stamp?.hash) || !/^[0-9a-f]{8,32}$/.test(stamp.hash) ||
+      !isText(stamp.source) || !isText(stamp.output) ||
+      !Array.isArray(stamp.terms) ||
+      !stamp.terms.every((pair) => Array.isArray(pair) && pair.length === 2 && pair.every(isText))) {
+    throw invalidProject()
+  }
+  return { hash: stamp.hash, source: stamp.source, output: stamp.output, terms: stamp.terms.map((pair) => [pair[0], pair[1]]) }
+}
+
 function projectBox(box) {
-  const { text, cleanup = false, cleanupMode = "auto", originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0 } = box ?? {}
+  const { text, cleanup = false, cleanupMode = "auto", originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0, translationStamp } = box ?? {}
   if (!isText(text) || typeof cleanup !== "boolean" || !["auto", "content-aware"].includes(cleanupMode) ||
       !Number.isInteger(cleanupExpand) || Math.abs(cleanupExpand) > 8 ||
       (cleanupStrokes !== undefined && !Array.isArray(cleanupStrokes))) throw invalidProject()
+  const stamp = projectStamp(translationStamp)
   return {
     ...rectangle(box), ...projectStyle(box), text, cleanup,
     ...(cleanupMode !== "auto" && { cleanupMode }),
@@ -79,6 +95,7 @@ function projectBox(box) {
     ...(cleanupRect && { cleanupRect: rectangle(cleanupRect) }),
     ...(cleanupExpand !== 0 && { cleanupExpand }),
     ...(cleanupStrokes && { cleanupStrokes: cleanupStrokes.map(projectStroke) }),
+    ...(stamp && { translationStamp: stamp }),
   }
 }
 

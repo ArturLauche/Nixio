@@ -110,6 +110,19 @@ function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
+// A one-letter term would cite every line, so the glossary check and the incremental translation
+// stamp share one definition of "this line mentions that term": Latin terms match as whole words,
+// anything else as a plain substring.
+export function citesGlossaryTerm(text, source) {
+  const term = String(source ?? "")
+  const line = String(text ?? "")
+  if (term.length < 2 || !line) return false
+  const isAscii = /^[a-z0-9 _-]+$/i.test(term)
+  return isAscii
+    ? new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(term)}(?![\\p{L}\\p{N}_])`, "iu").test(line)
+    : line.includes(term)
+}
+
 function clipText(text, max = 44) {
   const clean = String(text || "").replace(/\s+/g, " ").trim()
   return clean.length > max ? clean.slice(0, max) + "…" : clean
@@ -203,10 +216,7 @@ export function lintChapter(
       const normText = normalizedSearch(trimmed)
       for (const entry of glossary) {
         if (entry.source.length >= 2 && entry.source.toLowerCase() !== entry.target.toLowerCase()) {
-          const isAscii = /^[a-z0-9 _-]+$/i.test(entry.source)
-          const sourceMatched = isAscii
-            ? new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(entry.source)}(?![\\p{L}\\p{N}_])`, "iu").test(trimmed)
-            : trimmed.includes(entry.source)
+          const sourceMatched = citesGlossaryTerm(trimmed, entry.source)
           if (sourceMatched && !trimmed.includes(entry.target)) {
             pushIssue({
               type: "glossary_violation",
