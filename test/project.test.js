@@ -178,3 +178,69 @@ test("portable projects retain their recovery identity while older projects can 
   project.projectId = "../escape"
   assert.throws(() => writeProject(project), /không hợp lệ/)
 })
+
+// Nixio #76. The triage decisions travel with the project, so a reopened board shows the reviews
+// that were already taken. A file without them (version 1 to 3) still opens, and a malformed
+// decision rejects the file instead of silently dropping a review.
+async function readManifest(file) {
+  const headerSize = 15
+  const length = new DataView(await file.slice(0, headerSize).arrayBuffer()).getUint32(11, true)
+  return { headerSize, length, manifest: JSON.parse(await file.slice(headerSize, headerSize + length).text()) }
+}
+
+async function rewriteManifest(file, change) {
+  const { headerSize, length, manifest } = await readManifest(file)
+  change(manifest)
+  const bytes = new TextEncoder().encode(JSON.stringify(manifest))
+  const header = new Uint8Array(await file.slice(0, headerSize).arrayBuffer())
+  new DataView(header.buffer).setUint32(11, bytes.length, true)
+  return new Blob([header, bytes, file.slice(headerSize + length)])
+}
+
+test("QA triage decisions round-trip in a version 4 manifest, and older files still open", async () => {
+  const project = sampleProject()
+  const qaReview = {
+    version: 1,
+    entries: [
+      { id: "1:1:punctuation_spacing", state: "fixed", note: "Đã sửa dấu câu", updatedAt: 1712 },
+      { id: "1:0:glossary_violation:gojo-satoru", state: "ignored", note: "Biên tập giữ nguyên", updatedAt: 1713 },
+    ],
+  }
+  const file = writeProject({ ...project, qaReview })
+  assert.equal((await readManifest(file)).manifest.version, 4)
+  assert.deepEqual((await readProject(file)).qaReview, qaReview)
+
+  // A project without decisions claims nothing a build that predates them cannot read.
+  assert.equal((await readManifest(writeProject(project))).manifest.version, 2)
+
+  // A file written before the board existed has no field at all, and still opens.
+  const older = await rewriteManifest(file, (manifest) => {
+    manifest.version = 3
+    delete manifest.qaReview
+  })
+  const reopened = await readProject(older)
+  assert.equal(reopened.qaReview, undefined)
+  assert.equal(reopened.pages.length, project.pages.length)
+})
+
+test("a malformed QA decision cannot be saved", () => {
+  const project = sampleProject()
+  const entry = { id: "1:0:empty_or_placeholder", state: "fixed", note: "", updatedAt: 3 }
+  assert.doesNotThrow(() => writeProject({ ...project, qaReview: { version: 1, entries: [entry] } }))
+  assert.throws(
+    () => writeProject({ ...project, qaReview: { version: 1, entries: [{ ...entry, state: "ignored" }] } }),
+    /không hợp lệ/,
+  )
+  assert.throws(
+    () => writeProject({ ...project, qaReview: { version: 1, entries: [{ ...entry, state: "xong" }] } }),
+    /không hợp lệ/,
+  )
+  assert.throws(
+    () => writeProject({ ...project, qaReview: { version: 2, entries: [] } }),
+    /không hợp lệ/,
+  )
+  assert.throws(
+    () => writeProject({ ...project, qaReview: { version: 1, entries: [entry, { ...entry }] } }),
+    /không hợp lệ/,
+  )
+})

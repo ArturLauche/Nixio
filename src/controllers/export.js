@@ -4,6 +4,17 @@ import { filenameStem, saveFile } from "../io.js"
 import { translationSignature } from "../translation.js"
 import { exportDialogueScript } from "../tools.js"
 import { lintChapter } from "../linter.js"
+import {
+  buildQaBoard,
+  filterQaFindings,
+  qaBlockingFindings,
+  qaExportOverrideNote,
+  qaFindingBox,
+  qaReviewSeverityLabels,
+  qaReviewStates,
+  qaReviewStateLabels,
+  qaReviewSummary,
+} from "../qa-review.js"
 import { desktop } from "../native.js"
 
 export function setupExports({
@@ -19,6 +30,9 @@ export function setupExports({
   readTranslationSettings,
   isNativeReady,
   commitLiveForm,
+  checkpoint,
+  render,
+  qaReview,
   notify,
 }) {
   const exportButtons = [...document.querySelectorAll("[data-export]")]
@@ -58,7 +72,9 @@ export function setupExports({
 
   const preflightDialog = byId("preflight-dialog")
   let pendingExport
-  function exportIssues(pages) {
+  // Everything an export needs that is not a linter finding: unplaced lines, translation jobs and
+  // overflowing boxes. They carry no review state because the fix is an edit, not a decision.
+  function collectPageIssues(pages) {
     const issues = []
     const settings = readTranslationSettings()
     const signature = translationSignature(settings)
@@ -97,65 +113,214 @@ export function setupExports({
           })
       }
     }
-    const qa = lintChapter(pages, {
-      glossaryText: settings.glossary ?? "",
-      sourceLanguage: settings.source ?? "Japanese",
-      targetLanguage: settings.target ?? "Vietnamese",
-      maxIssues: 40,
-    })
-    for (const item of qa.issues) {
-      if (item.severity !== "warning") continue
-      const page = pages[item.pageIndex - 1]
-      const box = page?.boxes.find((b) => b.id === item.boxId)
-      issues.push({
-        page,
-        box,
-        text: `${item.pageName} · QA: ${item.message}`,
-      })
-    }
     return issues
   }
 
-  function showPreflight(issues, action) {
-    pendingExport = action
-    byId("continue-export").hidden = !action
-    byId("preflight-summary").textContent = issues.length
-      ? `Có ${issues.length} mục cần kiểm tra.`
-      : "Các trang đã sẵn sàng để xuất."
+  function lintPages(pages) {
+    const settings = readTranslationSettings()
+    return lintChapter(pages, {
+      glossaryText: settings.glossary ?? "",
+      sourceLanguage: settings.source ?? "Japanese",
+      targetLanguage: settings.target ?? "Vietnamese",
+      maxIssues: 200,
+    })
+  }
+
+  // --- QA triage board -------------------------------------------------------------------------
+  // The board is the linter's output joined with the review decisions stored on the project. The
+  // linter only runs when the box text can have changed; a decision re-renders the same run.
+  const filters = { state: "all", severity: "all", page: "all", type: "all" }
+  let boardLint = { total: 0, byType: {}, issues: [] }
+  let board = buildQaBoard(boardLint)
+  let boardPages = []
+  let pageIssues = []
+
+  function prepareBoard(pages) {
+    commitLiveForm?.()
+    const lint = lintPages(pages)
+    // Re-running the linter is the only thing that expires a decision, and a capped run proves
+    // nothing about the rows it did not list, so `reconcileQaReview` keeps them.
+    qaReview?.reconcile?.(lint)
+    return { lint, issues: collectPageIssues(pages), board: buildQaBoard(lint, qaReview?.review?.()) }
+  }
+
+  function preflightText() {
+    if (pageIssues.length) return `Có ${pageIssues.length} mục cần kiểm tra ngoài QA.`
+    if (board.counts.total) return "Không có lỗi trang, câu chưa đặt hay chữ tràn khung."
+    return "Các trang đã sẵn sàng để xuất."
+  }
+
+  function paintBoard() {
+    board = buildQaBoard(boardLint, qaReview?.review?.())
+    renderFilters()
+    renderRows()
+    const continueButton = byId("continue-export")
+    continueButton.hidden = !pendingExport
+    continueButton.textContent = board.counts.blocking ? "Duyệt cảnh báo & xuất" : "Vẫn xuất"
+  }
+
+  function renderFilters() {
+    const selects = [
+      ["qa-filter-state", "state", "Mọi trạng thái", board.options.states],
+      ["qa-filter-severity", "severity", "Mọi mức độ", board.options.severities],
+      ["qa-filter-page", "page", "Mọi trang", board.options.pages],
+      ["qa-filter-type", "type", "Mọi loại", board.options.types],
+    ]
+    for (const [id, key, allLabel, options] of selects) {
+      const choices = [{ value: "all", label: allLabel }, ...options]
+      const select = byId(id)
+      select.replaceChildren(
+        ...choices.map(({ value, label }) => {
+          const option = document.createElement("option")
+          option.value = String(value)
+          option.textContent = label
+          return option
+        }),
+      )
+      // A filter whose value no longer exists in the chapter falls back to "all", so the board can
+      // never be left showing nothing without a reason.
+      if (!choices.some(({ value }) => String(value) === String(filters[key]))) filters[key] = "all"
+      select.value = String(filters[key])
+      select.onchange = () => {
+        filters[key] = select.value
+        renderRows()
+      }
+    }
+  }
+
+  function renderRows() {
+    const visible = filterQaFindings(board.findings, filters)
+    byId("preflight-summary").textContent = preflightText()
+    byId("qa-summary").textContent = qaReviewSummary(board.counts, visible.length)
     byId("preflight-issues").replaceChildren(
-      ...issues.map((issue) => {
-        const li = document.createElement("li")
-        li.append(
-          listButton(issue.text, () => {
-            preflightDialog.close()
-            location.hash = "editor"
-            if (issue.page) selectPage(issue.page)
-            if (issue.box) selectBox(issue.box)
-            if (!issue.page)
-              byId("queue-section").scrollIntoView({ block: "nearest" })
-            status(issue.text)
-          }),
-        )
-        return li
+      ...pageIssues.map(pageIssueRow),
+      ...visible.map(qaFindingRow),
+    )
+  }
+
+  function pageIssueRow(issue) {
+    const li = document.createElement("li")
+    li.append(
+      listButton(issue.text, () => {
+        preflightDialog.close()
+        location.hash = "editor"
+        if (issue.page) selectPage(issue.page)
+        if (issue.box) selectBox(issue.box)
+        if (!issue.page)
+          byId("queue-section").scrollIntoView({ block: "nearest" })
+        status(issue.text)
       }),
     )
+    return li
+  }
+
+  function revealFinding(finding) {
+    preflightDialog.close()
+    location.hash = "editor"
+    const page = boardPages[finding.pageIndex - 1]
+    if (page) selectPage(page)
+    const box = qaFindingBox(boardPages, finding)
+    if (box) selectBox(box)
+    status(finding.message)
+  }
+
+  function qaFindingRow(finding) {
+    const row = document.createElement("li")
+    row.className = "qa-finding"
+    row.dataset.state = finding.state
+    const severity = qaReviewSeverityLabels[finding.severity] ?? finding.severity
+    row.append(
+      listButton(
+        `${finding.pageName ?? `Trang ${finding.pageIndex}`} · ${severity} — ${finding.message}`,
+        () => revealFinding(finding),
+      ),
+    )
+    const stateSelect = document.createElement("select")
+    stateSelect.dataset.qaFinding = finding.id
+    stateSelect.setAttribute("aria-label", `Trạng thái rà soát: ${finding.message}`)
+    for (const state of qaReviewStates) {
+      const option = document.createElement("option")
+      option.value = state
+      option.textContent = qaReviewStateLabels[state]
+      stateSelect.append(option)
+    }
+    stateSelect.value = finding.state
+    const noteInput = document.createElement("input")
+    noteInput.type = "text"
+    noteInput.value = finding.note
+    noteInput.placeholder = "Lý do hoặc ghi chú…"
+    noteInput.dataset.qaFinding = finding.id
+    noteInput.setAttribute("aria-label", `Ghi chú rà soát: ${finding.message}`)
+    const error = document.createElement("p")
+    error.className = "qa-error"
+    error.setAttribute("role", "alert")
+    const save = () => {
+      const result = qaReview?.set?.(finding.id, { state: stateSelect.value, note: noteInput.value })
+      if (result?.error) {
+        error.textContent = result.error
+        return
+      }
+      error.textContent = ""
+      row.dataset.state = stateSelect.value
+      paintBoard()
+    }
+    stateSelect.onchange = save
+    noteInput.onchange = save
+    const controls = document.createElement("div")
+    controls.className = "qa-finding-controls"
+    controls.append(stateSelect, noteInput)
+    if (finding.suggestion) {
+      controls.append(
+        listButton("Áp dụng & tiếp", () => applySuggestion(finding), `Áp dụng gợi ý: ${finding.message}`),
+      )
+    }
+    row.append(controls, error)
+    return row
+  }
+
+  function applySuggestion(finding) {
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    const box = qaFindingBox(boardPages, finding)
+    if (!box || typeof finding.suggestion !== "string" || finding.suggestion === box.text) return
+    commitLiveForm?.()
+    checkpoint(undefined, { label: "Áp gợi ý QA", kind: "qa" })
+    box.text = finding.suggestion
+    qaReview?.set?.(finding.id, { state: "fixed", note: finding.note })
+    render()
+    // The box is fixed, so the next run no longer reports it: re-linting retires the row instead
+    // of leaving a decision on screen for a finding that is gone.
+    boardLint = lintPages(boardPages)
+    qaReview?.reconcile?.(boardLint)
+    paintBoard()
+    status("Đã sửa khung và đánh dấu mục QA là đã xử lý.")
+  }
+
+  function showBoard(pages, prepared, action) {
+    boardPages = pages
+    pageIssues = prepared.issues
+    boardLint = prepared.lint
+    pendingExport = action ?? null
+    paintBoard()
     preflightDialog.showModal()
   }
 
   function requestExport(pages, action) {
     if (projectBusy()) return
-    commitLiveForm?.()
-    const issues = exportIssues(pages)
-    if (issues.length) showPreflight(issues, action)
+    const prepared = prepareBoard(pages)
+    if (prepared.issues.length || prepared.board.blocking.length) showBoard(pages, prepared, action)
     else action()
   }
   byId("check-export").onclick = () => {
-    commitLiveForm?.()
-    showPreflight(exportIssues(state.pages))
+    showBoard(state.pages, prepareBoard(state.pages), null)
   }
   byId("close-preflight").onclick = () => preflightDialog.close()
   byId("continue-export").onclick = () => {
     const action = pendingExport
+    // An export that goes ahead with open warnings records the decision on those rows, so the
+    // override is a note on the board and not a dismissed dialog.
+    for (const finding of qaBlockingFindings(board.findings)) {
+      qaReview?.set?.(finding.id, { state: "accepted", note: qaExportOverrideNote })
+    }
     preflightDialog.close()
     action?.()
   }

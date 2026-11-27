@@ -39,6 +39,7 @@ export function setupProjects({
   notify,
   onProjectSwitch,
   translationMemory,
+  qaReview,
 }) {
   const projectFile = byId("project-file")
   let projectName
@@ -100,6 +101,9 @@ export function setupProjects({
       fit: state.fit,
       // The pairs travel with the project: a reopened file can reuse them without the provider.
       translationMemory: translationMemory?.snapshot?.(),
+      // Same for the triage decisions: a reopened board shows what was reviewed, and the
+      // linter's next run only expires what is really gone.
+      qaReview: qaReview?.snapshot?.(),
     })
   }
 
@@ -257,8 +261,10 @@ export function setupProjects({
       state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
       // A file that predates the memory carries no pairs, so the store is replaced with whatever
-      // this project has: never with the previous project's pairs.
+      // this project has: never with the previous project's pairs. The triage decisions follow the
+      // same rule.
       translationMemory?.replace?.(project.translationMemory)
+      qaReview?.replace?.(project.qaReview)
       state.zoom = null
       state.selectedBoxIds?.clear()
       updateFitLabel()
@@ -397,6 +403,7 @@ export function setupProjects({
     state.projectId = crypto.randomUUID()
     projectName = undefined
     translationMemory?.clear?.()
+    qaReview?.clear?.()
     generation++
     lastWebSnapshot = null
     savedKind = null

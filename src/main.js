@@ -18,6 +18,7 @@ import { compareMode, toggleCompare } from "./compare.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
 import { applyBoxText, boxLabel, boxTextError } from "./box-text.js"
 import { createTranslationMemoryStore } from "./translation-memory.js"
+import { createQaReviewStore } from "./qa-review.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -56,6 +57,9 @@ const ownedUrls = new Set()
 // One translation memory per editing session: opening or creating a project replaces it, and the
 // project manifest is where its pairs are saved.
 const translationMemory = createTranslationMemoryStore()
+// The QA triage decisions are per project for the same reason: a reopened file restores the board
+// exactly as it was left, and a new project starts with an empty one.
+const qaReview = createQaReviewStore()
 const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
 const overlays = byId("overlays")
@@ -2109,6 +2113,7 @@ const projects = setupProjects({
   registerFontName,
   renderFontOptions,
   translationMemory,
+  qaReview,
   onProjectSwitch: () => {
     chat?.syncProjectSession()
     translation.refreshGlossaryStatus()
@@ -2133,6 +2138,7 @@ setupTasks(byId)
 setupOcr(shared)
 setupExports({
   ...shared, selectPage, selectBox, listButton,
+  qaReview,
   readTranslationSettings: translation.settings,
   isNativeReady: () => projects.ready,
   commitLiveForm: commitLiveFormCheckpoint,

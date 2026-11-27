@@ -534,6 +534,13 @@
   <dialog id="preflight-dialog">
     <h2>Rà trước khi xuất</h2>
     <p id="preflight-summary" class="muted"></p>
+    <div id="qa-filters">
+      <label class="field" for="qa-filter-state">Trạng thái<select id="qa-filter-state"></select></label>
+      <label class="field" for="qa-filter-severity">Mức độ<select id="qa-filter-severity"></select></label>
+      <label class="field" for="qa-filter-page">Trang<select id="qa-filter-page"></select></label>
+      <label class="field" for="qa-filter-type">Loại<select id="qa-filter-type"></select></label>
+    </div>
+    <p id="qa-summary" class="muted" role="status"></p>
     <ol id="preflight-issues" class="box-list"></ol>
     <div class="form-actions">
       <button type="button" id="close-preflight" class="button">Đóng</button>
