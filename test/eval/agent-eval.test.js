@@ -225,7 +225,7 @@ test("the simulated provider refuses real endpoints and detects extra or unused 
     () => provider.fetch("http://localhost:11434/v1/chat/completions", { method: "POST", body: "{}" }),
     /unexpected provider request #2/,
   )
-  provider.assertConsumed()
+  assert.throws(() => provider.assertConsumed(), { code: EVAL_NETWORK_BLOCKED })
 
   const unused = createSimulatedProvider({
     id: "unused",
@@ -257,6 +257,17 @@ test("an unused or missing simulated response fails a case instead of passing si
   const truncatedCase = caseById(missingReport, "openai-agent-update-boxes")
   assert.equal(truncatedCase.status, "fail")
   assert.match(truncatedCase.failures.join("\n"), /unexpected provider request #3 to http:\/\/localhost:11434\/v1\/chat\/completions/)
+})
+
+test("a step count different from the golden expectation fails even within the budget", async (t) => {
+  const folder = await tempCorpus(t, (manifest) => {
+    const target = manifest.cases.find(item => item.id === "gemini-boxes-retry-golden")
+    target.expected.steps = 1
+  })
+  const report = await evaluateAgentCorpus({ fixturesDirectory: folder })
+  const result = caseById(report, "gemini-boxes-retry-golden")
+  assert.equal(result.status, "fail")
+  assert.ok(result.failures.includes("used 2 step(s) but expected 1"))
 })
 
 test("cases without usage metadata report tokens unavailable instead of a made-up cost", async (t) => {

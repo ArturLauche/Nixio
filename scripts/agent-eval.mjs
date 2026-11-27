@@ -119,8 +119,18 @@ export function createSimulatedProvider({ id = "case", provider, script = [] } =
   const calls = []
   const usage = { promptTokens: 0, outputTokens: 0, responsesWithUsage: 0 }
   let cursor = 0
+  let violation = null
 
   async function simulatedFetch(url, init = {}) {
+    try {
+      return serve(url, init)
+    } catch (error) {
+      violation ??= error
+      throw error
+    }
+  }
+
+  function serve(url, init) {
     const endpoint = assertAllowedEndpoint(provider, url)
     if (cursor >= script.length) {
       throw new Error(
@@ -158,6 +168,7 @@ export function createSimulatedProvider({ id = "case", provider, script = [] } =
     calls,
     usage,
     assertConsumed() {
+      if (violation) throw violation
       if (cursor < script.length) {
         const error = new Error(
           `Case "${id}" used ${cursor}/${script.length} simulated provider response(s): ` +
@@ -535,7 +546,7 @@ export async function evaluateCase(caseDef, { testRates = null } = {}) {
   if (!thrown && caseDef.expectError) {
     failures.push(`expected an error matching /${caseDef.expectError}/ but the case completed without one`)
   }
-  if (scriptError) failures.push(scriptError.message)
+  if (scriptError && (scriptError !== thrown || expectedErrorMatched)) failures.push(scriptError.message)
 
   const metrics = thrown
     ? {
@@ -551,6 +562,9 @@ export async function evaluateCase(caseDef, { testRates = null } = {}) {
     : buildMetrics(caseDef, { translated, turn, steps })
 
   if (!thrown && !caseDef.expectError) failures.push(...gateFailures(caseDef, metrics))
+  if (caseDef.expected?.steps !== undefined && metrics.steps !== caseDef.expected.steps) {
+    failures.push(`used ${metrics.steps} step(s) but expected ${caseDef.expected.steps}`)
+  }
   if (Number.isFinite(caseDef.gates?.maxSteps) && metrics.steps > caseDef.gates.maxSteps) {
     failures.push(`used ${metrics.steps} step(s) but the case budget is ${caseDef.gates.maxSteps}`)
   }
