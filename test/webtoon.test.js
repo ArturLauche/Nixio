@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
+  CANVAS_LIMITS,
   findSmartSliceCuts,
   planVerticalStitch,
   smartSlicePageImage,
@@ -81,7 +82,7 @@ test("planVerticalStitch keeps legacy stacking and common width for normal pages
   const second = { name: "narrow.png", image: { naturalWidth: 400, naturalHeight: 900 } }
   const plan = planVerticalStitch([first, second])
   assert.equal(plan.width, 800)
-  assert.equal(plan.rowLimit, 16000)
+  assert.equal(plan.rowLimit, CANVAS_LIMITS.maxEdge)
   assert.equal(plan.chunks.length, 1)
   const [{ height, items }] = plan.chunks
   assert.equal(height, 3000)
@@ -227,6 +228,28 @@ test("stitchPagesVertically splits tall pages into bounded, contiguous output st
   assert.deepEqual([wideDraw[2], wideDraw[4], wideDraw[6], wideDraw[8]], [0, 2000, 0, 2000])
 })
 
+test("stitchPagesVertically enforces the page budget and shared canvas limits before allocating", async (t) => {
+  const { canvases } = installCanvasHarness(t)
+  const tall = { name: "tall.png", image: { naturalWidth: 800, naturalHeight: 20000 } }
+  const tail = { name: "tail.png", image: { naturalWidth: 800, naturalHeight: 500 } }
+  await assert.rejects(
+    stitchPagesVertically([tall, tail], { maxPages: 1 }),
+    /vượt giới hạn còn lại 1 trang/,
+  )
+  assert.equal(canvases.length, 0)
+
+  const wide = { name: "wide.png", image: { naturalWidth: 10000, naturalHeight: 10000 } }
+  const small = { name: "small.png", image: { naturalWidth: 1000, naturalHeight: 1000 } }
+  const files = await stitchPagesVertically([wide, small], { maxPixels: 2 * CANVAS_LIMITS.maxPixels })
+  assert.ok(files.length > 1)
+  assert.equal(canvases.length, files.length)
+  for (const canvas of canvases) {
+    assert.ok(canvas.width <= CANVAS_LIMITS.maxEdge)
+    assert.ok(canvas.height <= CANVAS_LIMITS.maxEdge)
+    assert.ok(canvas.width * canvas.height <= CANVAS_LIMITS.maxPixels)
+  }
+})
+
 test("stitchPagesVertically rejects invalid geometry before allocating a canvas", async (t) => {
   const { canvases } = installCanvasHarness(t)
   await assert.rejects(
@@ -293,6 +316,39 @@ test("smartSlicePageImage bounds the probe for very tall narrow pages", async (t
     covered += canvas.height
   }
   assert.equal(covered, 100000)
+})
+
+test("smartSlicePageImage bounds every produced slice to the shared canvas limits", async (t) => {
+  const { canvases } = installCanvasHarness(t, { probe: (width, height) => gutterPixels(width, height, 128) })
+  const image = { naturalWidth: 10000, naturalHeight: 10000 }
+  const files = await smartSlicePageImage({ name: "dense.png", image }, { targetHeight: 4000 })
+  assert.ok(files.length > 1)
+  assert.equal(canvases.length, files.length + 1)
+
+  const maxSliceHeight = Math.floor(CANVAS_LIMITS.maxPixels / image.naturalWidth)
+  assert.ok(maxSliceHeight < 4000)
+  let covered = 0
+  for (let i = 0; i < files.length; i++) {
+    const canvas = canvases[i + 1]
+    assert.equal(canvas.width, image.naturalWidth)
+    assert.ok(canvas.height <= maxSliceHeight)
+    assert.ok(canvas.height <= CANVAS_LIMITS.maxEdge)
+    assert.ok(canvas.width * canvas.height <= CANVAS_LIMITS.maxPixels)
+    assert.equal(canvas.draws[0][2], covered)
+    assert.equal(canvas.draws[0][4], canvas.height)
+    covered += canvas.height
+  }
+  assert.equal(covered, image.naturalHeight)
+
+  const allocated = canvases.length
+  await assert.rejects(
+    smartSlicePageImage(
+      { name: "oversized.png", image: { naturalWidth: 20000, naturalHeight: 1000 } },
+      { targetHeight: 1600 },
+    ),
+    /vượt giới hạn canvas/,
+  )
+  assert.equal(canvases.length, allocated)
 })
 
 test("smartSlicePageImage leaves pages close to the target height untouched", async (t) => {
