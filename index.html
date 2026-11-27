@@ -638,6 +638,21 @@
           <input id="chat-search-key" type="password" autocomplete="off">
         </label>
       </details>
+      <details class="chat-search-config" id="usage-panel">
+        <summary>Kế toán token &amp; chi phí</summary>
+        <p id="usage-summary" class="muted">Chưa có lượt gọi AI nào.</p>
+        <p id="usage-hint" class="muted">Giá do bạn tự nhập (USD trên 1 triệu token) — ứng dụng không tự áp giá của nhà cung cấp. Model chưa có giá vẫn được đếm token nhưng tính 0 $ và ghi “chưa đặt giá”.</p>
+        <div id="usage-models" class="usage-models"></div>
+        <div class="two-fields">
+          <label class="field" for="usage-budget-limit">Hạn mức (USD)
+            <input id="usage-budget-limit" type="number" min="0" step="0.01" value="0">
+          </label>
+          <label class="field" for="usage-budget-warn">Cảnh báo ở (%)
+            <input id="usage-budget-warn" type="number" min="1" max="100" step="1" value="80">
+          </label>
+        </div>
+        <button type="button" id="usage-reset" class="button full">Đặt lại kế toán</button>
+      </details>
       <div class="chat-chips" role="group" aria-label="Gợi ý nhanh">
         <button type="button" class="button" data-chat-prompt="Đọc các khung thoại trên trang hiện tại, tra web các tên riêng hoặc thuật ngữ tiếng Nhật/nước ngoài cần xác minh rồi đề xuất bổ sung vào Bảng thuật ngữ.">Tra thuật ngữ</button>
         <button type="button" class="button" data-chat-prompt="/autofit">Khớp tràn khung</button>
@@ -660,6 +675,7 @@
     <div class="chat-status-row">
       <p id="chat-status" class="chat-status muted" role="status"></p>
       <span id="chat-context-meter" class="chat-context-meter" hidden></span>
+      <span id="chat-usage" class="chat-usage" hidden></span>
       <span id="chat-stats" class="chat-stats muted" hidden></span>
     </div>
     <form id="chat-form" class="chat-composer">

@@ -602,3 +602,154 @@ test("ctrl+wheel keeps the image point under the cursor after zooming", async ()
   assert.ok(Math.abs((cursor.clientY - after.top) / after.height - before.y) < 1e-9, "y anchor holds")
   assert.ok(viewport.scrollLeft > 0 && viewport.scrollTop > 0, "the viewport scrolls to keep the anchor")
 })
+
+test("the token accounting panel shows the running cost, takes a price, warns and resets", async () => {
+  const { byId } = createById()
+  const { setupUsage } = await controllers("usage")
+  const { createUsageLedger } = await import("../src/token-accounting.js")
+  const store = new Map()
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+  }
+  const ledger = createUsageLedger({ storage, projectKey: () => "project-a", sessionId: "s1", now: () => 1000 })
+  const notices = []
+  setupUsage({ byId, ledger, notify: (notice) => notices.push(notice), pageId: () => "p1" })
+
+  const chip = byId("chat-usage")
+  assert.equal(chip.hidden, true, "nothing is shown before the first paid call")
+
+  // An unpriced model is still counted, and the row says so.
+  ledger.record({ provider: "gemini", model: "auto", pageId: "p1", tokens: { promptTokens: 1200, completionTokens: 300 } })
+  assert.equal(chip.hidden, false)
+  assert.match(chip.textContent, /1\.5k token/)
+  assert.match(chip.textContent, /0\.0000 \$/)
+  assert.match(byId("usage-summary").textContent, /Phiên này: 1\.5k token/)
+  const models = byId("usage-models")
+  assert.equal(models.children.length, 1)
+  assert.match(models.children[0].children[0].textContent, /chưa đặt giá/)
+
+  // Typing a price in the row stores it for the next call, and the row loses the "no price" note.
+  const inputs = models.children[0].children[1].children.map((label) => label.children[0])
+  inputs[0].value = "1"
+  inputs[1].value = "2"
+  inputs[2].value = "0.5"
+  inputs[0].onchange()
+  assert.equal(ledger.snapshot().prices["gemini:auto"].inputPerMTok, 1)
+  assert.doesNotMatch(byId("usage-models").children[0].children[0].textContent, /chưa đặt giá/)
+  ledger.record({ provider: "gemini", model: "auto", pageId: "p1", tokens: { promptTokens: 1000, completionTokens: 100 } })
+  // 1000 input at 1 $/M plus 100 output at 2 $/M.
+  assert.match(chip.textContent, /2\.6k token · 0\.0012 \$/)
+
+  // The budget input drives the ledger, and crossing the threshold raises one warning.
+  byId("usage-budget-limit").value = "0.001"
+  byId("usage-budget-limit").onchange()
+  assert.equal(ledger.snapshot().budget.limitUsd, 0.001)
+  ledger.record({ provider: "gemini", model: "auto", pageId: "p1", tokens: { promptTokens: 1000 } })
+  const budgetNotice = notices.find((notice) => notice.key === "usage-budget")
+  assert.ok(budgetNotice, "the threshold crossing is announced")
+  assert.equal(budgetNotice.kind, "error")
+  assert.match(budgetNotice.message, /Lượt gọi AI tiếp theo sẽ bị chặn/)
+  assert.equal(ledger.gate().blocked, true)
+
+  // Reset clears the spend but keeps the price table and the limit.
+  byId("usage-reset").onclick()
+  const snapshot = ledger.snapshot()
+  assert.equal(snapshot.totals.calls, 0)
+  assert.equal(snapshot.prices["gemini:auto"].outputPerMTok, 2)
+  assert.equal(snapshot.budget.limitUsd, 0.001)
+  assert.equal(ledger.gate().blocked, false)
+  assert.equal(chip.hidden, false, "a configured budget keeps the chip visible at zero spend")
+  assert.equal(notices.at(-1).key, "usage-reset")
+})
+
+test("a box translation books its usage per page, and a spent budget refuses the next batch", async () => {
+  const { byId } = createById()
+  const page = {
+    id: "p1",
+    name: "01.png",
+    file: { name: "01.png", type: "image/png", size: 100 },
+    boxes: [{ id: "b1", text: "こんにちは" }],
+    unplaced: [],
+  }
+  const state = { pages: [page], pageId: "p1", translating: false }
+  byId("translation-provider").value = "gemini"
+  byId("gemini-model").value = "gemini-3.1-flash-lite"
+  // The credential inputs are cleared when the vault scope binds at setup, so the key is typed after it.
+  byId("source-language").value = "Japanese"
+  byId("target-language").value = "Vietnamese"
+  byId("direction").value = "rtl"
+
+  const { createUsageLedger } = await import("../src/token-accounting.js")
+  const store = new Map()
+  const ledger = createUsageLedger({
+    storage: {
+      getItem: (key) => (store.has(key) ? store.get(key) : null),
+      setItem: (key, value) => store.set(key, String(value)),
+    },
+    projectKey: () => "project-a",
+    sessionId: "s1",
+    now: () => 1000,
+  })
+
+  const statuses = []
+  const notices = []
+  const originalFetch = globalThis.fetch
+  const originalFileReader = globalThis.FileReader
+  globalThis.FileReader = class {
+    readAsDataURL() {
+      this.result = "data:image/png;base64,AAAA"
+      queueMicrotask(() => this.onload())
+    }
+  }
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      candidates: [{
+        finishReason: "STOP",
+        content: { parts: [{ text: JSON.stringify({ lines: [{ id: "B1", text: "Xin chào" }] }) }] },
+      }],
+      usageMetadata: { promptTokenCount: 1500, candidatesTokenCount: 20 },
+    }),
+  })
+  try {
+    const { setupTranslation } = await controllers("translation")
+    setupTranslation({
+      ...baseArguments(byId, state),
+      selectedPage: () => page,
+      renderInspector() {},
+      renderCanvas() {},
+      pageForScript: () => null,
+      applyTranslation() {},
+      onSettingsChange() {},
+      notifyOverflowIfAny() {},
+      status: (message) => statuses.push(message),
+      notify: (notice) => notices.push(notice),
+      usageLedger: ledger,
+    })
+    // The vault scope binds during setup and clears both key fields, so the key is typed after it.
+    byId("gemini-key").value = "test-key"
+
+    // The user's price table decides what this call costs: 1500 input tokens at 1000 $/M.
+    ledger.setPrice("gemini", "gemini-3.1-flash-lite", { inputPerMTok: 1000, outputPerMTok: 0, cachedPerMTok: 0 })
+    await byId("translate-boxes").onclick()
+    assert.equal(page.boxes[0].text, "Xin chào")
+    const afterBox = ledger.snapshot({ pageId: "p1" })
+    assert.equal(afterBox.totals.calls, 1)
+    assert.equal(afterBox.totals.totalTokens, 1520)
+    assert.equal(afterBox.page.totalTokens, 1520)
+    assert.equal(afterBox.models[0].model, "gemini-3.1-flash-lite")
+    assert.equal(afterBox.totals.costUsd, 1.5)
+    assert.equal(afterBox.totals.unpricedCalls, 0)
+    // A limit the next call cannot afford refuses the whole batch before any page is sent.
+    ledger.setBudget({ limitUsd: 0.000001, warnPercent: 80 })
+    const callsBefore = ledger.snapshot().totals.calls
+    await byId("translate-all").onclick()
+    assert.equal(ledger.snapshot().totals.calls, callsBefore, "a refused batch books nothing")
+    assert.match(statuses.at(-1), /hạn mức chi phí AI/)
+    assert.ok(notices.some((notice) => notice.key === "usage-budget-stop"))
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.FileReader = originalFileReader
+  }
+})

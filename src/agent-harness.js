@@ -12,6 +12,7 @@ import {
 import { RepeatToolGuard } from "./agent-guards.js"
 import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { callProvider, providerCredentialsInMain, validateEndpointUrl } from "./provider-bridge.js"
+import { countCall, emptyTotals, estimatePromptChars, normalizeUsage } from "./token-accounting.js"
 
 export async function readSseEvents(body, onData) {
   const reader = body.getReader()
@@ -160,6 +161,7 @@ async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, sign
           usage = {
             promptTokens: Number(meta.promptTokenCount || 0),
             outputTokens: Number(meta.candidatesTokenCount || 0),
+            cachedTokens: Number(meta.cachedContentTokenCount || 0),
             totalTokens: Number(meta.totalTokenCount || 0),
           }
         }
@@ -285,6 +287,7 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
         usage = {
           promptTokens: Number(chunk.usage.prompt_tokens || 0),
           outputTokens: Number(chunk.usage.completion_tokens || 0),
+          cachedTokens: Number(chunk.usage.prompt_tokens_details?.cached_tokens || 0),
           totalTokens: Number(chunk.usage.total_tokens || 0),
         }
       }
@@ -345,6 +348,7 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
     ? {
       promptTokens: Number(payload.usage.prompt_tokens || 0),
       outputTokens: Number(payload.usage.completion_tokens || 0),
+      cachedTokens: Number(payload.usage.prompt_tokens_details?.cached_tokens || 0),
       totalTokens: Number(payload.usage.total_tokens || 0),
     }
     : null
@@ -384,7 +388,7 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
   }
 }
 
-export async function summarizeHistoryWithLlm({ history = [], settings, keepRecentMessages = 4, signal } = {}) {
+export async function summarizeHistoryWithLlm({ history = [], settings, keepRecentMessages = 4, signal, accounting = null } = {}) {
   const list = Array.isArray(history) ? history.filter((m) => m && typeof m.text === "string" && m.text.trim()) : []
   if (list.length <= keepRecentMessages + 1) {
     return compactChatHistory(list, { keepRecentMessages, force: true })
@@ -402,32 +406,35 @@ export async function summarizeHistoryWithLlm({ history = [], settings, keepRece
   ].join("\n")
 
   const isOpenAi = settings?.provider === "openai"
+  const summaryPrompt = "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio."
+  const summaryMessages = [
+    { role: "system", content: summaryPrompt },
+    { role: "user", content: `${transcript}\n\n---\n${directive}` },
+  ]
+  const summaryContents = [{ role: "user", parts: [{ text: summaryMessages[1].content }] }]
   const reply = isOpenAi
     ? await withLlmRetry(
-      () => callOpenAiStep({
-        settings,
-        messages: [
-          { role: "system", content: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio." },
-          { role: "user", content: `${transcript}\n\n---\n${directive}` },
-        ],
-        toolDefs: [],
-        signal,
-      }),
+      () => callOpenAiStep({ settings, messages: summaryMessages, toolDefs: [], signal }),
       { maxRetries: 1, signal },
     )
     : await withLlmRetry(
-      () => callGeminiStep({
-        settings,
-        systemPrompt: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio.",
-        contents: [{ role: "user", parts: [{ text: `${transcript}\n\n---\n${directive}` }] }],
-        toolDefs: [],
-        signal,
-      }),
+      () => callGeminiStep({ settings, systemPrompt: summaryPrompt, contents: summaryContents, toolDefs: [], signal }),
       { maxRetries: 1, signal },
     )
 
+  // The compaction call is a paid call like any step, so it enters the same ledger.
+  const usage = accounting?.record?.({
+    provider: isOpenAi ? "openai" : "gemini",
+    model: isOpenAi ? settings.llmModel : settings.model,
+    kind: "summary",
+    tokens: normalizeUsage({
+      usage: reply.usage,
+      promptChars: estimatePromptChars(isOpenAi ? summaryMessages : summaryContents) + (isOpenAi ? 0 : summaryPrompt.length),
+      completionChars: reply.text.length,
+    }),
+  }) ?? null
   const summary = stripReasoning(reply.text).answer.trim()
-  if (!summary) return compactChatHistory(list, { keepRecentMessages, force: true })
+  if (!summary) return { ...compactChatHistory(list, { keepRecentMessages, force: true }), usage }
   const checkpointMessage = {
     role: "assistant",
     compacted: true,
@@ -441,6 +448,7 @@ export async function summarizeHistoryWithLlm({ history = [], settings, keepRece
     llmSummarized: true,
     foldedMessages: older.length,
     charsSaved: Math.max(0, totalChars - nextChars),
+    usage,
   }
 }
 
@@ -459,6 +467,9 @@ export async function runAgentTurn({
   stream = false,
   signal,
   onEvent = () => {},
+  // Injected by the editor: `record(call)` books a paid call in the project ledger and `gate()` reads
+  // the soft budget. Absent in an offline run, where the turn still reports its own token totals.
+  accounting = null,
 }) {
   const promptText = String(userMessage || "").trim()
   if (!promptText) throw new Error("Hãy nhập câu hỏi hoặc yêu cầu cho Trợ lý AI.")
@@ -526,9 +537,22 @@ export async function runAgentTurn({
   let stepsUsed = 0
   let latestUsage = null
   let contextBudget = null
+  let turnUsage = emptyTotals()
+  let budgetStopped = false
 
   for (let step = 1; step <= maxSteps; step++) {
     signal?.throwIfAborted()
+
+    // The soft budget is a pre-flight gate, checked before every call: a turn that has already spent
+    // the project limit stops cleanly instead of paying for one more step.
+    const gate = accounting?.gate?.()
+    if (gate?.blocked) {
+      budgetStopped = true
+      finalAnswer = gate.message
+      onEvent({ type: "budget", message: gate.message, ...gate.status })
+      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      break
+    }
     stepsUsed = step
 
     // Replay-safe old tool-result pruning between steps (inspired by DeepSeek Harness).
@@ -573,7 +597,26 @@ export async function runAgentTurn({
       provider: isOpenAi ? "openai" : "gemini",
       model: isOpenAi ? settings.llmModel : settings.model,
     })
-    onEvent({ type: "usage", usage: latestUsage, budget: contextBudget })
+    // Tokens come from the provider answer when it reported them; only a missing count is estimated
+    // from the text size, and the estimate never sees the image bytes.
+    const call = accounting?.record?.({
+      provider: isOpenAi ? "openai" : "gemini",
+      model: isOpenAi ? settings.llmModel : settings.model,
+      kind: "chat",
+      tokens: normalizeUsage({
+        usage: reply.usage,
+        promptChars: estimatePromptChars(isOpenAi ? openAiMessages : geminiContents)
+          + (isOpenAi ? 0 : systemPrompt.length),
+        completionChars: reply.text.length,
+      }),
+    }) ?? null
+    if (call) turnUsage = countCall(turnUsage, call)
+    onEvent({
+      type: "usage",
+      usage: latestUsage,
+      budget: contextBudget,
+      accounting: call ? { call, turn: turnUsage } : null,
+    })
 
     const { thought, answer } = stripReasoning(reply.text)
     if (reply.thought) thoughts.push(reply.thought)
@@ -709,6 +752,8 @@ export async function runAgentTurn({
     prunedChars: totalPrunedChars,
     elapsedMs: Math.round(performance.now() - turnStart),
     usage: latestUsage,
+    usageTotals: turnUsage,
+    budgetBlocked: budgetStopped,
     contextBudget,
     todos: tools.getTodos?.() ?? [],
     plan: tools.getPlan?.() ?? null,
