@@ -244,7 +244,7 @@ function historyTargetFor(actionId) {
 // Pending form and nudge edits are committed before the target is resolved, so the jump lands on
 // the boundary of the action the user clicked, not on the state the pending edit created.
 function jumpToHistoryRow(actionId) {
-  commitLiveFormCheckpoint()
+  if (!prepareHistoryJump()) return false
   const target = historyTargetFor(actionId)
   if (!target) {
     status("Mốc này không còn trong lịch sử vì một nhánh chỉnh sửa mới đã thay thế nó. Hãy chọn mốc khác.", true)
@@ -256,7 +256,7 @@ function jumpToHistoryRow(actionId) {
 
 // The state before the oldest action has no row of its own, so the panel offers it directly.
 function jumpToHistoryStart() {
-  commitLiveFormCheckpoint()
+  if (!prepareHistoryJump()) return false
   return jumpHistory(HISTORY_START, "")
 }
 
@@ -267,7 +267,7 @@ function historyTime(at) {
   return `${date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })} ${time}`
 }
 
-function jumpHistory(id, label = "") {
+function prepareHistoryJump() {
   if (projectBusy()) {
     status("Chưa thể nhảy lịch sử khi đang có tác vụ khác chạy. Hãy đợi tác vụ xong rồi thử lại.", true)
     return false
@@ -280,6 +280,10 @@ function jumpHistory(id, label = "") {
   // moves, so a jump never drops what the user just typed and never leaves a delayed timer
   // pointing at a state from before the jump.
   commitLiveFormCheckpoint()
+  return true
+}
+
+function jumpHistory(id, label = "") {
   const result = history.jump(id, editorSnapshot())
   if (!result.ok) {
     status(
@@ -295,7 +299,7 @@ function jumpHistory(id, label = "") {
       ? "Đã trở về mốc mới nhất."
       : label
         ? `Đã quay lại trạng thái sau "${label}".`
-        : "Đã trở về trạng thái gốc, trước thao tác đầu tiên.",
+        : "Đã trở về mốc cũ nhất trong lịch sử.",
   )
   return true
 }
@@ -316,7 +320,7 @@ function syncHistoryPanel() {
     ? "Chưa có thao tác nào."
     : current
       ? `Hiện tại: sau "${current.label}"`
-      : "Đang ở trạng thái gốc."
+      : "Đang ở mốc lịch sử cũ nhất."
   byId("history-count").textContent = !rows.length
     ? ""
     : shown.length === rows.length
@@ -394,7 +398,7 @@ function toggleHistoryPanel(open = byId("history-panel").hidden) {
 // which action is chosen, never what that action means. Pending edits are committed first, so the
 // choice is made on the timeline the panel is about to show.
 function jumpToNewestMatch() {
-  commitLiveFormCheckpoint()
+  if (!prepareHistoryJump()) return false
   const rows = history.entries()
   const applied = rows.filter((row) => row.applied).length
   const row = history.entries({ query: byId("history-search").value })
@@ -404,7 +408,7 @@ function jumpToNewestMatch() {
     syncHistoryPanel()
     return status("Không còn mốc nào khác để nhảy tới trong lịch sử.", true)
   }
-  return jumpToHistoryRow(row.id)
+  return jumpHistory(historyJumpTarget(rows, row), row.label)
 }
 
 byId("history-toggle").onclick = () => toggleHistoryPanel()

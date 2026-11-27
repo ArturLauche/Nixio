@@ -176,9 +176,15 @@ test("the row under the playhead is the last applied one and cannot move it", ()
 
 test("a row jump is guarded by busy, gesture and the open form edit", () => {
   const jump = mainFunction("jumpHistory")
-  assert.match(jump, /if \(projectBusy\(\)\) \{[\s\S]*?return false/)
-  assert.match(jump, /if \(gestures\.hasGesture\(\)\) \{[\s\S]*?return false/)
-  assert.match(jump, /commitLiveFormCheckpoint\(\)/)
+  for (const [busy, gesturing, accepted] of [[true, false, false], [false, true, false], [false, false, true]]) {
+    let committed = 0
+    const prepare = new Function(
+      "projectBusy", "gestures", "status", "commitLiveFormCheckpoint",
+      mainFunction("prepareHistoryJump") + "\nreturn prepareHistoryJump",
+    )(() => busy, { hasGesture: () => gesturing }, () => {}, () => { committed++ })
+    assert.equal(prepare(), accepted)
+    assert.equal(committed, accepted ? 1 : 0)
+  }
   assert.match(jump, /history\.jump\(id, editorSnapshot\(\)\)/)
   assert.match(jump, /applyHistorySnapshot\(result\.snapshot\)/)
 
@@ -293,23 +299,23 @@ test("a row cut by a new branch resolves to nothing instead of jumping somewhere
 
 test("the click path commits pending edits before it resolves the row", () => {
   const jump = mainFunction("jumpToHistoryRow")
-  assert.ok(jump.indexOf("commitLiveFormCheckpoint()") < jump.indexOf("historyTargetFor(actionId)"))
+  assert.ok(jump.indexOf("if (!prepareHistoryJump()) return false") < jump.indexOf("historyTargetFor(actionId)"))
   assert.match(jump, /if \(!target\) \{[\s\S]*?status\(/)
   assert.match(jump, /syncHistoryPanel\(\)/)
   assert.match(jump, /jumpHistory\(target\.id, target\.label\)/)
 
-  // Enter reuses the same path, so a filtered choice cannot retarget a row either.
+  // Enter resolves the selected row against the full list after preparation.
   const enter = mainFunction("jumpToNewestMatch")
-  assert.ok(enter.indexOf("commitLiveFormCheckpoint()") < enter.indexOf("history.entries()"))
-  assert.match(enter, /jumpToHistoryRow\(row\.id\)/)
+  assert.ok(enter.indexOf("if (!prepareHistoryJump()) return false") < enter.indexOf("history.entries()"))
+  assert.match(enter, /jumpHistory\(historyJumpTarget\(rows, row\), row\.label\)/)
 })
 
 test("the oldest state has its own control and reports when it is already current", () => {
-  assert.match(markup, /<button type="button" id="history-start"[^>]*>Về trạng thái gốc<\/button>/)
+  assert.match(markup, /<button type="button" id="history-start"[^>]*>Về mốc cũ nhất<\/button>/)
   assert.match(main, /byId\("history-start"\)\.onclick = \(\) => jumpToHistoryStart\(\)/)
   assert.match(mainFunction("syncHistoryPanel"), /byId\("history-start"\)\.disabled = !rows\.length \|\| applied === 0/)
   assert.match(mainFunction("jumpToHistoryStart"), /jumpHistory\(HISTORY_START, ""\)/)
-  assert.match(mainFunction("jumpHistory"), /Đã trở về trạng thái gốc, trước thao tác đầu tiên\./)
+  assert.match(mainFunction("jumpHistory"), /Đã trở về mốc cũ nhất trong lịch sử\./)
 })
 
 test("a pending nudge is finalized before the next action, a jump and a keyboard undo", () => {
@@ -323,7 +329,7 @@ test("a pending nudge is finalized before the next action, a jump and a keyboard
   assert.match(commit, /checkpoint\(before, FORM_EDIT_META\)/)
 
   // Jump and keyboard undo both route through that commit, so no timer survives either.
-  assert.match(mainFunction("jumpHistory"), /commitLiveFormCheckpoint\(\)/)
+  assert.match(mainFunction("prepareHistoryJump"), /commitLiveFormCheckpoint\(\)/)
   assert.match(mainFunction("restoreHistory"), /commitLiveFormCheckpoint\(\)/)
 })
 
