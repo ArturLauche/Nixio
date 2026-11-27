@@ -68,6 +68,7 @@ export function setupChat({
   const panel = byId("chat-panel")
   const toggleBtn = byId("open-chat")
   const messagesEl = byId("chat-messages")
+  const jumpBtn = byId("chat-jump")
   const form = byId("chat-form")
   const input = byId("chat-input")
   const sendBtn = byId("chat-send")
@@ -240,9 +241,48 @@ export function setupChat({
     todoBar.hidden = false
   }
 
+  // Nixio #91: a long answer used to drag the transcript back to the end on every delta, so reading
+  // earlier messages during a turn was impossible. The tail is followed only while the reader is
+  // still at the bottom, and the jump control advertises what arrived while they read further up.
+  const bottomSlackPx = 40
+  let followingTail = true
+
+  function atTail() {
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= bottomSlackPx
+  }
+
+  function syncJumpControl() {
+    if (jumpBtn) jumpBtn.hidden = followingTail
+  }
+
+  // An explicit jump: the newest output was asked for, so the tail is pinned again.
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight
+    followingTail = true
+    syncJumpControl()
   }
+
+  // Streamed output never moves a reader who scrolled away from the tail.
+  function followTail() {
+    if (followingTail) messagesEl.scrollTop = messagesEl.scrollHeight
+  }
+
+  // A jump reports a scroll as well, so the flag is recomputed from the real distance instead of
+  // being assumed.
+  messagesEl.addEventListener("scroll", () => {
+    const tail = atTail()
+    if (tail === followingTail) return
+    followingTail = tail
+    syncJumpControl()
+  })
+
+  if (jumpBtn) {
+    jumpBtn.onclick = () => {
+      scrollToBottom()
+      input.focus()
+    }
+  }
+  syncJumpControl()
 
   function renderSystemNotice(text) {
     const el = document.createElement("div")
@@ -316,7 +356,7 @@ export function setupChat({
 
     card.append(head, pre, actions)
     container.append(card)
-    scrollToBottom()
+    followTail()
   }
 
   function promptInteractiveQuestion({ header, question, options = [], allowCustom = true, signal }) {
@@ -415,7 +455,7 @@ export function setupChat({
 
       target.append(card)
       statusEl.textContent = "AI đang chờ bạn chọn phương án…"
-      scrollToBottom()
+      followTail()
     })
   }
 
@@ -473,7 +513,7 @@ export function setupChat({
       card.append(head, pre, actions)
       target.append(card)
       statusEl.textContent = `Chờ duyệt thao tác ${name}…`
-      scrollToBottom()
+      followTail()
     })
   }
 
@@ -871,7 +911,7 @@ export function setupChat({
                 turnEl.append(streamThoughtEl)
               }
               streamThoughtPre.textContent = streamThought
-              scrollToBottom()
+              followTail()
             }
             if (event.text) {
               streamText += event.text
@@ -883,7 +923,7 @@ export function setupChat({
                   turnEl.append(streamBubble)
                 }
                 streamBubble.textContent = visible
-                scrollToBottom()
+                followTail()
               }
             }
           } else if (event.type === "usage") {
@@ -903,7 +943,7 @@ export function setupChat({
             const ref = createToolTraceCard(event)
             traceCards.set(event.id, ref)
             turnEl.append(ref.card)
-            scrollToBottom()
+            followTail()
           } else if (event.type === "tool_end") {
             const ref = traceCards.get(event.id)
             if (ref) {
@@ -932,7 +972,7 @@ export function setupChat({
                 if (linksList.childElementCount) ref.body.append(linksList)
               }
             }
-            scrollToBottom()
+            followTail()
           }
         },
       })
@@ -999,7 +1039,7 @@ export function setupChat({
       activeController = null
       activeTurnEl = null
       syncBusyControls()
-      scrollToBottom()
+      followTail()
       input.focus()
       onTurnEnd?.(settled)
     }

@@ -961,9 +961,19 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .chat-search-config { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); font-size: .76rem; }
 .chat-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
 .chat-chips .button { min-height: 24px; padding: 2px 7px; font-size: .72rem; background: var(--surface-2); }
+.chat-log { position: relative; flex: 1; min-height: 0; display: flex; }
 .chat-messages {
   flex: 1; overflow: auto; padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px;
+}
+.chat-jump {
+  position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
+  min-height: 24px; padding: 3px 10px; border-radius: 999px;
+  border-color: var(--accent-border); background: var(--accent-soft); color: var(--accent);
+  font-size: .74rem; box-shadow: var(--shadow-sm); white-space: nowrap;
+}
+.chat-jump:hover:not(:disabled) {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
 }
 .chat-turn { display: flex; flex-direction: column; gap: 6px; }
 .chat-msg {

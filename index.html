@@ -645,7 +645,10 @@
       </div>
       <ol id="chat-todo-list" class="chat-todo-list"></ol>
     </div>
-    <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+    <div class="chat-log">
+      <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+      <button type="button" id="chat-jump" class="button chat-jump" hidden>Có tin nhắn mới ↓</button>
+    </div>
     <div class="chat-status-row">
       <p id="chat-status" class="chat-status muted" role="status"></p>
       <span id="chat-context-meter" class="chat-context-meter" hidden></span>
