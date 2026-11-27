@@ -19,15 +19,23 @@ internal static class LocalOcr
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(arguments[0] == "--list-langs" ? 5 : 75));
-        try { await process.WaitForExitAsync(timeout.Token); }
+        string output;
+        string error;
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+            // A child that inherited the pipes can keep them open after the wrapper exits, so the
+            // drains must honour the same deadline instead of outliving it.
+            output = await stdout.WaitAsync(timeout.Token);
+            error = await stderr.WaitAsync(timeout.Token);
+        }
         catch (OperationCanceledException)
         {
-            process.Kill(true);
+            // The wrapper may already be gone when only a grandchild still holds the pipes open.
+            try { process.Kill(true); } catch (InvalidOperationException) { }
             await process.WaitForExitAsync();
             throw new TimeoutException("OCR vượt thời gian xử lý.");
         }
-        var output = await stdout;
-        var error = await stderr;
         if (process.ExitCode != 0) throw new InvalidOperationException("Tesseract: " + error.Trim());
         return output;
     }
