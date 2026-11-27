@@ -6,10 +6,11 @@ import {
   validateTranslationMemoryEntry,
 } from "./translation-memory.js"
 import { normalizeStyleGuide } from "./style-guide.js"
+import { DEFAULT_EXPORT_PROFILE_ID } from "./export-presets.js"
 
 export const projectExtension = ".khungthoai"
 export const projectPageLimit = 50
-export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes", "translation-glossary"]
+export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes", "translation-glossary", "export-profile"]
 
 const encoder = new TextEncoder()
 // The header stores the UTF-8 manifest length. The original image bytes follow in page order.
@@ -186,7 +187,7 @@ function projectStyleGuide(raw) {
 
 function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory, styleGuide }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
-  settings = { "translation-glossary": "", ...settings }
+  settings = { "translation-glossary": "", "export-profile": DEFAULT_EXPORT_PROFILE_ID, ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
       !Number.isInteger(currentPage) || (pages.length ? currentPage < 0 || currentPage >= pages.length : currentPage !== -1) ||

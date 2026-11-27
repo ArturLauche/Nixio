@@ -32,6 +32,7 @@ function sampleProject() {
       "target-language": "Vietnamese",
       "translation-notes": "Giữ nguyên tên riêng",
       "translation-glossary": "",
+      "export-profile": "tapas",
       "gemini-key": "never-store-this-key",
     },
     currentPage: 1,
@@ -69,14 +70,26 @@ test("a script-only project round-trips without a selected page", async () => {
 
 test("project reader rejects unknown versions, malformed metadata and incomplete image payloads", async () => {
   const file = writeProject(sampleProject())
-  const source = await file.text()
-  await assert.rejects(readProject(new Blob([source.replace('"version":2', '"version":9')])), /Phiên bản/)
-  await assert.rejects(readProject(new Blob([source.replace('"currentPage":1', '"currentPage":2')])), /không hợp lệ/)
-  await assert.rejects(readProject(new Blob([source.replace('"rotation":-30', '"rotation":999')])), /không hợp lệ/)
+  await assert.rejects(readProject(await patchManifest(file, (metadata) => { metadata.version = 9 })), /Phiên bản/)
+  await assert.rejects(readProject(await patchManifest(file, (metadata) => { metadata.currentPage = 2 })), /không hợp lệ/)
+  await assert.rejects(readProject(await patchManifest(file, (metadata) => { metadata.pages[0].boxes[0].rotation = 999 })), /không hợp lệ/)
   await assert.rejects(readProject(file.slice(0, -1)), /không hợp lệ/)
   await assert.rejects(readProject(new Blob([file, "trailing bytes"])), /không hợp lệ/)
   await assert.rejects(readProject(new Blob(["not a project"])), /không hợp lệ/)
 })
+
+// The header stores the manifest length as raw bytes, so editing the manifest text in place only
+// survives while those bytes happen to be ASCII. Patch the manifest and rebuild the header.
+async function patchManifest(file, mutate) {
+  const headerSize = 15
+  const length = new DataView(await file.slice(0, headerSize).arrayBuffer()).getUint32(11, true)
+  const metadata = JSON.parse(await file.slice(headerSize, headerSize + length).text())
+  mutate(metadata)
+  const manifest = new TextEncoder().encode(JSON.stringify(metadata))
+  const header = new Uint8Array(await file.slice(0, headerSize).arrayBuffer())
+  new DataView(header.buffer).setUint32(11, manifest.length, true)
+  return new Blob([header, manifest, file.slice(headerSize + length)])
+}
 
 test("version 2 persists independent cleanup strokes, presets and interrupted translation jobs", async () => {
   const project = sampleProject()
@@ -117,7 +130,7 @@ test("a malformed box stamp cannot be saved", () => {
   assert.throws(() => writeProject(project), /không hợp lệ/)
 })
 
-test("version 1 projects open with empty presets and glossary", async () => {
+test("version 1 projects open with empty presets, a default profile and an empty glossary", async () => {
   const project = sampleProject()
   const file = writeProject(project)
   const headerSize = 15
@@ -126,12 +139,15 @@ test("version 1 projects open with empty presets and glossary", async () => {
   metadata.version = 1
   delete metadata.presets
   delete metadata.settings["translation-glossary"]
+  delete metadata.settings["export-profile"]
   const manifest = new TextEncoder().encode(JSON.stringify(metadata))
   const header = new Uint8Array(await file.slice(0, headerSize).arrayBuffer())
   new DataView(header.buffer).setUint32(11, manifest.length, true)
   const oldFile = new Blob([header, manifest, file.slice(headerSize + length)])
   const opened = await readProject(oldFile)
   assert.equal(opened.settings["translation-glossary"], "")
+  // A file that predates export profiles opens with the original-size profile, never a missing one.
+  assert.equal(opened.settings["export-profile"], "goc")
   assert.deepEqual(opened.presets, [])
   assert.equal(opened.pages[0].boxes[0].text, project.pages[0].boxes[0].text)
 })

@@ -3,6 +3,12 @@ import { groupDialogue, isImageFile, readDialogueFile, saveFile } from "./io.js"
 import { setupLibrary } from "./library.js"
 import { matchDialogue, overlapScore, toCoordinates, toRectangle } from "./placement.js"
 import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "./project.js"
+import {
+  exportProfilePresets,
+  loadGlobalExportProfileId,
+  resolveExportProfile,
+  saveGlobalExportProfileId,
+} from "./export-presets.js"
 import { detectAllBubblesOnImage } from "./bubble.js"
 import {
   loadGlobalPresets,
@@ -73,6 +79,11 @@ const state = {
   styleGuide: null,
 }
 const projectSettings = projectSettingIds.map(byId)
+// The export profile select lists the shipped platform profiles, and a new project starts from the
+// profile the user picked last (saved globally, then overridden by whatever a project stores).
+const exportProfileField = byId("export-profile")
+exportProfileField?.replaceChildren(...exportProfilePresets.map(({ id, name }) => new Option(name, id)))
+if (exportProfileField) exportProfileField.value = loadGlobalExportProfileId()
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
 // A settings edit is named by the visible label the user actually changed, so the timeline reads
 // "Đổi cài đặt Hướng đọc" instead of a generic name.
@@ -121,6 +132,15 @@ const distributeLabels = { horizontal: "ngang", vertical: "dọc" }
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
+// Every export and the slice dialog read the profile from the project setting, falling back to the
+// global default when the field is missing.
+function activeExportProfile() {
+  try {
+    return resolveExportProfile(byId("export-profile")?.value || loadGlobalExportProfileId())
+  } catch {
+    return resolveExportProfile()
+  }
+}
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
 const resizeHandleNames = ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 
@@ -505,6 +525,11 @@ for (const field of projectSettings) {
     syncTranslationActions()
   })
 }
+
+// The project keeps its own profile, and the last choice becomes the default for new projects.
+byId("export-profile")?.addEventListener("change", (event) => {
+  saveGlobalExportProfileId(event.currentTarget.value)
+})
 
 function status(message, error = false) {
   editorStatus.textContent = message
@@ -1218,14 +1243,19 @@ byId("webtoon-stitch-run")?.addEventListener("click", async () => {
 byId("webtoon-slice-run")?.addEventListener("click", async () => {
   const page = selectedPage()
   if (!page || projectBusy()) return
-  const targetHeight = clamp(Math.round(Number(byId("webtoon-slice-height")?.value) || 1600), 600, 4000)
+  const profile = activeExportProfile()
+  const targetHeight = clamp(
+    Math.round(Number(byId("webtoon-slice-height")?.value) || profile.maxSliceHeight),
+    600,
+    4000,
+  )
   webtoonDialog?.close()
   commitLiveFormCheckpoint()
   state.processingNative = true
   renderPages()
   status(`Đang cắt thông minh trang ${page.name} theo rãnh trống…`)
   try {
-    const files = await smartSlicePageImage(page, { targetHeight })
+    const files = await smartSlicePageImage(page, { targetHeight, profile })
     if (!files.length) {
       status("Trang hiện tại đã đủ gọn, không cần cắt thêm.")
       return
@@ -2138,7 +2168,6 @@ setupOcr(shared)
 setupExports({
   ...shared, selectPage, selectBox, listButton,
   readTranslationSettings: translation.settings,
-  isNativeReady: () => projects.ready,
   commitLiveForm: commitLiveFormCheckpoint,
 })
 chat = setupChat({

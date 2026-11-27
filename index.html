@@ -599,9 +599,14 @@
   <dialog id="zip-dialog">
     <form method="dialog">
       <h2>Xuất toàn bộ trang</h2>
-      <label class="field" for="zip-format">Định dạng
-        <select id="zip-format"><option value="png">ZIP ảnh PNG</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+      <label class="field" for="export-profile">Hồ sơ xuất theo nền tảng
+        <select id="export-profile"></select>
       </label>
+      <p id="export-profile-summary" class="muted" role="status" aria-live="polite"></p>
+      <label class="field" for="zip-format">Định dạng
+        <select id="zip-format"><option value="profile">ZIP ảnh theo hồ sơ (chia mảnh)</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+      </label>
+      <p class="muted">Gói ảnh chia mảnh kèm <code>manifest.json</code> ghi thứ tự từng mảnh.</p>
       <div class="form-actions">
         <button value="cancel" class="button">Hủy</button>
         <button value="export" class="button primary">Tải ZIP</button>
