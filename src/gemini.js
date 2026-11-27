@@ -3,6 +3,7 @@ import { parseRetryAfterMs, retryableContentError, withLlmRetry } from "./llm-re
 import { extractJsonObject, readLines, readProviderJson, readRequestedTranslations } from "./llm-response.js"
 import { readModelOcrBox } from "./placement.js"
 import { callProvider } from "./provider-bridge.js"
+import { estimatePromptChars, normalizeUsage } from "./token-accounting.js"
 
 const modelOptions = {
   auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
@@ -37,7 +38,7 @@ function inlineImage(file) {
   })
 }
 
-async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800 }, image, prompt, pageData, schema, { expectedIds = null } = {}) {
+async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800, onUsage }, image, prompt, pageData, schema, { expectedIds = null } = {}) {
   const payload = {
     contents: [{ parts: [{ text: prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData) }, image] }],
     generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema },
@@ -59,13 +60,25 @@ async function requestLines({ key, models, modelIndex, report, signal, maxRetrie
           const payload = await readProviderJson(response, { label: "Gemini", signal })
           const candidate = payload.candidates?.[0]
           const finishReason = candidate?.finishReason
+          const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
+          // Every answered call is billed, including one that is about to be retried for a cut-off
+          // answer, so the usage is reported before any content check throws.
+          onUsage?.({
+            provider: "gemini",
+            model,
+            kind: "translate",
+            tokens: normalizeUsage({
+              usage: payload.usageMetadata,
+              promptChars: estimatePromptChars(prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData)),
+              completionChars: text.length,
+            }),
+          })
           // A cut-off candidate is transient, so it is retried; a safety or policy refusal is the
           // provider's terminal answer and must surface on the first attempt instead of spinning.
           if (finishReason === "MAX_TOKENS") throw retryableContentError("Gemini chưa xử lý hết nội dung trang.")
           if (finishReason && finishReason !== "STOP") {
             throw new Error("Gemini từ chối xử lý nội dung trang (" + finishReason + ").")
           }
-          const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
           if (!text) throw retryableContentError("Gemini không trả dữ liệu.")
           const lines = readLines(extractJsonObject(text, { label: "Gemini" }), { label: "Gemini" })
           // A missing, duplicated or blank translation belongs inside this bounded retry: validating it
@@ -127,6 +140,7 @@ async function recognizeImage(page, settings) {
     signal: settings.signal,
     maxRetries: settings.maxRetries,
     retryDelayMs: settings.retryDelayMs,
+    onUsage: settings.onUsage,
   }
   const image = await inlineImage(page.file)
   const recognized = await recognize(page.file, image, settings, request)
@@ -202,6 +216,7 @@ export async function translateBoxesGemini(page, boxes, settings) {
     signal: settings.signal,
     maxRetries: settings.maxRetries,
     retryDelayMs: settings.retryDelayMs,
+    onUsage: settings.onUsage,
   }
   const image = await inlineImage(page.file)
   const items = boxes.map((box, index) => ({ id: "B" + (index + 1), text: box.text }))

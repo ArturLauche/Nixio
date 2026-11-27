@@ -8,6 +8,7 @@ import {
 } from "./llm-response.js"
 import { readModelOcrBox } from "./placement.js"
 import { callProvider, validateEndpointUrl } from "./provider-bridge.js"
+import { estimatePromptChars, normalizeUsage } from "./token-accounting.js"
 
 // The endpoint guard lives with the transport adapter so the browser route and the desktop route
 // accept exactly the same base URLs; it stays exported here for the modules that already import it.
@@ -30,7 +31,7 @@ function fileToDataUrl(file) {
   })
 }
 
-async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800 }, messages, { expectedIds = null } = {}) {
+async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800, onUsage }, messages, { expectedIds = null } = {}) {
   const endpoint = validateEndpointUrl(baseUrl)
   const model = String(llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model (ví dụ: qwen2.5:7b, hy-mt2-manga, gpt-4o-mini).")
@@ -62,13 +63,25 @@ async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRe
       // is not the requested object, a cut-off answer and a malformed line list are all content errors.
       const payload = await readProviderJson(response, { label: "LLM", signal })
       const choice = payload.choices?.[0]
-      if (choice?.finish_reason === "length") {
-        throw retryableContentError("LLM trả nội dung bị cắt ngắn.")
-      }
       const content = choice?.message?.content
       const text = Array.isArray(content)
         ? content.filter((part) => part?.type === "text" && part.text).map((part) => part.text).join("")
         : String(content ?? "")
+      // A local server may omit `usage`; the prompt size is then the only signal, and the record is
+      // marked as an estimate. Images are billed by area, so their bytes are never counted.
+      onUsage?.({
+        provider: "openai",
+        model,
+        kind: "translate",
+        tokens: normalizeUsage({
+          usage: payload.usage,
+          promptChars: estimatePromptChars(messages),
+          completionChars: text.length,
+        }),
+      })
+      if (choice?.finish_reason === "length") {
+        throw retryableContentError("LLM trả nội dung bị cắt ngắn.")
+      }
       const lines = readLines(extractJsonObject(text))
       // A missing, duplicated or blank translation belongs inside this bounded retry: validating it
       // after the retry loop would end a whole batch on the first flaky answer.

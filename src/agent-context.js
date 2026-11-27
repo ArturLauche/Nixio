@@ -344,10 +344,14 @@ export function compactChatHistory(history = [], { keepRecentMessages = 6, maxTo
   }
 }
 
+export function estimateTokensFromChars(chars) {
+  const value = Number(chars)
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.max(1, Math.ceil(value / 3.6))
+}
+
 export function estimateTokens(text) {
-  const s = String(text || "")
-  if (!s) return 0
-  return Math.max(1, Math.ceil(s.length / 3.6))
+  return estimateTokensFromChars(String(text || "").length)
 }
 
 export function resolveContextLimit(provider, model = "") {
