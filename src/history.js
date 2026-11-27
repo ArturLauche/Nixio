@@ -1,10 +1,14 @@
+import { shareInpaintOrigins } from "./retouch.js"
+
 // Images and Files stay shared. Only editable data is copied into history.
 export function copyEditor(editor) {
   return {
     ...structuredClone({ ...editor, pages: undefined }),
-    pages: editor.pages.map(({ image, file, url, ...data }) => ({
-      ...structuredClone(data), image, file, url,
-    })),
+    pages: editor.pages.map(({ image, file, url, ...data }) => {
+      const copy = structuredClone(data)
+      shareInpaintOrigins(data.retouchStrokes, copy.retouchStrokes)
+      return { ...copy, image, file, url }
+    }),
   }
 }
 

@@ -69,7 +69,7 @@ test("paintRetouchStrokes renders paint and clone strokes, caches layer, and inv
   const page = {
     image: { naturalWidth: 100, naturalHeight: 100 },
     retouchStrokes: [
-      { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .2, y: .2 }, { x: .3, y: .3 }] },
+      { mode: "paint", size: .1, color: "#ffffff", opacity: .8, points: [{ x: .2, y: .2 }, { x: .25, y: .25 }, { x: .3, y: .3 }] },
       { mode: "clone", size: .1, offsetX: -.1, offsetY: .1, opacity: .5, points: [{ x: .5, y: .5 }] },
     ],
   }
@@ -86,9 +86,14 @@ test("paintRetouchStrokes renders paint and clone strokes, caches layer, and inv
   assert.equal(ops.length, opsAfterFirst)
   assert.equal(createdCanvases, canvasesAfterFirst)
 
-  // Popping a stroke invalidates the cache and re-renders.
-  page.retouchStrokes.pop()
+  page.retouchStrokes[0].points[1].y = .28
   assert.equal(paintRetouchStrokes(canvas, page), true)
   assert.equal(destBlits, 3)
   assert.ok(createdCanvases > canvasesAfterFirst)
+
+  const canvasesAfterEdit = createdCanvases
+  page.retouchStrokes.pop()
+  assert.equal(paintRetouchStrokes(canvas, page), true)
+  assert.equal(destBlits, 4)
+  assert.ok(createdCanvases > canvasesAfterEdit)
 })

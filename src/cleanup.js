@@ -6,39 +6,57 @@ export function applyAlphaExpand(alphaBytes, width, height, expand) {
   const dilate = expand > 0
   const temp = new Uint8Array(width * height)
   const output = new Uint8Array(width * height)
-  // Separable 1D horizontal then vertical min/max matches square 2D erosion/dilation in O(W*H*R).
-  for (let y = 0; y < height; y++) {
-    const row = y * width
-    for (let x = 0; x < width; x++) {
-      if (!dilate && (x < radius || x + radius >= width)) {
-        temp[row + x] = 0
-        continue
-      }
-      let value = dilate ? 0 : 255
-      const start = Math.max(0, x - radius)
-      const end = Math.min(width - 1, x + radius)
-      for (let xx = start; xx <= end; xx++) {
-        const sample = alphaBytes[row + xx]
-        value = dilate ? (sample > value ? sample : value) : (sample < value ? sample : value)
-      }
-      temp[row + x] = value
-    }
+  if (radius === 1) {
+    alphaPass3(alphaBytes, temp, width, height, 1, width, dilate)
+    alphaPass3(temp, output, height, width, width, 1, dilate)
+    return output
   }
-  for (let y = 0; y < height; y++) {
-    const row = y * width
-    if (!dilate && (y < radius || y + radius >= height)) continue
-    const start = Math.max(0, y - radius)
-    const end = Math.min(height - 1, y + radius)
-    for (let x = 0; x < width; x++) {
-      let value = dilate ? 0 : 255
-      for (let yy = start; yy <= end; yy++) {
-        const sample = temp[yy * width + x]
-        value = dilate ? (sample > value ? sample : value) : (sample < value ? sample : value)
-      }
-      output[row + x] = value
-    }
-  }
+  const deque = new Int32Array(Math.max(width, height))
+  alphaPass(alphaBytes, temp, width, height, 1, width, radius, dilate, deque)
+  alphaPass(temp, output, height, width, width, 1, radius, dilate, deque)
   return output
+}
+
+function alphaPass3(source, target, length, lines, stride, lineStride, dilate) {
+  for (let line = 0; line < lines; line++) {
+    const base = line * lineStride
+    for (let center = 1; center < length - 1; center++) {
+      const index = base + center * stride
+      const previous = source[index - stride]
+      const current = source[index]
+      const next = source[index + stride]
+      target[index] = dilate ? Math.max(previous, current, next) : Math.min(previous, current, next)
+    }
+    if (!dilate || !length) continue
+    const last = base + (length - 1) * stride
+    target[base] = length === 1 ? source[base] : Math.max(source[base], source[base + stride])
+    target[last] = length === 1 ? source[last] : Math.max(source[last - stride], source[last])
+  }
+}
+
+function alphaPass(source, target, length, lines, stride, lineStride, radius, dilate, deque) {
+  // The front is the strongest alpha in the current window. Each sample enters and leaves once.
+  for (let line = 0; line < lines; line++) {
+    const base = line * lineStride
+    let head = 0, tail = 0, next = 0
+    for (let center = 0; center < length; center++) {
+      const left = center - radius
+      const right = center + radius
+      while (head < tail && deque[head] < left) head++
+      while (next < length && next <= right) {
+        const value = source[base + next * stride]
+        while (head < tail) {
+          const previous = source[base + deque[tail - 1] * stride]
+          if (dilate ? previous > value : previous < value) break
+          tail--
+        }
+        deque[tail++] = next++
+      }
+      if (dilate || (left >= 0 && right < length)) {
+        target[base + center * stride] = source[base + deque[head] * stride]
+      }
+    }
+  }
 }
 
 // Stroke widths use the shorter image dimension, so masks survive zoom and export.

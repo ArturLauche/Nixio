@@ -2,6 +2,20 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import queue from "../desktop/task-queue.cjs"
 
+test("a failed worker startup rejects the job and leaves the queue usable", async () => {
+  const updates = []
+  let attempts = 0
+  const tasks = new queue.TaskQueue(() => {
+    if (++attempts === 1) throw new Error("worker startup failed")
+    return { call: async () => "complete", close() {} }
+  }, (event) => updates.push(event))
+  await assert.rejects(tasks.submit("first", "ocr", {}, new Uint8Array()), /worker startup failed/)
+  assert.equal(await tasks.submit("second", "png", {}, new Uint8Array()), "complete")
+  assert.deepEqual(updates.map(({ id, state }) => [id, state]), [
+    ["first", "queued"], ["first", "error"], ["second", "queued"], ["second", "running"], ["second", "done"],
+  ])
+})
+
 test("cancelling a queued job never starts it and the next task still runs", async () => {
   const updates = []
   const starts = []

@@ -75,17 +75,12 @@ byId("toggle-theme")?.addEventListener("click", () => {
 let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
+let nudgeSnapshot = null
+let nudgeTimer = null
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
-const boxFields = {
-  text: "box-text", size: "box-size", font: "box-font", color: "box-color",
-  align: "box-align", rotation: "box-rotation",
-  lineHeight: "box-line-height", strokeWidth: "box-stroke-width", strokeColor: "box-stroke-color",
-  shadowBlur: "box-shadow-blur", shadowColor: "box-shadow-color",
-  fillShape: "box-fill-shape", fillColor: "box-fill-color",
-}
 const resizeHandleNames = ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 
 function editorSnapshot() {
@@ -96,7 +91,20 @@ function editorSnapshot() {
   })
 }
 
+function commitNudgeCheckpoint() {
+  if (nudgeTimer) {
+    clearTimeout(nudgeTimer)
+    nudgeTimer = null
+  }
+  if (!nudgeSnapshot) return false
+  const before = nudgeSnapshot
+  nudgeSnapshot = null
+  checkpoint(before)
+  return true
+}
+
 function commitLiveFormCheckpoint() {
+  commitNudgeCheckpoint()
   if (!formEditSnapshot) return false
   const before = formEditSnapshot
   formEditSnapshot = null
@@ -116,6 +124,9 @@ function releaseUnusedImages() {
 
 function checkpoint(snapshot) {
   if (!snapshot) {
+    if (nudgeSnapshot) {
+      commitNudgeCheckpoint()
+    }
     if (formEditSnapshot) {
       const pending = formEditSnapshot
       formEditSnapshot = null
@@ -285,11 +296,12 @@ function syncProjectActions() {
 
 let chat
 function syncTranslationActions() {
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
+  const settings = translation.settings()
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
   byId("pages").querySelectorAll(".page-job").forEach((element, index) => {
     const page = state.pages[index]
     element.dataset.state = page.translationJob?.state ?? "pending"
-    element.textContent = translationLabel(page, translation.settings())
+    element.textContent = translationLabel(page, settings)
   })
   chat?.refreshModelBadge()
 }
@@ -319,6 +331,7 @@ function renderPages() {
   projects.refreshDirty()
   const current = selectedIndex()
   const count = state.pages.length
+  const settings = translation.settings()
   if (!state.importing && !state.openingProject) releaseUnusedImages()
   byId("page-count").textContent = count + " / " + pageLimit
   byId("page-indicator").textContent = current === -1 ? "Chưa có trang" : `Trang ${current + 1} / ${count}`
@@ -343,7 +356,7 @@ function renderPages() {
   syncToolControls()
   byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, translation.settings()).length
+  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
   byId("stop-translation").disabled = !state.translating
   renderPresets()
   byId("check-export").disabled = projectBusy()
@@ -366,7 +379,7 @@ function renderPages() {
     const job = document.createElement("span")
     job.className = "page-job"
     job.dataset.state = page.translationJob?.state ?? "pending"
-    job.textContent = translationLabel(page, translation.settings())
+    job.textContent = translationLabel(page, settings)
     li.append(button, up, down, remove, job)
     return li
   }))
@@ -1396,10 +1409,12 @@ document.addEventListener("keydown", (event) => {
     const stepPx = event.shiftKey ? 10 : 1
     const dx = (event.key === "ArrowRight" ? stepPx : event.key === "ArrowLeft" ? -stepPx : 0) / page.image.naturalWidth
     const dy = (event.key === "ArrowDown" ? stepPx : event.key === "ArrowUp" ? -stepPx : 0) / page.image.naturalHeight
-    commitLiveFormCheckpoint()
-    checkpoint()
+    if (formEditSnapshot) commitLiveFormCheckpoint()
+    if (!nudgeSnapshot) nudgeSnapshot = editorSnapshot()
     for (const item of targets) Object.assign(item, nudgeBox(item, dx, dy))
     renderCanvas()
+    if (nudgeTimer) clearTimeout(nudgeTimer)
+    nudgeTimer = setTimeout(commitNudgeCheckpoint, 600)
   }
 })
 
@@ -1407,9 +1422,13 @@ document.addEventListener("keyup", (event) => {
   if (event.key === " " && gestures.getSpaceHeld()) {
     gestures.setSpaceHeld(false)
   }
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+    commitNudgeCheckpoint()
+  }
 })
 window.addEventListener("blur", () => {
   if (gestures.getSpaceHeld()) gestures.setSpaceHeld(false)
+  commitNudgeCheckpoint()
 })
 
 const notifications = createNotificationCenter({ byId })
@@ -1629,6 +1648,7 @@ chat = setupChat({
   selectPage,
   commitLiveForm: commitLiveFormCheckpoint,
   readTranslationSettings: translation.settings,
+  onSkillChange: syncTranslationActions,
   registerFontName,
   renderFontOptions,
   restoreHistory,

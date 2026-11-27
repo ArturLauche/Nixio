@@ -121,12 +121,12 @@ export function redrawLayout(page, { cancellable = true } = {}) {
   const rectangles = boxes.map(cleanupRectangle)
   if (!rectangles.length) return emptyLayout
   const signature = JSON.stringify(rectangles.map(({ x, y, w, h }, index) => [x, y, w, h, boxes[index].cleanupStrokes, boxes[index].cleanupExpand]))
-  const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes), cleanupExpand: box.cleanupExpand }))
   const cached = cachedRedraw.get(page.image)
   if (cached?.signature === signature) {
     if (!cancellable) cached.cancellable = false
     return cached
   }
+  const masks = boxes.map((box) => ({ cleanupStrokes: structuredClone(box.cleanupStrokes), cleanupExpand: box.cleanupExpand }))
   if (cached?.cancellable && cached.pending) cached.superseded = true
   // Schedule native samples serially and keep the initial canvas paint independent of native I/O.
   const layout = { signature, patches: [], pending: null, cancellable, superseded: false }

@@ -92,3 +92,38 @@ test("stopping translation aborts the in-flight Gemini request", async (t) => {
     report: () => {}, signal: controller.signal,
   }), { name: "AbortError" })
 })
+
+test("translateImage retries transient 429/503 responses and succeeds", async (t) => {
+  let calls = 0
+  const reports = []
+  const restore = installMocks("data:image/png;base64,AAAA", async () => {
+    calls++
+    if (calls === 1) return { ok: false, status: 429, headers: new Headers({ "retry-after": "0" }) }
+    const text = calls === 2
+      ? JSON.stringify({ lines: [{ box_2d: [100, 100, 200, 300], text: "はい" }] })
+      : JSON.stringify({ lines: [{ id: "B1", text: "Vâng" }] })
+    return {
+      ok: true,
+      json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ text }] } }] }),
+    }
+  })
+  t.after(restore)
+
+  const page = { file: { name: "retry.png", type: "image/png", size: 128 } }
+  const result = await translateImage(page, {
+    key: "test-key",
+    model: "gemini-3.1-flash-lite",
+    source: "Japanese",
+    target: "Vietnamese",
+    direction: "rtl",
+    notes: "",
+    glossary: "",
+    context: [],
+    retryDelayMs: 5,
+    report: (msg) => reports.push(msg),
+  })
+
+  assert.equal(calls, 3)
+  assert.ok(reports.some((m) => m.includes("thử lại")))
+  assert.deepEqual(result, [{ id: "B1", box: [100, 100, 300, 200], source: "はい", text: "Vâng" }])
+})

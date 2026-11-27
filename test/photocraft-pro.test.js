@@ -68,7 +68,30 @@ test("cleanRawPixels whitens yellowed paper, deepens ink, and validates inputs",
   assert.ok(data[0] >= 245 && data[1] >= 245 && data[2] >= 245)
   const inkO = (16 * width + 15) * 4
   assert.ok(data[inkO] <= 20)
+  // Explicit strength: 0 must not be coerced to default 0.7 (skips denoise & sharpen).
+  const noisy = new Uint8ClampedArray(raw)
+  const midO = (4 * width + 4) * 4
+  noisy[midO] = 205
+  noisy[midO + 1] = 200
+  noisy[midO + 2] = 190
+  const zeroRes = cleanRawPixels(noisy, width, height, { strength: 0, denoise: true, sharpen: true })
+  const defaultRes = cleanRawPixels(noisy, width, height, { strength: 0.7, denoise: true, sharpen: true })
+  assert.notEqual(zeroRes.data[midO], defaultRes.data[midO])
   assert.throws(() => cleanRawPixels(new Uint8ClampedArray(10), 4, 4))
+})
+
+test("raw cleanup respects zero strength and ignores hidden RGB around visible pixels", () => {
+  const raw = new Uint8ClampedArray(9 * 9 * 4)
+  raw.set([120, 123, 125, 255, 145, 149, 154, 255, 220, 211, 194, 255], 4 * 40)
+  const hiddenWhite = new Uint8ClampedArray(raw)
+  for (let offset = 0; offset < raw.length; offset += 4) {
+    if (!raw[offset + 3]) hiddenWhite.fill(255, offset, offset + 3)
+  }
+  assert.deepEqual(cleanRawPixels(raw, 9, 9, { strength: 0 }).data, raw)
+  const black = cleanRawPixels(raw, 9, 9).data
+  const white = cleanRawPixels(hiddenWhite, 9, 9).data
+  assert.deepEqual(black.slice(160, 172), white.slice(160, 172))
+  assert.deepEqual(white.slice(0, 4), hiddenWhite.slice(0, 4))
 })
 
 test("validateRetouchStroke & paintRetouchStrokes support erase mode via destination-out", () => {
