@@ -17,7 +17,8 @@ const worker = path.join(root, "native", "out", rid, "native-worker")
 
 run(process.env.KHUNG_THOAI_DOTNET ?? "dotnet", [
   "publish", "native/KhungThoai.Redraw.csproj", "-c", "Release", "-r", rid,
-  "--self-contained", "-p:PublishSingleFile=true", "-p:PublishTrimmed=true", "-o", worker,
+  "--self-contained", "-p:PublishSingleFile=true", "-p:PublishTrimmed=true",
+  "-p:RestoreLockedMode=true", "-o", worker,
 ])
 
 if (process.env.KHUNG_THOAI_OCR_BUNDLE) {
@@ -36,7 +37,7 @@ if (mode === "app") {
     overwrite: true,
     out: path.join(root, "desktop-dist"),
     extraResource: [worker],
-    ignore: /^(\/(?:node_modules|native|scripts|src|test|desktop-dist|release-dist|release-stage|artifacts|\.git)(?:\/|$)|\/(?:package-lock\.json|index\.html|vite\.config\.js|.*\.md)$)/,
+    ignore: /^(\/(?:node_modules|native|scripts|src|test|desktop-dist|release-dist|release-stage|release-verify|artifacts|\.git)(?:\/|$)|\/(?:package-lock\.json|index\.html|vite\.config\.js|.*\.md)$)/,
   })
   paths.forEach((location) => console.log(location))
 }
