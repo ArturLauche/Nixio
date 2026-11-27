@@ -42,7 +42,7 @@ function abortedBeforeDispatchOutcome(call) {
   }
 }
 
-async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode = false, confirmBulkEdits = false, signal, onEvent }) {
+async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal, onEvent }) {
   if (signal?.aborted) return abortedBeforeDispatchOutcome(call)
 
   let frozenArgs
@@ -67,7 +67,10 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
   onEvent?.({ type: "tool_start", id: call.id, name: call.name, args: frozenArgs })
 
   const rawTimeout = tools.timeoutMs?.(call.name)
-  const needsHumanWait = rawTimeout === 0 || (confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs))
+  const approvalRequired = tools.needsApproval
+    ? tools.needsApproval(call.name, frozenArgs, { confirmBulkEdits, forceWriteApproval })
+    : Boolean(confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs) === true)
+  const needsHumanWait = rawTimeout === 0 || approvalRequired
   const timeoutMs = needsHumanWait ? 0 : (rawTimeout ?? 15000)
   const execSignal = fuseSignals(signal, timeoutMs)
 
@@ -78,6 +81,7 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
       allowWebSearch,
       planMode,
       confirmBulkEdits,
+      forceWriteApproval,
       signal: execSignal,
     })
   } catch (error) {
@@ -114,7 +118,7 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
  */
 export async function executeToolBatch(
   calls,
-  { tools, allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, maxParallel = 4, signal, onEvent } = {},
+  { tools, allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, maxParallel = 4, signal, onEvent } = {},
 ) {
   const limit = Math.max(1, Math.min(8, Math.floor(Number(maxParallel) || 4)))
   const results = new Array(calls.length)
@@ -136,6 +140,7 @@ export async function executeToolBatch(
         allowWebSearch,
         planMode,
         confirmBulkEdits,
+        forceWriteApproval,
         signal,
         onEvent,
       })
@@ -166,6 +171,7 @@ export async function executeToolBatch(
           allowWebSearch,
           planMode,
           confirmBulkEdits,
+          forceWriteApproval,
           signal,
           onEvent,
         })

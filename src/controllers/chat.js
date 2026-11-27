@@ -1,5 +1,5 @@
 import { runAgentTurn, summarizeHistoryWithLlm } from "../agent-harness.js"
-import { compactChatHistory } from "../agent-context.js"
+import { captureBoxSnapshot, compactChatHistory, computeBoxDiffs } from "../agent-context.js"
 import { parseSlashCommand } from "../agent-commands.js"
 import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkillPrefs } from "../agent-skills.js"
 import { createAgentTools } from "../agent-tools.js"
@@ -39,6 +39,7 @@ export function setupChat({
   state,
   byId,
   checkpoint,
+  editorSnapshot,
   render,
   selectedPage,
   selectedIndex,
@@ -60,6 +61,7 @@ export function setupChat({
   const sendBtn = byId("chat-send")
   const stopBtn = byId("chat-stop")
   const statusEl = byId("chat-status")
+  const contextMeterEl = byId("chat-context-meter")
   const statsEl = byId("chat-stats")
   const todoBar = byId("chat-todo-bar")
   const todoCount = byId("chat-todo-count")
@@ -401,13 +403,93 @@ export function setupChat({
     })
   }
 
+  let turnBeforeSnapshot = null
+  let turnCheckpointRecorded = false
+
+  function turnCheckpoint(snapshot) {
+    if (turnBeforeSnapshot) {
+      if (!turnCheckpointRecorded) {
+        turnCheckpointRecorded = true
+        checkpoint(turnBeforeSnapshot)
+      }
+      return
+    }
+    checkpoint(snapshot)
+  }
+
+  function updateContextMeter(budget) {
+    if (!contextMeterEl) return
+    if (!budget) {
+      contextMeterEl.hidden = true
+      return
+    }
+    const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+    contextMeterEl.textContent = `${budget.estimated ? "~" : ""}${budget.percent}% (${fmt(budget.usedTokens)}/${fmt(budget.limitTokens)})`
+    contextMeterEl.dataset.level = budget.level
+    contextMeterEl.title = budget.estimated
+      ? "Ước lượng mức sử dụng ngữ cảnh (gõ /compact nếu gần đầy)"
+      : "Mức sử dụng ngữ cảnh thực tế từ API (gõ /compact nếu gần đầy)"
+    contextMeterEl.hidden = false
+  }
+
+  function renderDiffCard(diffs, container) {
+    if (!diffs?.total) return
+    const card = document.createElement("details")
+    card.className = "chat-diff-card"
+    card.open = diffs.total <= 4
+    const summary = document.createElement("summary")
+    summary.textContent = `Tóm tắt thay đổi (${diffs.total} khung)`
+    const list = document.createElement("ul")
+    list.className = "chat-diff-list"
+    const clip = (s) => {
+      const clean = String(s || "").replace(/\s+/g, " ").trim()
+      return clean.length > 48 ? clean.slice(0, 48) + "…" : clean
+    }
+    for (const item of diffs.items) {
+      const li = document.createElement("li")
+      li.dataset.kind = item.kind
+      if (item.kind === "added") {
+        li.textContent = `+ Tr.${item.pageIndex}: "${clip(item.afterText)}"`
+      } else if (item.kind === "removed") {
+        li.textContent = `− Tr.${item.pageIndex}: "${clip(item.beforeText)}"`
+      } else if (item.beforeText !== item.afterText) {
+        li.textContent = `✎ Tr.${item.pageIndex}: "${clip(item.beforeText)}" → "${clip(item.afterText)}"`
+      } else {
+        li.textContent = `✎ Tr.${item.pageIndex}: cập nhật kiểu chữ "${clip(item.afterText)}"`
+      }
+      list.append(li)
+    }
+    if (diffs.total > diffs.items.length) {
+      const more = document.createElement("li")
+      more.textContent = `… và ${diffs.total - diffs.items.length} thay đổi khác.`
+      list.append(more)
+    }
+    card.append(summary, list)
+    if (restoreHistory) {
+      const actions = document.createElement("div")
+      actions.className = "form-actions"
+      const undoBtn = document.createElement("button")
+      undoBtn.type = "button"
+      undoBtn.className = "button"
+      undoBtn.textContent = "Hoàn tác cả lượt AI này"
+      undoBtn.onclick = () => {
+        restoreHistory("undo")
+        undoBtn.disabled = true
+        undoBtn.textContent = "Đã hoàn tác"
+      }
+      actions.append(undoBtn)
+      card.append(actions)
+    }
+    container.append(card)
+  }
+
   const tools = createAgentTools({
     state,
     byId,
     selectedPage,
     selectedIndex,
     selectPage,
-    checkpoint,
+    checkpoint: turnCheckpoint,
     render,
     commitLiveForm,
     readTranslationSettings,
@@ -632,11 +714,31 @@ export function setupChat({
     const traceCards = new Map()
     const planMode = Boolean(planModeInput?.checked)
     const confirmBulkEdits = Boolean(confirmBulkInput?.checked)
+    const beforeBoxes = captureBoxSnapshot(state.pages)
+    commitLiveForm?.()
+    turnBeforeSnapshot = editorSnapshot?.() ?? null
+    turnCheckpointRecorded = false
     activeController = new AbortController()
     sendBtn.disabled = true
     input.disabled = true
     stopBtn.hidden = false
     statusEl.textContent = planMode ? "Đang khảo sát & lập kế hoạch…" : "Đang suy nghĩ…"
+
+    let streamBubble = null
+    let streamText = ""
+    let streamThoughtEl = null
+    let streamThoughtPre = null
+    let streamThought = ""
+
+    const clearStreamPreview = () => {
+      streamBubble?.remove()
+      streamBubble = null
+      streamText = ""
+      streamThoughtEl?.remove()
+      streamThoughtEl = null
+      streamThoughtPre = null
+      streamThought = ""
+    }
 
     try {
       const result = await runAgentTurn({
@@ -650,11 +752,44 @@ export function setupChat({
         confirmBulkEdits,
         skillPrompt: readSkillPrompt(),
         maxSteps: 10,
+        stream: true,
         signal: activeController.signal,
         onEvent(event) {
           if (event.type === "step") {
+            clearStreamPreview()
             statusEl.textContent = `Bước ${event.step}/${event.maxSteps}…`
+          } else if (event.type === "delta") {
+            if (event.thought) {
+              streamThought += event.thought
+              if (!streamThoughtEl) {
+                streamThoughtEl = document.createElement("details")
+                streamThoughtEl.className = "chat-thought"
+                const sum = document.createElement("summary")
+                sum.textContent = "Đang suy luận…"
+                streamThoughtPre = document.createElement("pre")
+                streamThoughtEl.append(sum, streamThoughtPre)
+                turnEl.append(streamThoughtEl)
+              }
+              streamThoughtPre.textContent = streamThought
+              scrollToBottom()
+            }
+            if (event.text) {
+              streamText += event.text
+              const visible = streamText.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "").replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, "").trim()
+              if (visible) {
+                if (!streamBubble) {
+                  streamBubble = document.createElement("div")
+                  streamBubble.className = "chat-msg assistant streaming"
+                  turnEl.append(streamBubble)
+                }
+                streamBubble.textContent = visible
+                scrollToBottom()
+              }
+            }
+          } else if (event.type === "usage") {
+            updateContextMeter(event.budget)
           } else if (event.type === "retry") {
+            clearStreamPreview()
             statusEl.textContent = `Thử lại kết nối AI lần ${event.attempt}/${event.maxRetries} (${Math.round(event.delayMs / 100) / 10}s)…`
           } else if (event.type === "guard") {
             statusEl.textContent = `Phát hiện gọi lặp ${event.toolName} (${event.count}×), đang nhắc AI đổi hướng…`
@@ -663,6 +798,7 @@ export function setupChat({
           } else if (event.type === "pruned") {
             statusEl.textContent = `Đang tối ưu ngữ cảnh (-${event.charsSaved} ký tự)…`
           } else if (event.type === "tool_start") {
+            clearStreamPreview()
             statusEl.textContent = `Đang gọi công cụ ${event.name}…`
             const ref = createToolTraceCard(event)
             traceCards.set(event.id, ref)
@@ -701,10 +837,12 @@ export function setupChat({
         },
       })
 
+      clearStreamPreview()
       chatHistory = result.updatedHistory
       if (state.projectId) {
         saveProjectChatSession(state.projectId, { history: chatHistory, todos: result.todos })
       }
+      if (result.contextBudget) updateContextMeter(result.contextBudget)
       if (result.thought) {
         const thoughtDetails = document.createElement("details")
         thoughtDetails.className = "chat-thought"
@@ -720,6 +858,10 @@ export function setupChat({
       appendSafeTextWithLinks(assistantBubble, result.answer)
       turnEl.append(assistantBubble)
 
+      if (result.editsMade > 0) {
+        renderDiffCard(computeBoxDiffs(beforeBoxes, state.pages), turnEl)
+      }
+
       statusEl.textContent = result.toolTrace.length
         ? `Hoàn tất (${result.steps} bước · ${result.toolTrace.length} công cụ).`
         : "Hoàn tất."
@@ -734,7 +876,7 @@ export function setupChat({
         notify?.({
           kind: "success",
           title: "Trợ lý AI đã chỉnh sửa dự án",
-          message: `Đã thực hiện ${result.editsMade} thao tác chỉnh sửa. Bạn có thể hoàn tác bất cứ lúc nào.`,
+          message: `Đã thực hiện ${result.editsMade} thao tác chỉnh sửa (gộp thành 1 mốc Hoàn tác).`,
           key: "ai-edits",
           actions: restoreHistory
             ? [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }]
@@ -742,6 +884,7 @@ export function setupChat({
         })
       }
     } catch (error) {
+      clearStreamPreview()
       const stopped = activeController?.signal.aborted
       const errEl = document.createElement("div")
       errEl.className = "chat-msg error"
@@ -749,6 +892,8 @@ export function setupChat({
       turnEl.append(errEl)
       statusEl.textContent = stopped ? "Đã dừng." : "Gặp lỗi."
     } finally {
+      turnBeforeSnapshot = null
+      turnCheckpointRecorded = false
       activeController = null
       activeTurnEl = null
       sendBtn.disabled = false

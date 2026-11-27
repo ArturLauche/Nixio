@@ -323,3 +323,71 @@ export function compactChatHistory(history = [], { keepRecentMessages = 6, maxTo
     charsSaved: Math.max(0, totalChars - nextChars),
   }
 }
+
+export function estimateTokens(text) {
+  const s = String(text || "")
+  if (!s) return 0
+  return Math.max(1, Math.ceil(s.length / 3.6))
+}
+
+export function resolveContextLimit(provider, model = "") {
+  const m = String(model || "").toLowerCase()
+  if (provider !== "openai") return 128000
+  if (/gpt-4o|gpt-4\.1|gpt-5|gemini|claude|deepseek|qwen2\.5|qwen3/i.test(m)) return 128000
+  return 32768
+}
+
+export function computeContextBudget({ promptTokens = 0, fallbackChars = 0, provider = "gemini", model = "" } = {}) {
+  const limitTokens = resolveContextLimit(provider, model)
+  const hasReal = Number.isFinite(promptTokens) && promptTokens > 0
+  const usedTokens = hasReal ? Math.round(promptTokens) : Math.max(0, Math.ceil(fallbackChars / 3.6))
+  const percent = Math.min(100, Math.round((usedTokens / Math.max(1, limitTokens)) * 100))
+  const level = percent >= 85 ? "high" : percent >= 65 ? "warn" : "ok"
+  return { usedTokens, limitTokens, percent, level, estimated: !hasReal }
+}
+
+export function captureBoxSnapshot(pages = []) {
+  const map = new Map()
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i]
+    for (const box of page.boxes ?? []) {
+      map.set(`${page.id}:${box.id}`, {
+        pageIndex: i + 1,
+        pageName: page.name,
+        boxId: box.id,
+        text: box.text,
+        size: box.size,
+        font: box.font,
+        color: box.color,
+      })
+    }
+  }
+  return map
+}
+
+export function computeBoxDiffs(beforeMap, pages = [], maxItems = 12) {
+  const afterMap = captureBoxSnapshot(pages)
+  const diffs = []
+  for (const [key, after] of afterMap.entries()) {
+    const before = beforeMap.get(key)
+    if (!before) {
+      diffs.push({ kind: "added", pageIndex: after.pageIndex, pageName: after.pageName, boxId: after.boxId, afterText: after.text })
+    } else if (before.text !== after.text || before.size !== after.size || before.font !== after.font || before.color !== after.color) {
+      diffs.push({
+        kind: "modified",
+        pageIndex: after.pageIndex,
+        pageName: after.pageName,
+        boxId: after.boxId,
+        beforeText: before.text,
+        afterText: after.text,
+        styleChanged: before.size !== after.size || before.font !== after.font || before.color !== after.color,
+      })
+    }
+  }
+  for (const [key, before] of beforeMap.entries()) {
+    if (!afterMap.has(key)) {
+      diffs.push({ kind: "removed", pageIndex: before.pageIndex, pageName: before.pageName, boxId: before.boxId, beforeText: before.text })
+    }
+  }
+  return { total: diffs.length, items: diffs.slice(0, maxItems) }
+}

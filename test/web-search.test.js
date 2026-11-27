@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import zlib from "node:zlib"
 import desktopSearch from "../desktop/web-search.cjs"
 import {
   exceedsHtmlDepth,
@@ -22,8 +23,112 @@ test("SSRF URL guards reject HTTP, loopback, private IPs and local hostnames", (
     assert.equal(fn("https://printer.local/"), null)
     assert.equal(fn("file:///etc/passwd"), null)
   }
+  // IPv6 handling is desktop-only: src/web-search.js refuses every bracketed literal outright.
+  assert.equal(isSafePublicHttpsUrl("https://[2606:4700:4700::1111]/"), null)
+  const desktopGuard = desktopSearch.isSafePublicHttpsUrl
+  assert.equal(desktopGuard("https://[::1]/"), null)
+  assert.equal(desktopGuard("https://[::ffff:127.0.0.1]/"), null)
+  assert.equal(desktopGuard("https://[64:ff9b::7f00:1]/"), null)
+  assert.equal(desktopGuard("https://[2001:db8::1]/"), null)
+  assert.equal(desktopGuard("https://[fc00::1]/"), null)
+  assert.equal(desktopGuard("https://[fe80::1]/"), null)
+  assert.equal(desktopGuard("https://[2606:4700:4700::1111]/"), "https://[2606:4700:4700::1111]/")
   assert.equal(validateSearchEndpoint("http://localhost:8080/"), "http://localhost:8080")
   assert.throws(() => validateSearchEndpoint("http://evil.example.com"), /HTTPS hoặc HTTP cục bộ/)
+})
+
+test("desktop fetch pins resolved IPs, rejects internal DNS answers and re-checks every redirect hop", async () => {
+  const lookup = async (hostname) => {
+    if (hostname === "mixed.example.com") {
+      return [{ address: "93.184.216.34", family: 4 }, { address: "169.254.169.254", family: 4 }]
+    }
+    if (hostname === "nip.example.com") return [{ address: "127.0.0.1", family: 4 }]
+    if (hostname === "cdn.example.org") return [{ address: "203.0.114.9", family: 4 }]
+    return [{ address: "93.184.216.34", family: 4 }]
+  }
+  const requests = []
+  const request = async (url, { address }) => {
+    requests.push({ url, address })
+    if (url.startsWith("https://hop.example.com/start")) {
+      return { status: 302, location: "https://cdn.example.org/page" }
+    }
+    if (url.startsWith("https://hop.example.com/loop")) {
+      return { status: 301, location: "https://hop.example.com/loop" }
+    }
+    if (url.startsWith("https://hop.example.com/to-private")) {
+      return { status: 307, location: "https://nip.example.com/latest/meta-data" }
+    }
+    if (url.startsWith("https://hop.example.com/missing")) {
+      return { status: 404, location: null, text: "" }
+    }
+    if (url.startsWith("https://hop.example.com/bad-redirect")) {
+      return { status: 302, location: null }
+    }
+    if (url.startsWith("https://hop.example.com/empty")) {
+      return { status: 200, location: null, text: "" }
+    }
+    return { status: 200, location: null, text: "Nội dung công khai" }
+  }
+
+  // The socket goes to the resolved address, never to a name the resolver could re-point.
+  const page = await desktopSearch.fetchTextLimited("https://hop.example.com/start", { lookup, request })
+  assert.deepEqual(page, { url: "https://cdn.example.org/page", text: "Nội dung công khai" })
+  assert.deepEqual(requests.map((r) => r.address), ["93.184.216.34", "203.0.114.9"])
+
+  // A name answering with ANY internal record is refused before any request is sent.
+  const before = requests.length
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://mixed.example.com/", { lookup, request }),
+    /IP nội bộ/,
+  )
+  assert.equal(requests.length, before)
+
+  // Internal targets hidden behind a redirect hop are refused as well.
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://hop.example.com/to-private", { lookup, request }),
+    /IP nội bộ/,
+  )
+  assert.equal(requests.length, before + 1)
+  assert.equal(requests.at(-1).url, "https://hop.example.com/to-private")
+
+  await assert.rejects(desktopSearch.fetchTextLimited("https://hop.example.com/loop", { lookup, request }), /chuyển hướng/)
+  await assert.rejects(desktopSearch.fetchTextLimited("https://hop.example.com/missing", { lookup, request }), /mã lỗi 404/)
+  await assert.rejects(desktopSearch.fetchTextLimited("https://hop.example.com/bad-redirect", { lookup, request }), /chuyển hướng không hợp lệ/)
+  await assert.rejects(desktopSearch.fetchTextLimited("https://10.0.0.1/x", { lookup, request }), /HTTPS công khai/)
+
+  // Empty 2xx bodies are valid (and must not be confused with an error).
+  assert.deepEqual(
+    await desktopSearch.fetchTextLimited("https://hop.example.com/empty", { lookup, request }),
+    { url: "https://hop.example.com/empty", text: "" },
+  )
+
+  // A hop that times out (AbortError) surfaces as a readable timeout, not a raw abort.
+  const abortingRequest = async () => {
+    const error = new Error("The operation was aborted")
+    error.name = "AbortError"
+    throw error
+  }
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://hop.example.com/empty", { lookup, request: abortingRequest }),
+    /Hết thời gian chờ/,
+  )
+
+  assert.equal(await desktopSearch.resolvePublicAddress("93.184.216.34"), "93.184.216.34")
+  await assert.rejects(desktopSearch.resolvePublicAddress("169.254.169.254"), /IP nội bộ/)
+  await assert.rejects(desktopSearch.resolvePublicAddress("nip.example.com", { lookup }), /IP nội bộ/)
+})
+
+test("decodeBody handles gzip/deflate/brotli bodies and refuses decompression bombs", () => {
+  const text = "Nội dung tiếng Việt ".repeat(60)
+  assert.equal(desktopSearch.decodeBody(zlib.gzipSync(text), "gzip").toString("utf8"), text)
+  assert.equal(desktopSearch.decodeBody(zlib.deflateSync(text), "deflate").toString("utf8"), text)
+  assert.equal(desktopSearch.decodeBody(zlib.brotliCompressSync(text), "br").toString("utf8"), text)
+  assert.equal(desktopSearch.decodeBody(Buffer.from("plain"), "").toString("utf8"), "plain")
+  assert.equal(desktopSearch.decodeBody(Buffer.from("plain"), undefined).toString("utf8"), "plain")
+  assert.throws(
+    () => desktopSearch.decodeBody(zlib.gzipSync("x".repeat(4000)), "gzip", 64),
+    /giải nén/,
+  )
 })
 
 test("parseDuckDuckGoHtml unwraps result URLs, strips markup, and yields empty on bot challenge", () => {

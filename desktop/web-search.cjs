@@ -1,8 +1,13 @@
+const dns = require("node:dns")
+const https = require("node:https")
 const net = require("node:net")
+const zlib = require("node:zlib")
 
 const MAX_FETCH_BYTES = 512 * 1024
 const MAX_HTML_DEPTH = 512
+const MAX_REDIRECTS = 5
 const TIMEOUT_MS = 12000
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const USER_AGENT = "KhungThoai/1.0 (Manga Editor Research Harness)"
 const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
 
@@ -45,22 +50,33 @@ function truncateSafe(text, maxChars) {
 }
 
 function isPrivateIp(host) {
-  const clean = host.replace(/^\[|\]$/g, "").toLowerCase()
+  const clean = String(host || "").replace(/^\[|\]$/g, "").toLowerCase()
   const version = net.isIP(clean)
   if (version === 4) {
     const parts = clean.split(".").map(Number)
-    if (parts[0] === 10 || parts[0] === 127 || parts[0] === 0) return true
-    if (parts[0] === 169 && parts[1] === 254) return true
-    if (parts[0] === 192 && parts[1] === 168) return true
-    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
-    if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true
+    const [a, b, c] = parts
+    if (a === 0 || a === 10 || a === 127) return true
+    if (a === 169 && b === 254) return true
+    if (a === 172 && b >= 16 && b <= 31) return true
+    if (a === 192 && b === 168) return true
+    if (a === 100 && b >= 64 && b <= 127) return true
+    // Reserved / documentation / benchmark blocks are never legitimate web targets.
+    if (a === 192 && b === 0) return true
+    if (a === 198 && (b === 18 || b === 19)) return true
+    if (a === 198 && b === 51 && c === 100) return true
+    if (a === 203 && b === 0 && c === 113) return true
+    // Multicast, reserved and broadcast space.
+    if (a >= 224) return true
     return false
   }
   if (version === 6) {
-    if (clean === "::1" || clean === "::" || clean.startsWith("fc") || clean.startsWith("fd") || clean.startsWith("fe80")) {
-      return true
-    }
-    if (clean.startsWith("::ffff:")) return isPrivateIp(clean.slice(7))
+    // Global unicast only lives in 2000::/3. Everything below is loopback, IPv4-mapped /
+    // IPv4-compatible ("::"), ULA, link-local, site-local or multicast space.
+    if (clean.startsWith("::")) return true
+    if (/^(fe|fc|fd|ff)/.test(clean)) return true
+    if (clean.startsWith("2001:db8")) return true
+    // NAT64 well-known prefix can embed arbitrary IPv4 targets.
+    if (clean.startsWith("64:ff9b")) return true
     return false
   }
   return false
@@ -80,6 +96,37 @@ function isSafePublicHttpsUrl(rawUrl) {
   }
   if (isPrivateIp(host)) return null
   return parsed.href
+}
+
+function defaultLookup(hostname) {
+  return dns.promises.lookup(hostname, { all: true, verbatim: true })
+}
+
+/**
+ * Resolve a hostname and refuse to continue if ANY answer points into a private,
+ * loopback, link-local or otherwise reserved range. Returns the address to pin the
+ * socket to, so DNS cannot be re-pointed after the check (DNS-rebinding / TOCTOU).
+ */
+async function resolvePublicAddress(hostname, { lookup = defaultLookup } = {}) {
+  const clean = String(hostname || "").replace(/^\[|\]$/g, "").toLowerCase().trim()
+  if (!clean) throw new Error("Đường dẫn không có tên miền hợp lệ.")
+  if (net.isIP(clean)) {
+    if (isPrivateIp(clean)) throw new Error(`Chặn truy cập địa chỉ IP nội bộ: ${clean}.`)
+    return clean
+  }
+  let records
+  try {
+    records = await lookup(clean)
+  } catch {
+    throw new Error(`Không phân giải được tên miền ${clean}.`)
+  }
+  const addresses = (Array.isArray(records) ? records : [records])
+    .map((record) => (typeof record === "string" ? record : record?.address))
+    .filter((address) => typeof address === "string" && net.isIP(address) !== 0)
+  if (!addresses.length) throw new Error(`Không phân giải được tên miền ${clean}.`)
+  const blocked = addresses.find((address) => isPrivateIp(address))
+  if (blocked) throw new Error(`Tên miền ${clean} trỏ tới địa chỉ IP nội bộ (${blocked}).`)
+  return addresses[0]
 }
 
 function decodeHtmlEntities(text) {
@@ -161,35 +208,141 @@ function parseDuckDuckGoHtml(html, limit = 5) {
   return results
 }
 
-async function fetchTextLimited(url, { headers = {}, maxBytes = MAX_FETCH_BYTES } = {}) {
-  const safe = isSafePublicHttpsUrl(url)
-  if (!safe) throw new Error("Chỉ cho phép truy cập đường dẫn HTTPS công khai.")
-  const response = await fetch(safe, {
-    headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/json,text/plain;q=0.9", ...headers },
-    redirect: "follow",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  })
-  if (!isSafePublicHttpsUrl(response.url || safe)) {
-    throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
+function decodeBody(buffer, contentEncoding, maxBytes = MAX_FETCH_BYTES) {
+  const encoding = String(contentEncoding || "").toLowerCase().trim()
+  try {
+    if (encoding === "gzip" || encoding === "x-gzip") return zlib.gunzipSync(buffer, { maxOutputLength: maxBytes })
+    if (encoding === "deflate") return zlib.inflateSync(buffer, { maxOutputLength: maxBytes })
+    if (encoding === "br") return zlib.brotliDecompressSync(buffer, { maxOutputLength: maxBytes })
+  } catch {
+    throw new Error("Không giải nén được nội dung phản hồi từ máy chủ.")
   }
-  if (!response.ok) throw new Error(`Máy chủ trả mã lỗi ${response.status}.`)
-  const reader = response.body?.getReader()
-  if (!reader) return { url: response.url || safe, text: (await response.text()).slice(0, maxBytes) }
-  const chunks = []
-  let received = 0
-  while (received < maxBytes) {
-    const { done, value } = await reader.read()
-    if (done) break
-    const remaining = maxBytes - received
-    chunks.push(value.byteLength > remaining ? value.subarray(0, remaining) : value)
-    received += value.byteLength
-    if (received >= maxBytes) {
-      await reader.cancel().catch(() => {})
-      break
+  return buffer
+}
+
+/**
+ * Single request against an already-resolved address. Redirects are never followed
+ * implicitly: a 3xx is reported back so the caller can validate the next hop.
+ */
+function requestOnce(targetUrl, { address, headers = {}, maxBytes = MAX_FETCH_BYTES, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(targetUrl)
+    const isIpLiteral = net.isIP(parsed.hostname.replace(/^\[|\]$/g, "")) !== 0
+    let settled = false
+    const finish = (settle, value) => {
+      if (settled) return
+      settled = true
+      settle(value)
     }
+
+    const req = https.request({
+      method: "GET",
+      // Connect to the pinned IP, but keep TLS verification and the Host header on the
+      // original hostname so the certificate is still checked against the real name.
+      host: address,
+      port: parsed.port ? Number(parsed.port) : 443,
+      path: `${parsed.pathname}${parsed.search}`,
+      ...(isIpLiteral ? {} : { servername: parsed.hostname }),
+      headers: {
+        Host: parsed.host,
+        "User-Agent": USER_AGENT,
+        Accept: "text/html,application/json,text/plain;q=0.9",
+        // Ask for an uncompressed body; still decode below if the server ignores this.
+        "Accept-Encoding": "identity",
+        ...headers,
+      },
+      agent: false,
+      signal,
+    }, (res) => {
+      const status = res.statusCode || 0
+      const empty = (location) => finish(resolve, { status, location, text: "" })
+
+      if (REDIRECT_STATUSES.has(status)) {
+        // A malformed Location header must not throw inside the socket callback.
+        let location = null
+        try {
+          if (res.headers.location) location = new URL(res.headers.location, targetUrl).href
+        } catch {
+          location = null
+        }
+        res.destroy()
+        empty(location)
+        return
+      }
+      if (status < 200 || status >= 300) {
+        res.destroy()
+        empty(null)
+        return
+      }
+
+      const chunks = []
+      let received = 0
+      const collect = () => {
+        try {
+          const body = decodeBody(Buffer.concat(chunks), res.headers["content-encoding"], maxBytes)
+          finish(resolve, { status, location: null, text: body.toString("utf8") })
+        } catch (error) {
+          finish(reject, error)
+        }
+      }
+      res.on("data", (chunk) => {
+        if (received >= maxBytes) return
+        const remaining = maxBytes - received
+        chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk)
+        received += chunk.length
+        if (received >= maxBytes) {
+          collect()
+          res.destroy()
+        }
+      })
+      // An empty 2xx body simply ends the stream; collect() then yields "".
+      res.on("end", collect)
+      res.on("error", (error) => finish(reject, error))
+    })
+
+    req.on("error", (error) => finish(reject, error))
+    req.end()
+  })
+}
+
+async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYTES, signal, lookup, request } = {}) {
+  const resolveAddress = lookup ?? defaultLookup
+  const send = request ?? requestOnce
+
+  let current = isSafePublicHttpsUrl(rawUrl)
+  if (!current) throw new Error("Chỉ cho phép truy cập đường dẫn HTTPS công khai.")
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    // Validate + pin on EVERY hop: DNS is re-resolved after each redirect and the socket
+    // goes to that exact address, so an internal target cannot be reached via a rebound
+    // name or a redirect chain.
+    const address = await resolvePublicAddress(new URL(current).hostname, { lookup: resolveAddress })
+    const hopSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)])
+      : AbortSignal.timeout(TIMEOUT_MS)
+    let response
+    try {
+      response = await send(current, { address, headers, maxBytes, signal: hopSignal })
+    } catch (error) {
+      if (!signal?.aborted && (error?.name === "AbortError" || error?.name === "TimeoutError")) {
+        throw new Error("Hết thời gian chờ phản hồi từ máy chủ.")
+      }
+      throw error
+    }
+    if (response.location) {
+      const next = isSafePublicHttpsUrl(response.location)
+      if (!next) throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
+      current = next
+      continue
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(REDIRECT_STATUSES.has(response.status)
+        ? "Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn."
+        : `Máy chủ trả mã lỗi ${response.status}.`)
+    }
+    return { url: current, text: String(response.text ?? "") }
   }
-  const combined = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)))
-  return { url: response.url || safe, text: combined.toString("utf8") }
+  throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
 }
 
 async function searchWikipedia(query, lang, limit) {
@@ -282,6 +435,9 @@ async function fetchUrl(rawUrl, options = {}) {
 
 module.exports = {
   isSafePublicHttpsUrl,
+  resolvePublicAddress,
+  fetchTextLimited,
+  decodeBody,
   stripHtmlToText,
   parseDuckDuckGoHtml,
   webSearch,

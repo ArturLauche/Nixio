@@ -1645,6 +1645,7 @@ setupExports({
 })
 chat = setupChat({
   ...shared,
+  editorSnapshot,
   selectedIndex,
   selectPage,
   commitLiveForm: commitLiveFormCheckpoint,
