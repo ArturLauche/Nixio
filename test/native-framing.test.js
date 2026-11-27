@@ -31,6 +31,10 @@ import { NativeWorker } from "../desktop/native-worker.cjs"
  *   ok-false                  protocol-level operation failure (`ok: false`)
  *   trailing-bytes            a final reply followed by bytes the stream cannot attribute
  *
+ * A complete frame naming another protocol is not a framing failure: it settles as one stable
+ * `NativeProtocolError` and leaves the process running, so it is covered by
+ * `test/native-negotiation.test.js` instead of the teardown cases below.
+ *
  * Reproduce any failure with the seed printed in its message:
  *   NIXIO_FRAMING_SEED=0x4b545231 node --test test/native-framing.test.js
  */
@@ -182,7 +186,6 @@ const MALFORMED_METADATA = [
   { name: "invalid-utf8", metadata: Buffer.from([0xff, 0xfe, 0xfd]), check: (error) => error instanceof SyntaxError },
   { name: "json-array", metadata: Buffer.from("[]"), check: (error) => UNSUPPORTED_REPLY.test(error.message) },
   { name: "json-null", metadata: Buffer.from("null"), check: (error) => error instanceof TypeError },
-  { name: "unsupported-version", metadata: Buffer.from('{"version":2,"ok":true}'), check: (error) => UNSUPPORTED_REPLY.test(error.message) },
   { name: "non-boolean-ok", metadata: Buffer.from('{"version":1,"ok":"yes"}'), check: (error) => UNSUPPORTED_REPLY.test(error.message) },
 ]
 

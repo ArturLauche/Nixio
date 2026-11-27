@@ -42,9 +42,17 @@ internal static class LocalOcr
 
     internal static async Task<JsonObject> Capabilities()
     {
+        // The range and the per-operation versions let the renderer detect a feature instead of
+        // assuming it, and the older `protocol` field keeps a client built before the handshake working.
+        var operations = new JsonArray();
+        foreach (var operation in NativeRpc.Operations) operations.Add(operation);
         var result = new JsonObject {
-            ["protocol"] = 1,
-            ["operations"] = new JsonArray("redraw", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png", "zip", "project"),
+            ["protocol"] = NativeRpc.ProtocolVersion,
+            ["protocolVersion"] = NativeRpc.ProtocolVersion,
+            ["minProtocol"] = NativeRpc.ProtocolMinimum,
+            ["maxProtocol"] = NativeRpc.ProtocolVersion,
+            ["operations"] = operations,
+            ["operationVersions"] = NativeRpc.OperationVersions(),
             ["languages"] = new JsonArray(),
         };
         try
