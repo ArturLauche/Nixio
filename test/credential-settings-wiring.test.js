@@ -214,6 +214,7 @@ async function createHarness(t, {
   holdSave = null,
   configWritesReady = undefined,
   withMigration = false,
+  usageLedger = null,
 } = {}) {
   const dom = createDom()
   const page = pageFixture()
@@ -254,6 +255,7 @@ async function createHarness(t, {
     applyTranslation: () => 0,
     projectBusy: () => false,
     configWritesReady: withMigration ? migration : configWritesReady,
+    ...(usageLedger && { usageLedger }),
     onSettingsChange() {},
     notify() {},
     notifyOverflowIfAny() {},
@@ -559,4 +561,37 @@ test("a glossary edit re-sends only the boxes that cite the term", async (t) => 
   assert.equal(harness.requests.length, 2, "an unrelated term invalidates no box")
   assert.equal(harness.page.translationJob.state, "done")
   assert.match(harness.page.translationJob.signature, /悪魔/)
+})
+
+test("a budget that runs out mid-job stops the next page of a box pass (#review)", async (t) => {
+  let consulted = 0
+  // Allowed at the first press, blocked by the time the job reaches the page it would spend on.
+  const usageLedger = {
+    record() {},
+    gate: () => (++consulted > 1
+      ? { blocked: true, message: "Đã chạm hạn mức chi phí AI." }
+      : { blocked: false }),
+  }
+  const harness = await createHarness(t, {
+    desktop: true,
+    usageLedger,
+    answer: (request) => {
+      const { lines } = JSON.parse(request.payload.messages[1].content)
+      return {
+        choices: [{ message: { content: JSON.stringify({ lines: lines.map(({ id, text }) => ({ id, text: "Dịch " + text })) }) } }],
+      }
+    },
+  })
+  harness.page.boxes = [{
+    id: "b1", x: .1, y: .1, w: .3, h: .1, text: "おはよう", size: 24, font: "Arial",
+    color: "#171717", align: "center", rotation: 0, fill: true,
+  }]
+  harness.selectProvider("openai", OPENAI_BASE)
+  harness.byId("llm-model").value = "hy-mt2-manga"
+
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 0, "the page is never sent once the gate closes")
+  assert.equal(harness.page.boxes[0].text, "おはよう", "and nothing is written")
+  assert.match(harness.lastStatus().message, /Đã chạm hạn mức chi phí AI\. Đã dừng sau 0\/1 trang\./)
+  assert.equal(harness.lastStatus().error, true)
 })

@@ -514,7 +514,7 @@ export function setupTranslation({
     if (!plan.pending.length) {
       page.translationJob = { kind: "translate", signature, state: "done" }
       status(`Đã dùng bộ nhớ dịch cho ${reused}/${boxes.length} khung chữ, không gọi API.`)
-      return { updated: 0, kept: boxes.length - reused, reused }
+      return { updated: 0, kept: Math.max(0, page.boxes.length - reused), reused }
     }
     const report = (message) => status(page.name + " · " + message)
     const translated = await translateBoxesForProvider(settings.provider, page, plan.pending, {
@@ -526,7 +526,7 @@ export function setupTranslation({
       onUsage: (call) => recordUsage(page, call),
     })
     translationController.signal.throwIfAborted()
-    const applied = applyBoxTranslations(page, plan.pending, translated, settings)
+    const applied = applyBoxTranslations(page, plan.pending, translated, settings, { reused })
     // A provider answer is remembered unreviewed: it is offered next time, never trusted silently.
     const byBoxId = new Map(translated.map((item) => [item.boxId, item]))
     for (const box of plan.pending) {
@@ -592,8 +592,15 @@ export function setupTranslation({
     let reusedMemory = 0
     let completed = 0
     let activePage
+    let budgetStopped = false
     try {
       for (const { page, boxes } of plan) {
+        // The gate is read per page: one press can spend across several pages, so a limit reached
+        // mid-job must stop the next page rather than only the next press.
+        if (usageLedger?.gate?.().blocked) {
+          budgetStopped = true
+          break
+        }
         activePage = page
         const applied = await translateBoxesOnPage(page, boxes, settings, signature)
         updated += applied.updated
@@ -606,7 +613,11 @@ export function setupTranslation({
         }
       }
       // A run the memory answered on its own says so: the user did not spend a call for it.
-      if (!updated && reusedMemory) {
+      const budgetMessage = budgetStopped ? budgetStopMessage() : ""
+      if (budgetMessage) {
+        status(`${budgetMessage} Đã dừng sau ${completed}/${plan.length} trang.`, true)
+        notify?.({ kind: "error", title: "Đã chặn lượt dịch AI", message: budgetMessage, key: "usage-budget-stop" })
+      } else if (!updated && reusedMemory) {
         status(`Đã dùng bộ nhớ dịch cho ${reusedMemory} khung chữ, không gọi API.`)
       } else {
         status(

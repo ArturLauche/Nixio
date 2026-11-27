@@ -237,3 +237,28 @@ test("the resume button follows the same work the resume run would find", () => 
   assert.equal(resumePending([{ ...page, translationJob: { kind: "translate", signature, state: "error" } }], base), true)
   assert.equal(resumePending([], base), false)
 })
+
+test("the digest follows the writing direction, like the job signature does (#review)", () => {
+  const page = makePage([makeBox("a", "おはよう")])
+  const box = page.boxes[0]
+  const rtl = settings({ direction: "rtl" })
+  const ltr = settings({ direction: "ltr" })
+  assert.notEqual(boxFingerprint(box, rtl, page), boxFingerprint(box, ltr, page))
+  // and a direction change is a real reason to send the box again
+  translate(page, { a: "Chào buổi sáng" }, rtl)
+  assert.deepEqual(staleBoxes(page, rtl), [])
+  assert.deepEqual(staleBoxes(page, ltr).map(({ id }) => id), ["a"])
+})
+
+test("kept counts the boxes that were not written, not the ones the memory answered (#review)", () => {
+  const config = settings()
+  const page = makePage([makeBox("a", "おはよう"), makeBox("b", "またね"), makeBox("c", "五条悟だ")])
+  // The memory answered "a" and the provider answered "b": only "c" still holds its old text.
+  const applied = applyBoxTranslations(page, [page.boxes[1]], [{ boxId: "b", source: "またね", text: "Hẹn gặp lại" }], config, { reused: 1 })
+  assert.deepEqual(applied, { updated: 1, kept: 1 })
+  // A box the provider did not answer is kept too, so the count never goes negative.
+  assert.deepEqual(
+    applyBoxTranslations(page, [page.boxes[2]], [], config, { reused: 2 }),
+    { updated: 0, kept: 1 },
+  )
+})

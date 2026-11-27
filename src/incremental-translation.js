@@ -83,6 +83,9 @@ export function boxFingerprint(box, settings, page) {
     style: styleInputs(box),
     source: textual(settings?.source),
     target: textual(settings?.target),
+    // The signature the job records includes the writing direction, so the digest has to as well or
+    // a left-to-right / right-to-left switch would look like nothing changed.
+    direction: textual(settings?.direction),
     notes: textual(translationNotes(settings ?? {})),
     provider: textual(settings?.provider, "gemini"),
     model: textual(settings?.model),
@@ -147,7 +150,7 @@ export function recordBoxTranslation(box, { source, settings, page }) {
 
 // Writes a box-level answer back. Boxes that were not sent keep their text, so an unchanged line
 // never loses an edit, and only the boxes that answered are stamped.
-export function applyBoxTranslations(page, boxes, translated, settings) {
+export function applyBoxTranslations(page, boxes, translated, settings, { reused = 0 } = {}) {
   const byBoxId = new Map((translated ?? []).filter(Boolean).map((item) => [item.boxId, item]))
   let updated = 0
   for (const box of boxes ?? []) {
@@ -157,7 +160,9 @@ export function applyBoxTranslations(page, boxes, translated, settings) {
     recordBoxTranslation(box, { source: match.source, settings, page })
     updated++
   }
-  return { updated, kept: Math.max(0, (page?.boxes?.length ?? 0) - (boxes?.length ?? 0)) }
+  // Kept counts the boxes that still hold the text they had before this run. Boxes the memory
+  // answered were written too, so they are subtracted here instead of being counted twice.
+  return { updated, kept: Math.max(0, (page?.boxes?.length ?? 0) - updated - reused) }
 }
 
 // Whether the resume button has anything to do: exactly the work a resume run would find, so the
