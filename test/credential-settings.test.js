@@ -263,6 +263,21 @@ test("an existing vault secret is never overwritten and needs no re-entry", asyn
   assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), false)
 })
 
+test("migration writes only the first usable legacy key per vault scope", async () => {
+  const storage = memoryStorage({
+    [LLM_CONFIG_STORAGE_KEY]: JSON.stringify({ provider: "gemini", geminiKey: GEMINI_KEY, geminiApiKey: AMBIGUOUS_KEY }),
+  })
+  const vault = fakeVault()
+
+  const outcome = await migrateLegacyCredentials({ storage, api: vault.api })
+
+  assert.deepEqual(vault.calls.status, [["gemini", undefined]])
+  assert.deepEqual(vault.calls.save, [["gemini", undefined, GEMINI_KEY]])
+  assert.deepEqual(outcome.secrets.map(({ outcome }) => outcome), ["migrated", "already-stored"])
+  assert.deepEqual(storedConfig(storage), { provider: "gemini" })
+  assertNoSecret(outcome)
+})
+
 test("an unavailable or unsupported vault erases plaintext and asks for the key again", async () => {
   const scenarios = [
     { reason: "unavailable", outcome: "vault-unavailable", code: CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY },

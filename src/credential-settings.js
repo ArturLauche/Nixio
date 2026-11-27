@@ -320,6 +320,7 @@ async function migrateSecret(candidate, record, bridge, cache) {
   } catch {
     return secretOutcome(candidate.field, scope, "rejected", true)
   }
+  status.stored = true
   return secretOutcome(candidate.field, scope, "migrated", false)
 }
 
