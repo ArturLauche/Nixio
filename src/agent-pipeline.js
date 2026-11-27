@@ -2,6 +2,10 @@
 // inspired by DeepSeek Harness (packages/core/tools/src/pipeline.ts & batch.ts).
 
 export const TOOL_ABORTED_BEFORE_DISPATCH = "TOOL_ABORTED_BEFORE_DISPATCH"
+// Approval outcomes are decisions of the turn, not failures of the tool: the codes let a transcript
+// say "the human refused this write" without matching on the Vietnamese message.
+export const TOOL_APPROVAL_REJECTED = "TOOL_APPROVAL_REJECTED"
+export const TOOL_APPROVAL_UNAVAILABLE = "TOOL_APPROVAL_UNAVAILABLE"
 
 export function deepFreezeSnapshot(value) {
   let cloned
@@ -104,6 +108,10 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
     modelText: outcome?.modelText,
     attachment: outcome?.attachment,
     error: outcome?.error,
+    code: outcome?.code,
+    // Whether this call needed a human and what was decided. A replay reads the decision back from
+    // here instead of asking the user a second time.
+    approvalRequired,
     durationMs,
   }
   const { attachment: _omitted, ...publicEvent } = settled

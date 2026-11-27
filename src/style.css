@@ -1059,6 +1059,29 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .usage-model-prices { display: flex; gap: 5px; flex-wrap: wrap; }
 .usage-model-prices label { display: flex; align-items: center; gap: 3px; font-size: .68rem; color: var(--muted); }
 .usage-model-prices input { width: 66px; min-height: 24px; padding: 2px 4px; font-size: .72rem; }
+.chat-replay-list { margin: 4px 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.chat-replay-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: .72rem; color: var(--muted); }
+.chat-replay-item .button { min-height: 22px; padding: 1px 6px; font-size: .7rem; }
+.chat-replay-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-replay-trace { display: grid; gap: 4px; margin-top: 6px; max-height: 260px; overflow: auto; }
+.chat-replay-head { margin: 0; font-size: .72rem; color: var(--ink); font-variant-numeric: tabular-nums; }
+.chat-replay-turn { font-size: .7rem; color: var(--muted); }
+.chat-replay-step, .chat-replay-tool {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 4px 7px; background: var(--surface-2); font-size: .72rem;
+}
+.chat-replay-step p, .chat-replay-tool p { margin: 2px 0 0; }
+.chat-replay-tool { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.chat-replay-tool code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .68rem; color: var(--accent-text); }
+.chat-replay-tool .chat-replay-outcome { flex: 1 0 100%; color: var(--muted); }
+.chat-replay-tool[data-state="diff"] { border-color: var(--danger-border); background: var(--danger-bg); }
+.chat-replay-tool[data-state="diff"] .chat-replay-outcome { color: var(--danger); }
+.chat-replay-badge { font-size: .66rem; padding: 0 5px; border-radius: 4px; background: var(--surface-hover); color: var(--muted); }
+.chat-replay-tool[data-state="diff"] .chat-replay-badge { background: var(--danger-bg); color: var(--danger); }
+.chat-replay-end { margin: 0; font-size: .72rem; color: var(--muted); }
+.chat-replay-end[data-state="stopped"], .chat-replay-end[data-state="failed"] { color: var(--warn); }
+.chat-replay-diff { margin: 0; padding-left: 16px; font-size: .72rem; color: var(--danger); }
+.chat-replay-warning { font-size: .7rem; }
 .chat-composer { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
 .chat-composer .form-actions { justify-content: flex-end; }
 .chat-todo-bar { padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); max-height: 140px; overflow: auto; }

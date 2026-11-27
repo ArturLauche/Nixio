@@ -142,16 +142,27 @@ export async function runAgentTurn({
   // Injected by the editor: `record(call)` books a paid call in the project ledger and `gate()` reads
   // the soft budget. Absent in an offline run, where the turn still reports its own token totals.
   accounting = null,
+  // A `createTurnRecorder()` from agent-replay. It receives the same events as the panel plus every
+  // model decision and tool outcome, so the run can be exported and replayed without the provider.
+  recorder = null,
 }) {
   const promptText = String(userMessage || "").trim()
   if (!promptText) throw new Error("Hãy nhập câu hỏi hoặc yêu cầu cho Trợ lý AI.")
 
   const turnStart = performance.now()
+  // Everything the UI sees also reaches the transcript, so a recorded turn and a live one never drift
+  // apart in what they count as an event.
+  const emit = recorder
+    ? (event) => {
+      recorder.event(event)
+      onEvent(event)
+    }
+    : onEvent
   const effectiveAllowEdits = Boolean(allowEdits) && !planMode
   const compacted = compactChatHistory(history)
   const workingHistory = compacted.history
   if (compacted.compacted) {
-    onEvent({
+    emit({
       type: "compacted",
       foldedMessages: compacted.foldedMessages,
       charsSaved: compacted.charsSaved,
@@ -204,6 +215,19 @@ export async function runAgentTurn({
   let contextBudget = null
   let turnUsage = emptyTotals()
   let budgetStopped = false
+  let stepLimitHit = false
+
+  // The transcript opens with what the model was actually asked: a hash of the whole prompt (so two
+  // turns with the same prompt are recognisable) and the reminder text, which is the part that
+  // changes with the project state and therefore the part worth replaying.
+  recorder?.begin({
+    provider: provider.id,
+    model: provider.models.resolve(settings)[0],
+    systemPrompt,
+    runtimeReminder,
+    userMessage: promptText,
+    flags: { allowEdits: effectiveAllowEdits, allowWebSearch, planMode, confirmBulkEdits, maxSteps },
+  })
 
   for (let step = 1; step <= maxSteps; step++) {
     signal?.throwIfAborted()
@@ -214,8 +238,8 @@ export async function runAgentTurn({
     if (gate?.blocked) {
       budgetStopped = true
       finalAnswer = gate.message
-      onEvent({ type: "budget", message: gate.message, ...gate.status })
-      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      emit({ type: "budget", message: gate.message, ...gate.status })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
       break
     }
     stepsUsed = step
@@ -227,26 +251,33 @@ export async function runAgentTurn({
       })
       if (pruned.charsSaved > 0) {
         totalPrunedChars += pruned.charsSaved
-        onEvent({ type: "pruned", prunedCount: pruned.prunedCount, charsSaved: pruned.charsSaved })
+        emit({ type: "pruned", prunedCount: pruned.prunedCount, charsSaved: pruned.charsSaved })
       }
     }
 
-    onEvent({ type: "step", step, maxSteps })
+    emit({ type: "step", step, maxSteps })
 
     const onDelta = streaming
-      ? (delta) => onEvent({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
+      ? (delta) => emit({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
       : undefined
-    const reply = await withLlmRetry(
-      () => provider.callStep({ settings, thread, toolDefs, signal, stream: streaming, onDelta }),
-      {
-        maxRetries,
-        signal,
-        onRetry({ attempt, maxRetries: limit, delayMs }) {
-          retriesUsed++
-          onEvent({ type: "retry", attempt, maxRetries: limit, delayMs })
+    let reply
+    try {
+      reply = await withLlmRetry(
+        () => provider.callStep({ settings, thread, toolDefs, signal, stream: streaming, onDelta }),
+        {
+          maxRetries,
+          signal,
+          onRetry({ attempt, maxRetries: limit, delayMs }) {
+            retriesUsed++
+            emit({ type: "retry", attempt, maxRetries: limit, delayMs })
+          },
         },
-      },
-    )
+      )
+    } catch (error) {
+      // A failed step is part of the transcript: the replay has to show where the turn gave up.
+      recorder?.error(error?.message || String(error))
+      throw error
+    }
 
     signal?.throwIfAborted()
     if (reply.usage) latestUsage = reply.usage
@@ -270,7 +301,7 @@ export async function runAgentTurn({
       }),
     }) ?? null
     if (call) turnUsage = countCall(turnUsage, call)
-    onEvent({
+    emit({
       type: "usage",
       usage: latestUsage,
       budget: contextBudget,
@@ -280,10 +311,17 @@ export async function runAgentTurn({
     const { thought, answer } = stripReasoning(reply.text)
     if (reply.thought) thoughts.push(reply.thought)
     if (thought) thoughts.push(thought)
+    recorder?.step({
+      step,
+      text: answer,
+      thought: reply.thought || thought,
+      usage: latestUsage,
+      toolCalls: reply.toolCalls,
+    })
 
     if (!reply.toolCalls.length) {
       finalAnswer = answer || "Đã hoàn tất yêu cầu."
-      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
       break
     }
 
@@ -300,19 +338,22 @@ export async function runAgentTurn({
       forceWriteApproval: webContentSeen || batchReadsWeb,
       maxParallel: 4,
       signal,
-      onEvent,
+      onEvent: emit,
     })
 
     const guardReminders = []
     const resolved = []
     for (const entry of settled) {
       toolTrace.push(entry)
+      // The outcome, its approval decision and its row in the file are recorded before the model is
+      // even told about it, so a transcript cannot show a call it never actually made.
+      recorder?.tool({ step, entry })
       if (entry.ok && entry.category === "web") webContentSeen = true
       if (entry.ok && entry.category === "write") editsMade++
       const guardHit = repeatGuard.observe(entry.name, entry.args)
       if (guardHit) {
         guardReminders.push(guardHit.reminder)
-        onEvent({ type: "guard", toolName: guardHit.toolName, count: guardHit.count, level: guardHit.level })
+        emit({ type: "guard", toolName: guardHit.toolName, count: guardHit.count, level: guardHit.level })
       }
 
       const rawModelPayload = entry.ok
@@ -329,8 +370,9 @@ export async function runAgentTurn({
     thread.appendToolResults({ entries: resolved, reminders: guardReminders })
 
     if (step === maxSteps) {
+      stepLimitHit = true
       finalAnswer = answer || `Đã thực hiện ${toolTrace.length} bước công cụ (đạt giới hạn ${maxSteps} bước). Bạn có thể nhắn tiếp để AI tiếp tục.`
-      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
     }
   }
 
@@ -339,6 +381,12 @@ export async function runAgentTurn({
     { role: "user", text: promptText },
     { role: "assistant", text: finalAnswer },
   ].slice(-20)
+
+  const elapsedMs = Math.round(performance.now() - turnStart)
+  // A turn that ran out of steps is not the same as a finished one: the replay has to say which.
+  const status = budgetStopped ? "budget" : (stepLimitHit ? "capped" : "completed")
+  recorder?.usage(turnUsage)
+  recorder?.finish({ status, elapsedMs })
 
   return {
     answer: finalAnswer,
@@ -349,12 +397,13 @@ export async function runAgentTurn({
     editsMade,
     retriesUsed,
     prunedChars: totalPrunedChars,
-    elapsedMs: Math.round(performance.now() - turnStart),
+    elapsedMs,
     usage: latestUsage,
     usageTotals: turnUsage,
     budgetBlocked: budgetStopped,
     contextBudget,
     todos: tools.getTodos?.() ?? [],
     plan: tools.getPlan?.() ?? null,
+    turnRecord: recorder?.snapshot() ?? null,
   }
 }
