@@ -182,25 +182,42 @@ export function setupExports({
   }
 
   const zipDialog = byId("zip-dialog")
-  byId("export-all").onclick = () => {
+  // The dialog snapshots its page list when it opens: the bulk bar's subset stays fixed even if
+  // the selection changes while the user picks a format, and "Xuất tất cả" keeps meaning the whole
+  // chapter at close time.
+  let zipPages = null
+  function openZipExport(pages = null) {
+    zipPages = pages ? [...pages] : null
+    byId("zip-name").value = ""
+    byId("zip-dialog-title").textContent = pages?.length
+      ? `Xuất ${pages.length} trang đã chọn`
+      : "Xuất toàn bộ trang"
     zipDialog.returnValue = ""
     zipDialog.showModal()
   }
+  byId("export-all").onclick = () => openZipExport()
   zipDialog.addEventListener("close", () => {
-    if (zipDialog.returnValue !== "export") return
+    if (zipDialog.returnValue !== "export") {
+      zipPages = null
+      return
+    }
     const format = byId("zip-format").value
-    requestExport(state.pages, () =>
+    const pages = zipPages ?? state.pages
+    zipPages = null
+    const customName = byId("zip-name").value.trim()
+    const zipName = `${customName ? filenameStem(customName) : "khung-thoai"}-${format}.zip`
+    requestExport(pages, () =>
       performExport(async () => {
-        const pages = copyEditor({ pages: state.pages }).pages
+        const snapshot = copyEditor({ pages }).pages
         if (format === "png" && isNativeReady()) {
           const transfer = await desktop.projectBegin(
             "zip",
-            "khung-thoai-png.zip",
+            zipName,
           )
           if (!transfer) return false
           try {
-            for (const [index, page] of pages.entries()) {
-              status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
+            for (const [index, page] of snapshot.entries()) {
+              status(`Đang xuất PNG bằng C# ${index + 1}/${snapshot.length}…`)
               const { options, data } = await nativePageLayers(page)
               const name =
                 String(index + 1).padStart(2, "0") +
@@ -225,8 +242,8 @@ export function setupExports({
         }
         const { default: JSZip } = await import("jszip")
         const zip = new JSZip()
-        for (const [index, page] of pages.entries()) {
-          status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
+        for (const [index, page] of snapshot.entries()) {
+          status(`Đang xuất trang ${index + 1} / ${snapshot.length}…`)
           const name =
             String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
           zip.file(
@@ -236,9 +253,9 @@ export function setupExports({
         }
         saveFile(
           await zip.generateAsync({ type: "blob" }),
-          "khung-thoai-" + format + ".zip",
+          zipName,
         )
-      }, `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${state.pages.length} trang.`),
+      }, `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${pages.length} trang.`),
     )
   })
 
@@ -261,4 +278,6 @@ export function setupExports({
       status(`Đã xuất kịch bản (${format.toUpperCase()}).`)
     }
   }
+
+  return { openZipExport }
 }

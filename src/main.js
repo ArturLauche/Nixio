@@ -15,6 +15,15 @@ import {
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
+import {
+  duplicatePage,
+  moveSelectedPages,
+  pageRangeIds,
+  rangeAnchorId,
+  selectAllPageIds,
+  selectedPages,
+  togglePageId,
+} from "./page-selection.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
 import { applyBoxText, boxLabel, boxTextError } from "./box-text.js"
 import { createTranslationMemoryStore } from "./translation-memory.js"
@@ -66,6 +75,7 @@ const editorStatus = byId("status")
 const exportButtons = [...document.querySelectorAll("[data-export]")]
 const state = {
   pages: [], presets: loadGlobalPresets(), pageId: null, boxId: null, selectedBoxIds: new Set(),
+  selectedPageIds: new Set(), pageAnchorId: null,
   queue: [], placing: false, fit: true, zoom: null, compareOriginal: false, splitCompare: false,
   compareRestore: "edit", splitPos: 50, cloneSource: null,
   exporting: false, importing: false, translating: false, importingScript: false,
@@ -550,7 +560,7 @@ function pageAnnouncement() {
   return index < 0 ? "Chưa có trang" : `Trang ${index + 1} / ${state.pages.length}: ${state.pages[index].name}`
 }
 
-function selectPage(page) {
+function selectPage(page, { preserveSelection = false } = {}) {
   commitLiveFormCheckpoint()
   const aborted = gestures.abortGesture()
   if (aborted) {
@@ -559,6 +569,8 @@ function selectPage(page) {
     page = state.pages.find((item) => item.id === page?.id)
   }
   state.pageId = page?.id ?? null
+  state.pageAnchorId = state.pageId
+  if (!preserveSelection) state.selectedPageIds.clear()
   state.boxId = null
   state.selectedBoxIds.clear()
   state.placing = false
@@ -571,6 +583,61 @@ function changePage(delta) {
   const page = state.pages[selectedIndex() + delta]
   if (page) selectPage(page)
 }
+
+// Bulk page selection (#74): the set is additive UI state — the primary page keeps feeding the
+// inspector while the set names what a bulk action touches. Nothing here is checkpointed; only the
+// actions below record history.
+function selectedPagesInOrder() {
+  return selectedPages(state.pages, state.selectedPageIds)
+}
+
+function togglePageSelection(page) {
+  state.selectedPageIds = togglePageId(state.selectedPageIds, page.id)
+  state.pageAnchorId = page.id
+  renderPages()
+}
+
+function shiftSelectPage(page) {
+  commitLiveFormCheckpoint()
+  const anchor = rangeAnchorId(state.pages, state.pageAnchorId, state.pageId)
+  const ids = pageRangeIds(state.pages, anchor, page.id)
+  state.selectedPageIds = new Set(ids)
+  state.pageAnchorId = page.id
+  // Shift-range moves the primary with the click so the inspector follows, without collapsing
+  // the range the way a plain selectPage would.
+  selectPage(page, { preserveSelection: true })
+}
+
+function pageNameClick(page, event) {
+  if (event.ctrlKey || event.metaKey) return togglePageSelection(page)
+  if (event.shiftKey) return shiftSelectPage(page)
+  selectPage(page)
+}
+
+function selectAllPages() {
+  state.selectedPageIds = selectAllPageIds(state.pages)
+  renderPages()
+  status(`Đã chọn cả ${state.pages.length} trang.`)
+}
+
+function clearPageSelection() {
+  if (!state.selectedPageIds.size) return
+  state.selectedPageIds.clear()
+  renderPages()
+  status("Đã bỏ chọn trang.")
+}
+
+// Space on a focused page name toggles that page's membership, the keyboard twin of Ctrl+click.
+// The name button keeps Enter for plain navigation; Space is claimed before the native click.
+byId("pages").addEventListener("keydown", (event) => {
+  if (event.key !== " " || event.repeat) return
+  const name = event.target.closest?.(".page-name")
+  if (!name || !byId("pages").contains(name)) return
+  const page = state.pages.find((item) => item.id === name.dataset.pageId)
+  if (!page) return
+  event.preventDefault()
+  togglePageSelection(page)
+})
 
 function movePage(index, delta) {
   if (projectBusy()) return
@@ -593,6 +660,65 @@ function removePage(index) {
   if (page.id === state.pageId) selectPage(state.pages[Math.min(index, state.pages.length - 1)])
   else renderPages()
   status("Đã bỏ " + page.name + ".")
+}
+
+// Every bulk action refuses while a task runs: a half-applied batch would be worse than a clear
+// refusal, and each action still goes through the same checkpoint path as its single-page twin so
+// undo, redo and the dirty marker stay correct.
+function refuseWhileBusy() {
+  if (!projectBusy()) return false
+  status("Hãy chờ tác vụ hiện tại hoàn tất rồi thao tác trên nhiều trang.", true)
+  return true
+}
+
+function removeSelectedPages() {
+  if (refuseWhileBusy()) return
+  const pages = selectedPagesInOrder()
+  if (!pages.length) return status("Hãy chọn trang cần xóa.", true)
+  const first = state.pages.indexOf(pages[0])
+  commitLiveFormCheckpoint()
+  checkpoint(undefined, { label: `Bỏ ${pages.length} trang`, kind: "page" })
+  const ids = new Set(pages.map((page) => page.id))
+  state.pages = state.pages.filter((page) => !ids.has(page.id))
+  state.selectedPageIds.clear()
+  if (ids.has(state.pageId)) selectPage(state.pages[Math.min(first, state.pages.length - 1)])
+  else renderPages()
+  status(`Đã bỏ ${pages.length} trang.`)
+}
+
+function duplicateSelectedPages() {
+  if (refuseWhileBusy()) return
+  const pages = selectedPagesInOrder()
+  if (!pages.length) return status("Hãy chọn trang cần nhân bản.", true)
+  if (state.pages.length + pages.length > pageLimit) {
+    return status(`Nhân bản sẽ vượt giới hạn ${pageLimit} trang.`, true)
+  }
+  commitLiveFormCheckpoint()
+  checkpoint(undefined, { label: `Nhân bản ${pages.length} trang`, kind: "page" })
+  const copies = new Map(pages.map((page) => [page.id, duplicatePage(page)]))
+  state.pages = state.pages.flatMap((page) => {
+    const copy = copies.get(page.id)
+    return copy ? [page, copy] : [page]
+  })
+  state.selectedPageIds = new Set(copies.values().map((page) => page.id))
+  renderPages()
+  status(`Đã nhân bản ${pages.length} trang.`)
+}
+
+function moveSelectedPagesBy(delta) {
+  if (refuseWhileBusy()) return
+  if (!state.selectedPageIds.size) return status("Hãy chọn trang cần di chuyển.", true)
+  const next = moveSelectedPages(state.pages, state.selectedPageIds, delta)
+  if (!next) {
+    return status(delta < 0 ? "Các trang đã chọn đang ở đầu danh sách." : "Các trang đã chọn đang ở cuối danh sách.")
+  }
+  commitLiveFormCheckpoint()
+  checkpoint(undefined, {
+    label: `Dời ${state.selectedPageIds.size} trang ${delta < 0 ? "lên" : "xuống"}`,
+    kind: "page",
+  })
+  state.pages = next
+  renderPages()
 }
 
 function projectBusy() {
@@ -662,6 +788,11 @@ function syncToolControls() {
 function renderPages() {
   const restoreFocus = holdFocus(byId("pages"))
   projects.refreshDirty()
+  // Undo, project switches and page removal can leave ids behind; the set only ever names pages
+  // that exist right now.
+  for (const id of state.selectedPageIds) {
+    if (!state.pages.some((page) => page.id === id)) state.selectedPageIds.delete(id)
+  }
   const current = selectedIndex()
   const count = state.pages.length
   const settings = translation.settings()
@@ -700,9 +831,18 @@ function renderPages() {
   if (byId("open-webtoon")) byId("open-webtoon").disabled = projectBusy() || !count
   byId("pages").replaceChildren(...state.pages.map((page, index) => {
     const li = document.createElement("li")
-    const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
+    if (state.selectedPageIds.has(page.id)) li.classList.add("page-selected")
+    const check = document.createElement("input")
+    check.type = "checkbox"
+    check.className = "page-check"
+    check.checked = state.selectedPageIds.has(page.id)
+    check.setAttribute("aria-label", `Chọn ${page.name} để thao tác hàng loạt`)
+    check.dataset.focusKey = "page-check:" + page.id
+    check.onchange = () => togglePageSelection(page)
+    const button = listButton(`${index + 1}. ${page.name}`, (event) => pageNameClick(page, event))
     button.className = "page-name"
     button.dataset.focusKey = "page:" + page.id
+    button.dataset.pageId = page.id
     if (current === index) button.setAttribute("aria-current", "true")
     const up = listButton("↑", () => movePage(index, -1), "Đưa lên " + page.name)
     up.disabled = index === 0 || projectBusy()
@@ -719,10 +859,32 @@ function renderPages() {
     job.className = "page-job"
     job.dataset.state = page.translationJob?.state ?? "pending"
     job.textContent = translationLabel(page, settings)
-    li.append(button, up, down, remove, job)
+    li.append(check, button, up, down, remove, job)
     return li
   }))
+  syncPageBulkBar()
   restoreFocus()
+}
+
+// The bulk bar stays reachable even with nothing selected so select-all/clear are always one Tab
+// away; the five actions only arm once the set names at least one page and no task is running.
+function syncPageBulkBar() {
+  const bar = byId("page-bulk-bar")
+  if (!bar) return
+  const selected = state.selectedPageIds.size
+  const busy = projectBusy()
+  bar.hidden = !state.pages.length
+  byId("page-bulk-count").textContent = selected
+    ? `Đã chọn ${selected} trang`
+    : "Chọn trang để thao tác hàng loạt."
+  const armed = selected > 0 && !busy
+  for (const id of ["bulk-translate", "bulk-duplicate", "bulk-export", "bulk-delete"]) {
+    byId(id).disabled = !armed
+  }
+  byId("bulk-move-up").disabled = !armed || !moveSelectedPages(state.pages, state.selectedPageIds, -1)
+  byId("bulk-move-down").disabled = !armed || !moveSelectedPages(state.pages, state.selectedPageIds, 1)
+  byId("bulk-select-all").disabled = selected === state.pages.length
+  byId("bulk-clear").disabled = !selected
 }
 
 function rectStyle(element, rect) {
@@ -2128,10 +2290,16 @@ shortcuts = setupShortcuts({
   restoreHistory, duplicateSelectedBox, deleteSelectedBoxes,
   toggleHistoryPanel,
   recordNudge,
+  pageSelection: {
+    count: () => state.selectedPageIds.size,
+    clear: clearPageSelection,
+    selectAll: selectAllPages,
+    owns: (target) => Boolean(target?.closest?.("#pages")),
+  },
 })
 setupTasks(byId)
 setupOcr(shared)
-setupExports({
+const exportUi = setupExports({
   ...shared, selectPage, selectBox, listButton,
   readTranslationSettings: translation.settings,
   isNativeReady: () => projects.ready,
@@ -2150,6 +2318,18 @@ chat = setupChat({
   restoreHistory,
   usageLedger,
 })
+
+// The bulk bar's five actions reuse the single-page/chapter paths: translation goes through the
+// same processPages job as "Dịch cả lượt", export through the ZIP dialog's page list, and the
+// page edits record one checkpoint each so undo restores the whole batch at once.
+byId("bulk-translate").onclick = () => translation.translatePages(selectedPagesInOrder())
+byId("bulk-duplicate").onclick = duplicateSelectedPages
+byId("bulk-move-up").onclick = () => moveSelectedPagesBy(-1)
+byId("bulk-move-down").onclick = () => moveSelectedPagesBy(1)
+byId("bulk-export").onclick = () => exportUi.openZipExport(selectedPagesInOrder())
+byId("bulk-delete").onclick = removeSelectedPages
+byId("bulk-select-all").onclick = selectAllPages
+byId("bulk-clear").onclick = clearPageSelection
 
 restoreCustomFonts().then((restored) => {
   if (!restored.length) return

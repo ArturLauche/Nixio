@@ -689,6 +689,13 @@ export function setupTranslation({
     return text
   }
 
+  // The bulk bar's translate runs the same whole-page job as "Dịch cả lượt", just over the
+  // selected subset: per-page job states, the stop button, budget gate and resume all behave
+  // exactly as they do for the full chapter.
+  function translatePages(pages) {
+    return processPages(pages ?? [], imageTranslator, "dịch")
+  }
+
   byId("translate-boxes").onclick = translateExistingBoxes
   byId("use-approved-translation").onclick = useApprovedTranslation
   byId("translate").onclick = () =>
@@ -716,5 +723,5 @@ export function setupTranslation({
   refreshGlossaryStatus()
   syncMemory()
 
-  return { settings: readTranslationSettings, refreshGlossaryStatus, syncMemory }
+  return { settings: readTranslationSettings, refreshGlossaryStatus, syncMemory, translatePages }
 }

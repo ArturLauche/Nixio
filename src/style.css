@@ -330,6 +330,19 @@ label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
   overflow-wrap: anywhere;
 }
 .page-job[data-state="error"] { color: var(--danger); }
+.page-list .page-check { flex: 0 0 auto; margin: 0 2px 0 4px; accent-color: var(--accent); }
+.page-list li.page-selected .page-name { background: var(--accent-soft); border-color: var(--accent-border); }
+.page-bulk-bar {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.page-bulk-bar .muted { margin: 0 0 6px; font-size: .74rem; }
+.page-bulk-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.page-bulk-actions + .page-bulk-actions { margin-top: 4px; }
+.page-bulk-actions .button { min-height: 26px; font-size: .72rem; padding: 2px 8px; }
 
 /* Form Fields & Dense Controls */
 .side-section label:not(.dropzone,.choice),
