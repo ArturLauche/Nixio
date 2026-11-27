@@ -151,7 +151,7 @@ export function buildLayeredSystemPrompt({
             "- Sau khi có đủ thông tin, HÃY gọi công cụ `submit_plan` với bản kế hoạch Markdown rõ ràng (bắt đầu bằng tiêu đề `# ...`), nêu rõ từng bước cụ thể, các khung/trang sẽ chạm tới và rủi ro (nếu có) để người dùng duyệt trước khi bấm \"Thực thi kế hoạch\".",
           ].join("\n")
         : allowEdits
-          ? "# Quyền Chỉnh sửa: BẬT\nBạn được phép dùng `update_box`, `create_box`, `delete_box`, `replace_chapter_text`, `update_glossary`, `autofit_page`, `align_boxes`, `distribute_boxes`, `apply_style_preset` và `navigate_page`. Sau khi xong, tóm tắt ngắn các thay đổi đã áp dụng."
+          ? "# Quyền Chỉnh sửa: BẬT\nBạn được phép dùng `update_box`, `create_box`, `delete_box`, `replace_chapter_text`, `update_glossary`, `autofit_page`, `align_boxes`, `distribute_boxes`, `apply_style_preset` và `navigate_page`. Mỗi công cụ ghi chỉ ĐỀ XUẤT thay đổi: người dùng duyệt từng thay đổi trong khung chat trước khi nó được áp dụng, nên đừng nói là đã sửa xong. Sau khi xong, tóm tắt ngắn các thay đổi đã đề xuất."
           : "# Quyền Chỉnh sửa: CHỈ ĐỌC\nChỉ phân tích, kiểm tra lỗi và đề xuất; không gọi công cụ chỉnh sửa.",
     },
   ]

@@ -61,6 +61,9 @@ function textOf(node) {
   return (node.children || []).map(textOf).join("")
 }
 
+const reviewLabelText = (row) => findAll(row, (node) => node.className === "chat-review-label")[0]?.textContent ?? ""
+const reviewNoteText = (row) => findAll(row, (node) => node.className === "chat-review-note")[0]?.textContent ?? ""
+
 function installBrowserGlobals() {
   const store = new Map()
   const listeners = new Map()
@@ -126,7 +129,7 @@ function sessionHistory() {
   ]
 }
 
-async function createHarness({ prepareStorage } = {}) {
+async function createHarness({ prepareStorage, pages = [] } = {}) {
   installBrowserGlobals()
   prepareStorage?.()
   const elements = new Map()
@@ -145,6 +148,7 @@ async function createHarness({ prepareStorage } = {}) {
   byId("chat-allow-edits").checked = true
   byId("chat-allow-web").checked = false
   byId("chat-confirm-bulk").checked = true
+  byId("chat-review-changes").checked = true
 
   let busy = false
   const fetchCalls = []
@@ -154,15 +158,17 @@ async function createHarness({ prepareStorage } = {}) {
     return fetchHandler(fetchCalls.length - 1, init)
   }
 
-  const state = { pages: [], projectId: "project-1" }
+  const checkpoints = []
+  const notifications = []
+  const state = { pages, projectId: "project-1" }
   const { setupChat } = await import("../src/controllers/chat.js")
   setupChat({
     state,
     byId,
-    checkpoint() {},
+    checkpoint(snapshot, meta) { checkpoints.push({ snapshot, meta }) },
     editorSnapshot: () => ({}),
     render() {},
-    selectedPage: () => null,
+    selectedPage: () => state.pages[0] ?? null,
     selectedIndex: () => 0,
     selectPage() {},
     projectBusy: () => busy,
@@ -179,15 +185,17 @@ async function createHarness({ prepareStorage } = {}) {
     onSkillChange() {},
     registerFontName() {},
     renderFontOptions() {},
-    notify() {},
+    notify(notification) { notifications.push(notification) },
     restoreHistory() {},
   })
 
   return {
     byId,
     chips,
+    checkpoints,
     document: globalThis.document,
     fetchCalls,
+    notifications,
     panel,
     state,
     setBusy(value) { busy = value },
@@ -201,6 +209,13 @@ async function createHarness({ prepareStorage } = {}) {
     messages: () => byId("chat-messages").children,
     planCard() {
       return byClass(byId("chat-messages"), "chat-plan-card")[0]
+    },
+    reviewCard() {
+      return byClass(byId("chat-messages"), "chat-review-card").at(-1)
+    },
+    reviewRows() {
+      const card = this.reviewCard()
+      return card ? byClass(card, "chat-review-item") : []
     },
   }
 }
@@ -657,4 +672,129 @@ test("streaming follows the tail until the reader scrolls back and offers a jump
   stream.close()
   await drain()
   assert.equal(messages.scrollTop, 400, "the finished turn keeps the tail pinned")
+})
+
+function reviewPage() {
+  return {
+    id: "p1",
+    name: "01.png",
+    image: { naturalWidth: 800, naturalHeight: 1200 },
+    boxes: [{ id: "b1", text: "Cũ", x: 0.1, y: 0.1, w: 0.3, h: 0.1, size: 24, font: "Arial", color: "#000000", align: "center" }],
+    unplaced: [],
+  }
+}
+
+const geminiCall = (name, args) => Promise.resolve({
+  ok: true,
+  status: 200,
+  headers: { get: () => "application/json" },
+  json: async () => ({ candidates: [{ content: { role: "model", parts: [{ functionCall: { name, args } }] } }] }),
+})
+
+test("AI edits wait for per-change approval and land as one named history action", async () => {
+  const page = reviewPage()
+  const harness = await createHarness({ pages: [page] })
+  harness.setFetch((index) => (
+    index === 0
+      ? geminiCall("update_box", { boxId: "b1", text: "Mới", size: 32 })
+      : geminiText("Đã đề xuất thay đổi.")
+  ))
+
+  harness.submit("Đổi lời thoại khung 1")
+  await drain()
+
+  assert.equal(page.boxes[0].text, "Cũ", "nothing is written before the user approves")
+  assert.equal(page.boxes[0].size, 24)
+  assert.equal(harness.checkpoints.length, 0, "no history entry before approval")
+
+  const card = harness.reviewCard()
+  assert.ok(card, "the review card should be rendered")
+  const rows = harness.reviewRows()
+  assert.equal(rows.length, 2, "one row per changed field")
+  assert.match(reviewLabelText(rows[0]), /Tr\.1 · Nội dung: Cũ → Mới/)
+  assert.equal(rows[0].dataset.status, "pending")
+
+  byButtonLabel(card, "Áp dụng mục đã chọn")[0].click()
+
+  assert.equal(page.boxes[0].text, "Mới")
+  assert.equal(page.boxes[0].size, 32)
+  assert.equal(harness.checkpoints.length, 1, "the whole review is one history action")
+  assert.equal(harness.checkpoints[0].meta.kind, "ai")
+  assert.match(harness.checkpoints[0].meta.label, /Chấp nhận 2 thay đổi từ Trợ lý AI/)
+  assert.equal(rows[0].dataset.status, "applied")
+  assert.match(byClass(card, "chat-badge")[0].textContent, /Đã áp dụng 2/)
+})
+
+test("rejecting a change keeps the project untouched and remembers the refusal", async () => {
+  const page = reviewPage()
+  const harness = await createHarness({ pages: [page] })
+  let turnCalls = 0
+  const propose = () => {
+    turnCalls = 0
+    harness.setFetch(() => (
+      turnCalls++ === 0 ? geminiCall("update_box", { boxId: "b1", text: "Mới" }) : geminiText("Đã đề xuất.")
+    ))
+  }
+
+  propose()
+  harness.submit("Đổi lời thoại khung 1")
+  await drain()
+  const card = harness.reviewCard()
+  byButtonLabel(card, "Từ chối tất cả")[0].click()
+
+  assert.equal(page.boxes[0].text, "Cũ", "a rejected change keeps the live state")
+  assert.equal(harness.checkpoints.length, 0, "a rejection records no history action")
+  assert.match(harness.status(), /từ chối 1 thay đổi/i)
+  assert.equal(harness.reviewRows()[0].dataset.status, "rejected")
+
+  // The same proposal in a later turn is flagged instead of being raced through.
+  propose()
+  harness.submit("Đổi lời thoại khung 1 lần nữa")
+  await drain()
+  const second = harness.reviewCard()
+  const row = byClass(second, "chat-review-item")[0]
+  assert.equal(findAll(second, (node) => node.className === "chat-review-note").length, 1)
+  assert.match(reviewNoteText(row), /trước đây/)
+  assert.equal(findAll(second, (node) => node.className === "chat-review-check")[0].checked, false)
+  assert.equal(page.boxes[0].text, "Cũ")
+
+  byButtonLabel(second, "Áp dụng mục đã chọn")[0].click()
+  assert.equal(page.boxes[0].text, "Cũ", "unchecked rows are still not applied")
+})
+
+test("a trusted turn applies without a click but still records every change", async () => {
+  const page = reviewPage()
+  const harness = await createHarness({ pages: [page] })
+  harness.byId("chat-review-changes").checked = false
+  harness.setFetch((index) => (
+    index === 0 ? geminiCall("update_box", { boxId: "b1", text: "Mới" }) : geminiText("Đã sửa.")
+  ))
+
+  harness.submit("Đổi lời thoại khung 1")
+  await drain()
+
+  assert.equal(page.boxes[0].text, "Mới", "trusted mode applies directly")
+  assert.equal(harness.checkpoints.length, 1, "still one named history action")
+  assert.match(harness.checkpoints[0].meta.label, /Chấp nhận 1 thay đổi/)
+  const card = harness.reviewCard()
+  assert.ok(card, "the change list is recorded even when auto-applied")
+  assert.equal(harness.reviewRows()[0].dataset.status, "applied")
+  assert.match(byClass(card, "chat-badge")[0].textContent, /Đã áp dụng 1/)
+})
+
+test("a turn that changes nothing explains why in Vietnamese", async () => {
+  const harness = await createHarness()
+  harness.setFetch(() => geminiText("Khung này không tràn chữ."))
+  harness.submit("Khung này có tràn chữ không?")
+  await drain()
+
+  const note = byClass(harness.byId("chat-messages"), "chat-msg system").at(-1)
+  assert.match(note.textContent, /Lượt này không có thay đổi nào được áp dụng/)
+  assert.match(note.textContent, /không gọi công cụ ghi nào/)
+
+  harness.byId("chat-plan-mode").checked = true
+  harness.submit("/plan Lập kế hoạch rà soát")
+  await drain()
+  const planNote = byClass(harness.byId("chat-messages"), "chat-msg system").at(-1)
+  assert.ok(planNote, "a plan-mode turn still reports its own reason")
 })
