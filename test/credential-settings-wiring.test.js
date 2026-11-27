@@ -129,7 +129,9 @@ function providerChannels({ answer, requests, failure = null }) {
     async providerRequest(envelope) {
       requests.push(JSON.parse(JSON.stringify(envelope)))
       if (failure) return { ok: false, ...failure }
-      return { ok: true, status: 200, contentType: "json", body: JSON.stringify(answer) }
+      // An answer function lets a test reply to the ids the caller actually sent.
+      const body = typeof answer === "function" ? answer(envelope) : answer
+      return { ok: true, status: 200, contentType: "json", body: JSON.stringify(body) }
     },
     async providerStream(envelope) {
       requests.push(JSON.parse(JSON.stringify(envelope)))
@@ -473,4 +475,88 @@ test("the settings markup exposes the write-only controls the controller binds",
   for (const id of ["gemini-key-actions", "llm-key-actions"]) {
     assert.match(new RegExp(`<div id="${id}"[^>]*>`).exec(markup)?.[0] ?? "", /hidden/)
   }
+})
+
+// The same harness drives the box-level job, which decides from the stamps on the page instead of
+// from the provider, so the assertions are about what was sent the second time.
+function boxHarness(t, texts) {
+  return createHarness(t, {
+    desktop: true,
+    answer: (request) => {
+      const { lines } = JSON.parse(request.payload.messages[1].content)
+      return {
+        choices: [{
+          message: { content: JSON.stringify({ lines: lines.map(({ id, text }) => ({ id, text: "Dịch " + text })) }) },
+        }],
+      }
+    },
+  }).then((harness) => {
+    harness.page.boxes = texts.map((text, index) => ({
+      id: "b" + (index + 1),
+      x: .1,
+      y: .1 + index * .2,
+      w: .3,
+      h: .1,
+      text,
+      size: 24,
+      font: "Arial",
+      color: "#171717",
+      align: "center",
+      rotation: 0,
+      fill: true,
+    }))
+    harness.selectProvider("openai", OPENAI_BASE)
+    harness.byId("llm-model").value = "hy-mt2-manga"
+    return harness
+  })
+}
+
+function sentTexts(request) {
+  return JSON.parse(request.payload.messages[1].content).lines.map(({ text }) => text)
+}
+
+test("a second box job sends nothing and an edited line sends only that box", async (t) => {
+  const harness = await boxHarness(t, ["おはよう", "またね"])
+
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 1)
+  assert.deepEqual(sentTexts(harness.requests[0]), ["おはよう", "またね"])
+  assert.deepEqual(harness.page.boxes.map(({ text }) => text), ["Dịch おはよう", "Dịch またね"])
+
+  // Nothing was edited since the last run, so the job converges without a request.
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 1, "an unchanged page costs no request")
+  assert.deepEqual(harness.page.boxes.map(({ text }) => text), ["Dịch おはよう", "Dịch またね"])
+  assert.match(harness.lastStatus().message, /Không có khung nào cần dịch lại/)
+
+  // One edited line re-sends that box only and the other line keeps its text.
+  harness.page.boxes[0].text = "Chào buổi sáng nhé"
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 2)
+  assert.deepEqual(sentTexts(harness.requests[1]), ["Chào buổi sáng nhé"])
+  assert.equal(harness.page.boxes[0].text, "Dịch Chào buổi sáng nhé")
+  assert.equal(harness.page.boxes[1].text, "Dịch またね", "an unchanged line keeps its text")
+  assert.match(harness.lastStatus().message, /Đã dịch 1 khung thay đổi, giữ nguyên 1 khung/)
+})
+
+test("a glossary edit re-sends only the boxes that cite the term", async (t) => {
+  const harness = await boxHarness(t, ["おはよう、先生", "またね"])
+
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 1)
+
+  harness.byId("translation-glossary").value = "先生 = thầy"
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 2, "a new term reaches the line that mentions it")
+  assert.deepEqual(sentTexts(harness.requests[1]), ["Dịch おはよう、先生"])
+
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 2, "the citing box converges with the new glossary")
+
+  // A term nobody cites changes nothing on this page.
+  harness.byId("translation-glossary").value = "先生 = thầy\n悪魔 = ác quỷ"
+  await harness.byId("translate-boxes").onclick()
+  assert.equal(harness.requests.length, 2, "an unrelated term invalidates no box")
+  assert.equal(harness.page.translationJob.state, "done")
+  assert.match(harness.page.translationJob.signature, /悪魔/)
 })

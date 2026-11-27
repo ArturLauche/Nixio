@@ -21,7 +21,8 @@ import { createTranslationMemoryStore } from "./translation-memory.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
-import { remainingTranslations, translationLabel } from "./translation.js"
+import { translationLabel } from "./translation.js"
+import { resumePending } from "./incremental-translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
 import { alignBoxes, distributeBoxes, duplicateBox, reorderBox } from "./tools.js"
 import { cleanRawPageImage, cleanRawPixels } from "./raw-cleanup.js"
@@ -612,7 +613,7 @@ function syncProjectActions() {
 let chat
 function syncTranslationActions() {
   const settings = translation.settings()
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
+  byId("resume-translation").disabled = projectBusy() || !resumePending(state.pages, settings)
   byId("pages").querySelectorAll(".page-job").forEach((element, index) => {
     const page = state.pages[index]
     element.dataset.state = page.translationJob?.state ?? "pending"
@@ -686,7 +687,7 @@ function renderPages() {
   syncToolControls()
   byId("box-form").inert = projectBusy()
   projectSettings.forEach((field) => { field.disabled = state.translating || state.openingProject })
-  byId("resume-translation").disabled = projectBusy() || !remainingTranslations(state.pages, settings).length
+  byId("resume-translation").disabled = projectBusy() || !resumePending(state.pages, settings)
   byId("stop-translation").disabled = !state.translating
   renderPresets()
   byId("check-export").disabled = projectBusy()
@@ -1844,7 +1845,9 @@ function moveBoxLayer(delta) {
 byId("box-layer-up").onclick = () => moveBoxLayer(1)
 byId("box-layer-down").onclick = () => moveBoxLayer(-1)
 
-function applyTranslation(page, lines) {
+// `onPlaced` receives every box this pass wrote, so the caller that knows the translation settings
+// can record which source line each box now holds and skip it on the next run.
+function applyTranslation(page, lines, onPlaced) {
   const regions = page.boxes.length ? page.boxes.map((box) => ({ box: toCoordinates(box.originalBox ?? box), existing: box }))
     : lines.filter((line) => line.box).map((line) => ({ box: line.box }))
   const { placed, unplaced } = matchDialogue(lines, regions)
@@ -1857,6 +1860,7 @@ function applyTranslation(page, lines) {
       box.cleanup = true
       page.boxes.push(box)
     }
+    onPlaced?.(box, line)
   }
   page.unplaced = unplaced
   return placed.length

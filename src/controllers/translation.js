@@ -5,7 +5,6 @@ import {
   validateEndpointUrl,
 } from "../openai-compat.js"
 import {
-  remainingTranslations,
   translateBoxesForProvider,
   translationNotes,
   translationSignature,
@@ -16,6 +15,13 @@ import {
   normalizeSourceText,
   translationMemoryScope,
 } from "../translation-memory.js"
+import {
+  applyBoxTranslations,
+  hasFingerprints,
+  recordBoxTranslation,
+  resumeWork,
+  staleBoxes,
+} from "../incremental-translation.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
 import { glossaryStatusText, parseTerminologyGraph } from "../terminology-graph.js"
 import { groupDialogue } from "../io.js"
@@ -340,21 +346,26 @@ export function setupTranslation({
     return { ...settings, key }
   }
 
+  // Earlier dialogue from the page before this one, when it was translated with the same settings.
+  function carriedContext(page, signature) {
+    const previousPage = state.pages[state.pages.indexOf(page) - 1]
+    return previousPage?.translationContext?.signature === signature
+      ? previousPage.translationContext.lines
+      : []
+  }
+
   async function processPages(pages, read, action, kind = "translate") {
-    if (projectBusy() || !pages.length) return
+    if (projectBusy() || !pages.length) return false
     let settings
     try {
       settings = prepareCredentials(readTranslationSettings())
     } catch (error) {
-      return status(error.message, true)
+      status(error.message, true)
+      return false
     }
     const signature = translationSignature(settings)
     const scope = translationMemoryScope(settings)
-    const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
-    let context =
-      previousPage?.translationContext?.signature === signature
-        ? previousPage.translationContext.lines
-        : []
+    let context = carriedContext(pages[0], signature)
     let completed = 0
     let placed = 0
     let skipped = 0
@@ -381,7 +392,10 @@ export function setupTranslation({
         })
         translationController.signal.throwIfAborted()
         if (lines.length) {
-          placed += applyTranslation(page, lines)
+          // A whole-page pass rewrites every box it places, so each one is stamped with the input it
+          // came from and a later box job knows it does not have to send it again.
+          placed += applyTranslation(page, lines, (box, line) =>
+            recordBoxTranslation(box, { source: line.source, settings, page }))
           skipped += page.unplaced.length
           // Page translation learns the same pairs the box path does, so a later identical line is
           // already in the memory when the user asks for it there.
@@ -422,6 +436,7 @@ export function setupTranslation({
       }
       const active = selectedPage()
       if (active && pages.includes(active)) notifyOverflowIfAny?.(active, "sau khi dịch")
+      return true
     } catch (error) {
       const stopped = translationController.signal.aborted
       const reason = providerFailureText(error, settings.provider)
@@ -446,6 +461,154 @@ export function setupTranslation({
           key: "batch-translate",
         })
       }
+      return false
+    } finally {
+      state.translating = false
+      translationController = null
+      render()
+    }
+  }
+
+  // One page of a box job: only the boxes that were stale are sent, and only the boxes that answered
+  // are written back and stamped. The job signature becomes the current one, so the page stops
+  // reporting "settings changed" once its boxes are up to date.
+  async function translateBoxesOnPage(page, boxes, settings, signature) {
+    const context = carriedContext(page, signature)
+    // The memory is keyed on the source text, and a translation overwrites that text, so the sources
+    // are read before anything writes to a box. An approved pair is applied without a provider call
+    // and only the boxes the memory cannot answer are sent.
+    const scope = translationMemoryScope(settings)
+    const sources = new Map(boxes.map((box) => [box.id, normalizeSourceText(box.text)]))
+    const plan = memory.plan(boxes, { scope, page: page.name })
+    const reused = memory.apply(plan.hits)
+    for (const hit of plan.hits) {
+      recordBoxTranslation(hit.box, { source: sources.get(hit.boxId) ?? "", settings, page })
+    }
+    page.translationJob = { kind: "translate", signature, state: "running" }
+    renderPages()
+    if (!plan.pending.length) {
+      page.translationJob = { kind: "translate", signature, state: "done" }
+      status(`Đã dùng bộ nhớ dịch cho ${reused}/${boxes.length} khung chữ, không gọi API.`)
+      return { updated: 0, kept: boxes.length - reused, reused }
+    }
+    const report = (message) => status(page.name + " · " + message)
+    const translated = await translateBoxesForProvider(settings.provider, page, plan.pending, {
+      ...settings,
+      notes: translationNotes(settings),
+      context,
+      report,
+      signal: translationController.signal,
+    })
+    translationController.signal.throwIfAborted()
+    const applied = applyBoxTranslations(page, plan.pending, translated, settings)
+    // A provider answer is remembered unreviewed: it is offered next time, never trusted silently.
+    const byBoxId = new Map(translated.map((item) => [item.boxId, item]))
+    for (const box of plan.pending) {
+      const match = byBoxId.get(box.id)
+      if (!match?.text) continue
+      memory.record(
+        { source: sources.get(box.id) ?? "", target: match.text },
+        { scope, page: page.name, style: boxStyleSignature(box) },
+      )
+    }
+    page.translationContext = {
+      signature,
+      lines: [
+        ...context,
+        ...translated
+          .filter(({ source }) => source)
+          .map(({ source, text }) => ({ source: source.slice(0, 240), text: text.slice(0, 240) })),
+      ].slice(-8),
+    }
+    page.translationJob = { kind: "translate", signature, state: "done" }
+    return { updated: applied.updated, kept: applied.kept, reused }
+  }
+  // Incremental translation job. Only boxes whose inputs changed since their last translation are
+  // sent, so a second press costs no request at all and a glossary edit re-translates just the boxes
+  // that cite the term. Pages are still walked in page order and keep the same job states, progress
+  // checkpoint and stop button as the whole-page job.
+  async function translateChangedBoxes(pages) {
+    if (projectBusy() || !pages.length) return false
+    let settings
+    try {
+      settings = prepareCredentials(readTranslationSettings())
+    } catch (error) {
+      status(error.message, true)
+      return false
+    }
+    const signature = translationSignature(settings)
+    const plan = pages
+      .map((page) => ({ page, boxes: staleBoxes(page, settings) }))
+      .filter(({ boxes }) => boxes.length)
+    if (!plan.length) {
+      // Nothing is stale, but a page whose settings moved past its boxes still reports a stale job;
+      // its text already matches the current settings, so the job signature can catch up for free.
+      let refreshed = false
+      for (const page of pages) {
+        if (!hasFingerprints(page) || page.translationJob?.signature === signature) continue
+        page.translationJob = { kind: "translate", signature, state: "done" }
+        refreshed = true
+      }
+      if (refreshed) renderPages()
+      status("Không có khung nào cần dịch lại: mọi khung đã khớp thiết lập hiện tại.")
+      return true
+    }
+    checkpoint(undefined, {
+      label: plan.length === 1 ? `Dịch trang ${plan[0].page.name}` : `Dịch ${plan.length} trang thay đổi`,
+      kind: "translate",
+    })
+    translationController = new AbortController()
+    state.translating = true
+    renderInspector()
+    let updated = 0
+    let kept = 0
+    let reusedMemory = 0
+    let completed = 0
+    let activePage
+    try {
+      for (const { page, boxes } of plan) {
+        activePage = page
+        const applied = await translateBoxesOnPage(page, boxes, settings, signature)
+        updated += applied.updated
+        kept += applied.kept
+        reusedMemory += applied.reused
+        completed++
+        if (selectedPage() === page) {
+          renderCanvas()
+          renderInspector()
+        }
+      }
+      // A run the memory answered on its own says so: the user did not spend a call for it.
+      if (!updated && reusedMemory) {
+        status(`Đã dùng bộ nhớ dịch cho ${reusedMemory} khung chữ, không gọi API.`)
+      } else {
+        status(
+          plan.length === 1
+            ? `Đã dịch ${updated} khung thay đổi, giữ nguyên ${kept} khung trên trang.` +
+              (reusedMemory ? ` Dùng lại ${reusedMemory} cặp từ bộ nhớ dịch.` : "")
+            : `Đã dịch ${updated} khung thay đổi trên ${completed}/${pages.length} trang, giữ nguyên ${kept} khung.` +
+              (reusedMemory ? ` Dùng lại ${reusedMemory} cặp từ bộ nhớ dịch.` : ""),
+        )
+      }
+      for (const { page } of plan) notifyOverflowIfAny?.(page, "sau khi dịch khung chữ")
+      return true
+    } catch (error) {
+      const stopped = translationController.signal.aborted
+      const reason = providerFailureText(error, settings.provider)
+      if (activePage)
+        activePage.translationJob = {
+          kind: "translate",
+          signature,
+          state: stopped ? "pending" : "error",
+          error: stopped ? undefined : reason,
+        }
+      status(
+        stopped
+          ? "Đã dừng dịch khung chữ."
+          : `Không dịch được khung chữ. ${completed}/${plan.length} trang đã xong. ${reason}`,
+        !stopped,
+      )
+      return false
     } finally {
       state.translating = false
       translationController = null
@@ -457,87 +620,21 @@ export function setupTranslation({
     const page = selectedPage()
     if (projectBusy() || !page) return
     if (!page.boxes.length) return status("Trang hiện tại chưa có khung chữ nào để dịch.", true)
-    // A translation overwrites the source text, and the memory is keyed on exactly that text, so the
-    // sources are read before anything writes to the boxes.
-    const settingsInput = readTranslationSettings()
-    const signature = translationSignature(settingsInput)
-    const scope = translationMemoryScope(settingsInput)
-    const sources = new Map(page.boxes.map((box) => [box.id, normalizeSourceText(box.text)]))
-    const plan = memory.plan(page.boxes, { scope, page: page.name })
-    // A page the memory already covers needs no key, no request and no spinner.
-    if (!plan.pending.length) {
-      checkpoint(undefined, { label: `Áp dụng bộ nhớ dịch cho trang ${page.name}`, kind: "translate" })
-      const applied = memory.apply(plan.hits)
-      page.translationJob = { kind: "translate", signature, state: "done" }
-      status(`Đã dùng bộ nhớ dịch cho ${applied}/${page.boxes.length} khung chữ, không gọi API.`)
-      render()
+    await translateChangedBoxes([page])
+  }
+
+  // Resume patches the boxes that drifted first, then reads the pages that still need a whole-page
+  // pass — so a stale glossary or one edited line no longer costs an OCR pass over the chapter, and
+  // the run still ends on the page count of the work that actually had to be re-read.
+  async function resumeTranslation() {
+    if (projectBusy()) return
+    const work = resumeWork(state.pages, readTranslationSettings())
+    if (!work.full.length && !work.delta.length) {
+      status("Không còn trang nào cần dịch.")
       return
     }
-    let settings
-    try {
-      settings = prepareCredentials(settingsInput)
-    } catch (error) {
-      return status(error.message, true)
-    }
-    const reused = memory.apply(plan.hits)
-    const previousPage = state.pages[state.pages.indexOf(page) - 1]
-    const context =
-      previousPage?.translationContext?.signature === signature
-        ? previousPage.translationContext.lines
-        : []
-    checkpoint(undefined, { label: `Dịch trang ${page.name}`, kind: "translate" })
-    translationController = new AbortController()
-    state.translating = true
-    page.translationJob = { kind: "translate", signature, state: "running" }
-    renderPages()
-    renderInspector()
-    try {
-      const report = (message) => status(page.name + " · " + message)
-      const requestSettings = { ...settings, notes: translationNotes(settings), context, report, signal: translationController.signal }
-      const translated = await translateBoxesForProvider(settings.provider, page, plan.pending, requestSettings)
-      translationController.signal.throwIfAborted()
-      const byBoxId = new Map(translated.map((item) => [item.boxId, item]))
-      let updated = reused
-      for (const box of plan.pending) {
-        const match = byBoxId.get(box.id)
-        if (!match?.text) continue
-        box.text = match.text
-        updated++
-        // A provider answer is remembered unreviewed: it is offered next time, not trusted silently.
-        memory.record(
-          { source: sources.get(box.id) ?? "", target: match.text },
-          { scope, page: page.name, style: boxStyleSignature(box) },
-        )
-      }
-      page.translationContext = {
-        signature,
-        lines: [
-          ...context,
-          ...translated.map(({ source, text }) => ({
-            source: source.slice(0, 240),
-            text: text.slice(0, 240),
-          })),
-        ].slice(-8),
-      }
-      page.translationJob = { kind: "translate", signature, state: "done" }
-      status(`Đã dịch ${updated}/${page.boxes.length} khung chữ trên trang` +
-        (reused ? `, dùng lại ${reused} cặp từ bộ nhớ dịch` : "") + ".")
-      notifyOverflowIfAny?.(page, "sau khi dịch khung chữ")
-    } catch (error) {
-      const stopped = translationController.signal.aborted
-      const reason = providerFailureText(error, settings.provider)
-      page.translationJob = {
-        kind: "translate",
-        signature,
-        state: stopped ? "pending" : "error",
-        error: stopped ? undefined : reason,
-      }
-      status(stopped ? "Đã dừng dịch khung chữ." : "Không dịch được khung chữ. " + reason, !stopped)
-    } finally {
-      state.translating = false
-      translationController = null
-      render()
-    }
+    if (work.delta.length && !(await translateChangedBoxes(work.delta))) return
+    if (work.full.length) await processPages(work.full, imageTranslator, "dịch")
   }
 
   const imageTranslator = (page, settings) =>
@@ -562,12 +659,7 @@ export function setupTranslation({
     processPages([selectedPage()].filter(Boolean), imageTranslator, "dịch")
   byId("translate-all").onclick = () =>
     processPages([...state.pages], imageTranslator, "dịch")
-  byId("resume-translation").onclick = () =>
-    processPages(
-      remainingTranslations(state.pages, readTranslationSettings()),
-      imageTranslator,
-      "dịch",
-    )
+  byId("resume-translation").onclick = resumeTranslation
   byId("stop-translation").onclick = () => translationController?.abort()
   byId("align-script").onclick = () => {
     const page = selectedPage()

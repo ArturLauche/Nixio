@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { readProject, writeProject } from "../src/project.js"
+import { recordBoxTranslation, staleBoxes } from "../src/incremental-translation.js"
 
 function sampleProject() {
   const rect = { x: .1, y: .2, w: .5, h: .3 }
@@ -89,6 +90,31 @@ test("version 2 persists independent cleanup strokes, presets and interrupted tr
   assert.deepEqual(opened.pages[0].boxes[0], box)
   assert.deepEqual(opened.presets, project.presets)
   assert.equal(opened.pages[0].translationJob.state, "pending")
+})
+
+test("a box stamp is saved, so a reopened project knows which boxes are stale", async () => {
+  const project = sampleProject()
+  const settings = {
+    provider: "gemini", model: "auto", source: "Japanese", target: "Vietnamese",
+    notes: "", direction: "ltr", glossary: "先生 = thầy",
+  }
+  const box = project.pages[0].boxes[0]
+  box.text = "Chào bạn!"
+  recordBoxTranslation(box, { source: "こんにちは、先生", settings, page: project.pages[0] })
+  const opened = await readProject(writeProject(project))
+  assert.deepEqual(opened.pages[0].boxes[0].translationStamp, box.translationStamp)
+  assert.deepEqual(opened.pages[0].boxes[0].translationStamp.terms, [["先生", "thầy"]])
+  assert.deepEqual(staleBoxes(opened.pages[0], settings), [])
+  assert.deepEqual(staleBoxes(opened.pages[0], { ...settings, glossary: "先生 = thầy giáo" }).map(({ text }) => text), ["Chào bạn!"])
+  // A project saved without stamps — another build, another machine — has nothing to compare.
+  delete opened.pages[0].boxes[0].translationStamp
+  assert.equal(staleBoxes(opened.pages[0], settings).length, 1)
+})
+
+test("a malformed box stamp cannot be saved", () => {
+  const project = sampleProject()
+  project.pages[0].boxes[0].translationStamp = { hash: "không phải hex", source: "", output: "", terms: [] }
+  assert.throws(() => writeProject(project), /không hợp lệ/)
 })
 
 test("version 1 projects open with empty presets and glossary", async () => {
