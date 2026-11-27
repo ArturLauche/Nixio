@@ -156,6 +156,7 @@ async function searchTavily(query, { limit, searchApiKey, signal }) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "omit",
+    redirect: "error",
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
     body: JSON.stringify({
       api_key: key,
@@ -179,6 +180,7 @@ async function searchSearxng(query, { limit, searchUrl, signal }) {
   const url = `${base}/search?q=${encodeURIComponent(query)}&format=json`
   const response = await fetch(url, {
     credentials: "omit",
+    redirect: "error",
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
   })
   if (!response.ok) throw new Error(`SearXNG trả lỗi ${response.status}.`)
@@ -269,6 +271,7 @@ export async function fetchWebPage(rawUrl, { maxChars = 8000, signal } = {}) {
   try {
     const response = await fetch(safe, {
       credentials: "omit",
+      redirect: "error",
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
     })
     if (!response.ok) throw new Error(`Máy chủ trả lỗi ${response.status}.`)

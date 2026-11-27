@@ -9,7 +9,8 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
   if (!rgba || rgba.length !== pixelCount * 4 || pixelCount <= 0) {
     throw new Error("Dữ liệu ảnh không hợp lệ để làm sạch raw.")
   }
-  const s = Math.min(1, Math.max(0, Number(strength) || 0.7))
+  const rawStrength = Number(strength)
+  const s = Number.isFinite(rawStrength) ? Math.min(1, Math.max(0, rawStrength)) : 0.7
   const out = new Uint8ClampedArray(rgba)
 
   // 1. Luminance + per-channel histograms & near-grayscale detection.

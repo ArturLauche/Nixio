@@ -3,6 +3,9 @@ export function translationSignature(settings) {
   if (settings.provider && settings.provider !== "gemini") {
     base.push(settings.provider, settings.baseUrl ?? "", settings.llmModel ?? "")
   }
+  if (settings.skillPrompt) {
+    base.push(settings.skillPrompt)
+  }
   return JSON.stringify(base)
 }
 

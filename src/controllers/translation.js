@@ -98,6 +98,8 @@ export function setupTranslation({
 
   function readTranslationSettings() {
     const provider = byId("translation-provider").value
+    const skillPrefs = loadSkillPrefs()
+    const skillPrompt = resolveSkillPrompt(skillPrefs.skillId, skillPrefs.customInstructions)
     return {
       provider,
       model: byId("gemini-model").value,
@@ -108,13 +110,12 @@ export function setupTranslation({
       notes: byId("translation-notes").value.trim(),
       direction: byId("direction").value,
       glossary: byId("translation-glossary").value.trim(),
+      skillPrompt,
     }
   }
 
   function prepareCredentials(settings) {
-    const skillPrefs = loadSkillPrefs()
-    const skillPrompt = resolveSkillPrompt(skillPrefs.skillId, skillPrefs.customInstructions)
-    const combinedNotes = [settings.notes, skillPrompt].filter(Boolean).join("\n\n")
+    const combinedNotes = [settings.notes, settings.skillPrompt].filter(Boolean).join("\n\n")
     const enriched = combinedNotes ? { ...settings, notes: combinedNotes } : settings
     if (enriched.provider === "openai") {
       validateEndpointUrl(enriched.baseUrl)
@@ -128,13 +129,14 @@ export function setupTranslation({
 
   async function processPages(pages, read, action, kind = "translate") {
     if (projectBusy() || !pages.length) return
+    const rawSettings = readTranslationSettings()
     let settings
     try {
-      settings = prepareCredentials(readTranslationSettings())
+      settings = prepareCredentials(rawSettings)
     } catch (error) {
       return status(error.message, true)
     }
-    const signature = translationSignature(settings)
+    const signature = translationSignature(rawSettings)
     const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
     let context =
       previousPage?.translationContext?.signature === signature
@@ -234,13 +236,14 @@ export function setupTranslation({
     const page = selectedPage()
     if (projectBusy() || !page) return
     if (!page.boxes.length) return status("Trang hiện tại chưa có khung chữ nào để dịch.", true)
+    const rawSettings = readTranslationSettings()
     let settings
     try {
-      settings = prepareCredentials(readTranslationSettings())
+      settings = prepareCredentials(rawSettings)
     } catch (error) {
       return status(error.message, true)
     }
-    const signature = translationSignature(settings)
+    const signature = translationSignature(rawSettings)
     const previousPage = state.pages[state.pages.indexOf(page) - 1]
     const context =
       previousPage?.translationContext?.signature === signature

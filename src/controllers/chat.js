@@ -522,6 +522,7 @@ export function setupChat({
     }
     chatHistory = res.history
     if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
+    renderPersistedSession()
     statusEl.textContent = `Đã nén ${res.foldedMessages} tin nhắn cũ (tiết kiệm ~${res.charsSaved} ký tự).`
     notify?.({
       kind: "info",

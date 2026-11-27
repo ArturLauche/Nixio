@@ -45,8 +45,8 @@ function firstMarkdownHeading(markdown) {
 
 function resolvePage(state, selectedPage, pageIndex) {
   if (Number.isInteger(pageIndex)) {
-    const idx = pageIndex >= 1 && pageIndex <= state.pages.length ? pageIndex - 1 : pageIndex
-    return { page: state.pages[idx] ?? null, index: idx }
+    const idx = pageIndex - 1
+    return { page: idx >= 0 && idx < state.pages.length ? state.pages[idx] : null, index: idx }
   }
   const current = selectedPage()
   const index = current ? state.pages.indexOf(current) : -1

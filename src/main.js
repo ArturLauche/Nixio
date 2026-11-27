@@ -51,17 +51,12 @@ let previewRedraw
 let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
+let nudgeSnapshot = null
+let nudgeTimer = null
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
-const boxFields = {
-  text: "box-text", size: "box-size", font: "box-font", color: "box-color",
-  align: "box-align", rotation: "box-rotation",
-  lineHeight: "box-line-height", strokeWidth: "box-stroke-width", strokeColor: "box-stroke-color",
-  shadowBlur: "box-shadow-blur", shadowColor: "box-shadow-color",
-  fillShape: "box-fill-shape", fillColor: "box-fill-color",
-}
 const resizeHandleNames = ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 
 function editorSnapshot() {
@@ -72,7 +67,20 @@ function editorSnapshot() {
   })
 }
 
+function commitNudgeCheckpoint() {
+  if (nudgeTimer) {
+    clearTimeout(nudgeTimer)
+    nudgeTimer = null
+  }
+  if (!nudgeSnapshot) return false
+  const before = nudgeSnapshot
+  nudgeSnapshot = null
+  checkpoint(before)
+  return true
+}
+
 function commitLiveFormCheckpoint() {
+  commitNudgeCheckpoint()
   if (!formEditSnapshot) return false
   const before = formEditSnapshot
   formEditSnapshot = null
@@ -92,6 +100,9 @@ function releaseUnusedImages() {
 
 function checkpoint(snapshot) {
   if (!snapshot) {
+    if (nudgeSnapshot) {
+      commitNudgeCheckpoint()
+    }
     if (formEditSnapshot) {
       const pending = formEditSnapshot
       formEditSnapshot = null
@@ -1156,10 +1167,12 @@ document.addEventListener("keydown", (event) => {
     const stepPx = event.shiftKey ? 10 : 1
     const dx = (event.key === "ArrowRight" ? stepPx : event.key === "ArrowLeft" ? -stepPx : 0) / page.image.naturalWidth
     const dy = (event.key === "ArrowDown" ? stepPx : event.key === "ArrowUp" ? -stepPx : 0) / page.image.naturalHeight
-    commitLiveFormCheckpoint()
-    checkpoint()
+    if (formEditSnapshot) commitLiveFormCheckpoint()
+    if (!nudgeSnapshot) nudgeSnapshot = editorSnapshot()
     for (const item of targets) Object.assign(item, nudgeBox(item, dx, dy))
     renderCanvas()
+    if (nudgeTimer) clearTimeout(nudgeTimer)
+    nudgeTimer = setTimeout(commitNudgeCheckpoint, 600)
   }
 })
 
@@ -1167,9 +1180,13 @@ document.addEventListener("keyup", (event) => {
   if (event.key === " " && gestures.getSpaceHeld()) {
     gestures.setSpaceHeld(false)
   }
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+    commitNudgeCheckpoint()
+  }
 })
 window.addEventListener("blur", () => {
   if (gestures.getSpaceHeld()) gestures.setSpaceHeld(false)
+  commitNudgeCheckpoint()
 })
 
 const notifications = createNotificationCenter({ byId })
