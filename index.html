@@ -157,6 +157,7 @@
           <label class="field" for="translation-glossary">Bảng thuật ngữ
             <textarea id="translation-glossary" rows="3" placeholder="Tên gốc = tên dịch, mỗi mục một dòng"></textarea>
           </label>
+          <button type="button" class="button" id="open-style-guide" title="Quy tắc phong cách dịch riêng của dự án này">Hướng dẫn phong cách…</button>
           <button type="button" class="button full" id="translate-boxes">Dịch các khung chữ đang có</button>
           <button type="button" class="button full" id="translate">Dịch trang đang mở</button>
           <button type="button" class="button full" id="translate-all">Dịch cả lượt</button>
@@ -535,6 +536,16 @@
     <div class="form-actions">
       <button type="button" id="close-preflight" class="button">Đóng</button>
       <button type="button" id="continue-export" class="button primary">Vẫn xuất</button>
+    </div>
+  </dialog>
+  <dialog id="style-guide-dialog">
+    <h2>Hướng dẫn phong cách dự án</h2>
+    <p class="muted">Quy tắc được lưu cùng tệp dự án, tự tiêm vào mọi lượt dịch và được Trợ lý AI dùng để rà lỗi tức thì (0-token).</p>
+    <div id="style-guide-fields"></div>
+    <div class="form-actions">
+      <button type="button" id="save-style-guide" class="button primary">Lưu hướng dẫn</button>
+      <button type="button" id="clear-style-guide" class="button">Xóa toàn bộ</button>
+      <button type="button" id="close-style-guide" class="button">Đóng</button>
     </div>
   </dialog>
   <dialog id="find-replace-dialog">

@@ -1,4 +1,5 @@
 import { findMatches, replaceMatches } from "../tools.js"
+import { normalizeStyleGuide, styleGuideFields } from "../style-guide.js"
 
 export function setupDialogs({
   state,
@@ -11,9 +12,91 @@ export function setupDialogs({
   listButton,
   projectBusy,
   commitLiveForm,
+  editorSnapshot,
+  onStyleGuideChange,
 }) {
   const findDialog = byId("find-replace-dialog")
   const shortcutsDialog = byId("shortcuts-dialog")
+  const styleGuideDialog = byId("style-guide-dialog")
+  const styleGuideHost = byId("style-guide-fields")
+  let styleGuideBefore = null
+
+  function styleGuideControl(field) {
+    const label = document.createElement("label")
+    label.className = "field"
+    const title = document.createElement("span")
+    title.textContent = field.label
+    label.append(title)
+    let control
+    if (field.kind === "select") {
+      control = document.createElement("select")
+      control.id = "sg-" + field.id
+      control.append(new Option("Theo mặc định", ""))
+      for (const option of field.options) control.append(new Option(option.label, option.value))
+    } else if (field.rows) {
+      control = document.createElement("textarea")
+      control.id = "sg-" + field.id
+      control.rows = field.rows
+      control.placeholder = field.placeholder ?? ""
+    } else {
+      control = document.createElement("input")
+      control.id = "sg-" + field.id
+      control.type = "text"
+      control.placeholder = field.placeholder ?? ""
+    }
+    if (field.maxLength) control.maxLength = field.maxLength
+    label.append(control)
+    return label
+  }
+
+  if (styleGuideHost) {
+    styleGuideHost.replaceChildren(...styleGuideFields.map(styleGuideControl))
+  }
+
+  function readStyleGuideForm() {
+    const raw = {}
+    for (const field of styleGuideFields) {
+      const control = byId("sg-" + field.id)
+      if (!control) continue
+      const value = String(control.value ?? "").trim()
+      if (value) raw[field.id] = value
+    }
+    return normalizeStyleGuide(raw)
+  }
+
+  function fillStyleGuideForm(guide) {
+    const clean = normalizeStyleGuide(guide) ?? {}
+    for (const field of styleGuideFields) {
+      const control = byId("sg-" + field.id)
+      if (control) control.value = clean[field.id] ?? ""
+    }
+  }
+
+  function openStyleGuide() {
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    commitLiveForm?.()
+    styleGuideBefore = editorSnapshot?.()
+    fillStyleGuideForm(state.styleGuide)
+    if (!styleGuideDialog.open) styleGuideDialog.showModal()
+  }
+
+  function saveStyleGuide() {
+    const guide = readStyleGuideForm()
+    if (JSON.stringify(guide) === JSON.stringify(normalizeStyleGuide(state.styleGuide))) {
+      styleGuideDialog.close()
+      return
+    }
+    state.styleGuide = guide
+    checkpoint(styleGuideBefore, { label: "Đổi hướng dẫn phong cách", kind: "settings" })
+    onStyleGuideChange?.()
+    styleGuideDialog.close()
+    status(guide ? "Đã lưu hướng dẫn phong cách của dự án." : "Đã xóa hướng dẫn phong cách của dự án.")
+  }
+
+  byId("open-style-guide").onclick = openStyleGuide
+  byId("save-style-guide").onclick = saveStyleGuide
+  byId("clear-style-guide").onclick = () => fillStyleGuideForm(null)
+  byId("close-style-guide").onclick = () => styleGuideDialog.close()
 
   function findOptions() {
     return {
@@ -120,5 +203,5 @@ export function setupDialogs({
   byId("open-shortcuts").onclick = openShortcuts
   byId("close-shortcuts").onclick = () => shortcutsDialog.close()
 
-  return { openFind, openShortcuts, renderFindResults }
+  return { openFind, openShortcuts, openStyleGuide, renderFindResults }
 }

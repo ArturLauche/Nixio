@@ -195,6 +195,9 @@ export function buildRuntimeContextReminder({
   if (snapshot.notesPreview) {
     lines.push(`- Ghi chú xưng hô dự án: ${snapshot.notesPreview}`)
   }
+  if (snapshot.styleGuideActive) {
+    lines.push("- Hướng dẫn phong cách dự án: đang bật (gọi check_style_guide để rà lỗi 0-token trước khi sửa hàng loạt).")
+  }
 
   const safeBody = escapeSystemReminderBody(lines.join("\n"))
   return `<system-reminder>\nTrạng thái phiên làm việc hiện tại của Khung Thoại (thay thế mọi thông tin cũ trong lịch sử):\n${safeBody}\n</system-reminder>`

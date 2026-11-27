@@ -1,5 +1,6 @@
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
 import { lintChapter } from "./linter.js"
+import { lintStyleGuide, normalizeStyleGuide } from "./style-guide.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
 import { translationSignature } from "./translation.js"
 import {
@@ -766,6 +767,42 @@ export function createAgentTools({
       },
     },
     {
+      name: "check_style_guide",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 8000,
+      description:
+        "Rà ngay lập tức (0-token, không gọi LLM) toàn bộ chương hoặc một trang theo Hướng dẫn phong cách của dự án: dấu ngoặc kép, cách viết hoa và xử lý âm thanh/SFX. Nên chạy trước khi dịch hoặc chỉnh sửa hàng loạt để bắt lỗi theo trang/khung.",
+      parameters: {
+        type: "object",
+        properties: {
+          pageIndex: { type: "integer", description: "Số trang (1-based). Bỏ trống để quét cả chương." },
+        },
+      },
+      async run(args) {
+        const guide = normalizeStyleGuide(readTranslationSettings?.()?.styleGuide)
+        if (!guide) {
+          return {
+            summary: "Dự án chưa có Hướng dẫn phong cách; mở 'Hướng dẫn phong cách…' trong phần cài đặt dịch để tạo.",
+            data: { active: false, total: 0, byType: {}, issues: [] },
+          }
+        }
+        const targetPages = Number.isInteger(args?.pageIndex)
+          ? [resolvePage(state, selectedPage, args.pageIndex).page].filter(Boolean)
+          : state.pages
+        if (!targetPages.length) {
+          return { summary: "Không có trang nào để rà phong cách.", data: { active: true, total: 0, byType: {}, issues: [] } }
+        }
+        const qa = lintStyleGuide(targetPages, guide)
+        return {
+          summary: qa.total
+            ? `Phát hiện ${qa.total} lỗi phong cách (ngoặc kép: ${qa.byType.quote_style}, viết hoa: ${qa.byType.casing}, SFX: ${qa.byType.sfx})`
+            : `Không có lỗi phong cách nào trên ${targetPages.length} trang`,
+          data: { active: true, ...qa },
+        }
+      },
+    },
+    {
       name: "inspect_page_image",
       category: "read",
       isConcurrencySafe: true,
@@ -1051,6 +1088,7 @@ export function createAgentTools({
       glossaryCount: glossaryLines.length,
       presetNames: (state.presets ?? []).map((p) => p.name),
       notesPreview: String(settings.notes || "").replace(/\s+/g, " ").trim().slice(0, 160),
+      styleGuideActive: Boolean(normalizeStyleGuide(settings.styleGuide)),
     }
   }
 
