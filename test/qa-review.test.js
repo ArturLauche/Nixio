@@ -258,3 +258,56 @@ test("a snapshot hands the whole board back, so undo restores the decision with 
   assert.equal(before.entries[0].state, "fixed")
   assert.deepEqual(store.snapshot().version, before.version)
 })
+
+test("a decision stops applying when a different box takes its position (#review)", () => {
+  // Two lines the same warning check reports. Deleting the first moves the second into index 0, so
+  // it inherits the address "1:0:untranslated_source" — and without the stamp it would inherit the
+  // decision with it and stop blocking the export.
+  const address = "1:0:untranslated_source"
+  const pages = () => [
+    { name: "01.png", boxes: [{ id: "b1", text: "Hello everyone" }, { id: "b2", text: "Thank you very much." }] },
+  ]
+  const english = { sourceLanguage: "English" }
+  const first = lint(pages(), english)
+  const cover = first.issues.find((issue) => issue.id === address)
+  assert.equal(cover.type, "untranslated_source")
+  assert.ok(cover.boxStamp, "the finding carries the text of its box")
+
+  const store = createQaReviewStore()
+  store.set(address, { state: "false-positive", note: "Tên nhân vật", boxStamp: cover.boxStamp, now: 5 })
+  assert.equal(store.entry(address).boxStamp, cover.boxStamp)
+  // The same pages re-lint to the same rows, so nothing expires and the first line stays settled.
+  assert.deepEqual(store.reconcile(lint(pages(), english)).expired, [])
+  const blocking = (qa) =>
+    qaBlockingFindings(buildQaBoard(qa, store.review()).findings).map(({ boxIndex }) => boxIndex)
+  assert.deepEqual(blocking(first), [1], "the second line is the one left open")
+
+  // The first box is deleted: the second line takes index 0 and its address.
+  const shifted = pages()
+  shifted[0].boxes.shift()
+  const after = lint(shifted, english)
+  assert.equal(after.issues[0].id, address, "the surviving box wears the address the decision used")
+  assert.notEqual(after.issues[0].boxStamp, cover.boxStamp, "but not the text the decision was taken on")
+
+  const board = buildQaBoard(after, store.review())
+  assert.equal(board.findings[0].state, "open", "the decision does not speak for the box that took the position")
+  assert.deepEqual(blocking(after), [0], "and the warning blocks the export again")
+
+  // A complete run retires the decision instead of carrying it onto the new box.
+  assert.deepEqual(store.reconcile(after).expired, [address])
+  assert.equal(store.entry(address), null)
+})
+
+test("a decision without a stamp keeps the old positional behaviour, so an old file still works", () => {
+  const legacy = { version: 1, entries: [{ id: EMPTY, state: "ignored", note: "Trang bìa", updatedAt: 3 }] }
+  // No stamp means the entry predates the field: it stays attached to its id, exactly as before.
+  assert.deepEqual(reconcileQaReview(legacy, lint()).expired, [])
+  assert.deepEqual(sanitizeQaReview(legacy), legacy)
+  const board = buildQaBoard(lint(), legacy)
+  assert.equal(board.findings.find((finding) => finding.id === EMPTY).state, "ignored")
+
+  // A stamp that is not one of ours cannot be stored, and a good one round-trips.
+  assert.equal(validateQaReviewEntry({ id: EMPTY, state: "ignored", note: "x", updatedAt: 1, boxStamp: "nope" }), null)
+  const kept = validateQaReviewEntry({ id: EMPTY, state: "ignored", note: "x", updatedAt: 1, boxStamp: "1a2b3c4d" })
+  assert.deepEqual(kept, { id: EMPTY, state: "ignored", note: "x", updatedAt: 1, boxStamp: "1a2b3c4d" })
+})

@@ -464,6 +464,9 @@ test("a triage decision marks the project dirty and keeps the caret in the row i
   globalThis.document.activeElement = null
 
   assert.equal(store.entry(id).state, "fixed")
+  // The decision records the text of the box it was taken on, so a later delete cannot slide it onto
+  // whatever box inherits the position.
+  assert.match(store.entry(id).boxStamp, /^[0-9a-f]{8}$/)
   assert.equal(changed, 1, "a decision is an unsaved change")
   const repainted = qaRowControls(byId, id, "SELECT")
   assert.notEqual(repainted, select, "the board repainted the row")

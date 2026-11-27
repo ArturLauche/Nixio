@@ -330,7 +330,11 @@ export function setupExports({
     error.className = "qa-error"
     error.setAttribute("role", "alert")
     const save = () => {
-      const result = qaReview?.set?.(finding.id, { state: stateSelect.value, note: noteInput.value })
+      const result = qaReview?.set?.(finding.id, {
+        state: stateSelect.value,
+        note: noteInput.value,
+        boxStamp: finding.boxStamp,
+      })
       if (result?.error) {
         error.textContent = result.error
         return
@@ -369,7 +373,7 @@ export function setupExports({
     commitLiveForm?.()
     checkpoint(undefined, { label: "Áp gợi ý QA", kind: "qa" })
     box.text = finding.suggestion
-    qaReview?.set?.(finding.id, { state: "fixed", note: finding.note })
+    qaReview?.set?.(finding.id, { state: "fixed", note: finding.note, boxStamp: finding.boxStamp })
     render()
     changed?.()
     // The box is fixed, so the next run no longer reports it: re-linting retires the row instead
@@ -404,7 +408,7 @@ export function setupExports({
     // An export that goes ahead with open warnings records the decision on those rows, so the
     // override is a note on the board and not a dismissed dialog.
     for (const finding of qaBlockingFindings(board.findings)) {
-      qaReview?.set?.(finding.id, { state: "accepted", note: qaExportOverrideNote })
+      qaReview?.set?.(finding.id, { state: "accepted", note: qaExportOverrideNote, boxStamp: finding.boxStamp })
     }
     preflightDialog.close()
     action?.()

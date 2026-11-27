@@ -74,9 +74,14 @@ test("English source left untranslated is reported without flagging target text,
   })
   assert.deepEqual(
     Object.keys(reported.issues[0]),
-    ["type", "severity", "pageIndex", "boxIndex", "pageName", "boxId", "snippet", "message", "id"],
+    // The stamp of the box text travels with the finding so a decision cannot follow its position
+    // onto whatever box takes it after a delete.
+    ["type", "severity", "pageIndex", "boxIndex", "pageName", "boxId", "snippet", "message", "boxStamp", "id"],
   )
   assert.equal(reported.issues[0].id, "1:0:untranslated_source")
+  assert.match(reported.issues[0].boxStamp, /^[0-9a-f]{8}$/)
+  // Two different lines never share a stamp, so a decision cannot slide onto the next box.
+  assert.notEqual(lint("Hello everyone").issues[0].boxStamp, lint("Hello everyone!").issues[0].boxStamp)
   assert.equal(reported.issues[0].snippet, "Hello everyone")
   assert.match(reported.issues[0].message, /^Còn sót câu tiếng Anh chưa dịch trong "Hello everyone"\.$/)
 

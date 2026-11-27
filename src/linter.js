@@ -1,4 +1,5 @@
 import { normalizedSearch } from "./io.js"
+import { boxTextStamp } from "./qa-review.js"
 import { parseTerminologyGraph, termRenderings } from "./terminology-graph.js"
 
 // Each range list holds the canonical block plus the compatibility and half-width forms
@@ -212,9 +213,12 @@ export function lintChapter(
     punctuation_spacing: 0,
   }
 
+  // The text of the box the current check is looking at. It travels with the finding so a decision
+  // can tell "the same row" from "whatever box took this position after a delete".
+  let boxStamp = ""
   const pushIssue = (issue) => {
     byType[issue.type] = (byType[issue.type] ?? 0) + 1
-    if (issues.length < maxIssues) issues.push({ ...issue, id: findingId(issue) })
+    if (issues.length < maxIssues) issues.push({ ...issue, boxStamp, id: findingId(issue) })
   }
 
   for (let p = 0; p < pages.length; p++) {
@@ -223,6 +227,7 @@ export function lintChapter(
     for (const [boxIndex, box] of (page.boxes ?? []).entries()) {
       const raw = String(box.text ?? "")
       const trimmed = raw.trim()
+      boxStamp = boxTextStamp(trimmed)
 
       if (!trimmed || PLACEHOLDER_PATTERN.test(trimmed)) {
         pushIssue({

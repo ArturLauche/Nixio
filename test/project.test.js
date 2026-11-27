@@ -218,7 +218,8 @@ test("QA triage decisions round-trip in a version 4 manifest, and older files st
   const qaReview = {
     version: 1,
     entries: [
-      { id: "1:1:punctuation_spacing", state: "fixed", note: "Đã sửa dấu câu", updatedAt: 1712 },
+      { id: "1:1:punctuation_spacing", state: "fixed", note: "Đã sửa dấu câu", updatedAt: 1712, boxStamp: "1a2b3c4d" },
+      // A decision stored before the stamp existed keeps opening, so an old file still works.
       { id: "1:0:glossary_violation:gojo-satoru", state: "ignored", note: "Biên tập giữ nguyên", updatedAt: 1713 },
     ],
   }
@@ -250,6 +251,30 @@ test("the font a template installed is saved, so a reopen keeps typesetting with
   assert.equal(plain.defaultFont, undefined, "a project without a template font carries no field")
   assert.throws(() => writeProject({ ...project, defaultFont: "   " }), /không hợp lệ/)
   assert.throws(() => writeProject({ ...project, defaultFont: 5 }), /không hợp lệ/)
+})
+
+test("a QA decision carries the text of its box, and a bad stamp cannot be saved (#review)", async () => {
+  const project = sampleProject()
+  const decision = { id: "1:0:empty_or_placeholder", state: 'ignored', note: "Trang bìa", updatedAt: 4 }
+  const withStamp = await readProject(
+    writeProject({ ...project, qaReview: { version: 1, entries: [{ ...decision, boxStamp: "0f1e2d3c" }] } }),
+  )
+  assert.equal(withStamp.qaReview.entries[0].boxStamp, "0f1e2d3c")
+
+  // The stamp is optional, so a decision from a build that predates it still opens.
+  const withoutStamp = await readProject(
+    writeProject({ ...project, qaReview: { version: 1, entries: [decision] } }),
+  )
+  assert.equal(withoutStamp.qaReview.entries[0].boxStamp, undefined)
+
+  // Anything that is not one of our stamps is a corrupt record, not a decision.
+  for (const boxStamp of ["", "xyz", "0f1e2d3c0f1e2d3c", 12]) {
+    assert.throws(
+      () => writeProject({ ...project, qaReview: { version: 1, entries: [{ ...decision, boxStamp }] } }),
+      /không hợp lệ/,
+      String(boxStamp),
+    )
+  }
 })
 
 test("a malformed QA decision cannot be saved", () => {

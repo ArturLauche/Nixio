@@ -14,6 +14,27 @@ export const qaReviewVersion = 1
 export const qaReviewEntryLimit = 2000
 export const qaReviewNoteLimit = 400
 export const qaReviewIdLimit = 120
+export const qaReviewStampLimit = 16
+
+// A decision is addressed by the linter's positional id, which survives a reload because the
+// project format stores no box ids — but a positional id also survives the box being deleted, and
+// the next box would inherit the decision. Every decision therefore records the text its box held
+// when the decision was taken, and stops applying when that position holds different text.
+//
+// The stamp is additive: a file written with it still opens in a build that predates the field,
+// and a decision stored before it keeps the old positional behaviour until the user decides again.
+export function boxTextStamp(text) {
+  const value = typeof text === "string" ? text : ""
+  // FNV-1a over the whole line, so two different lines cannot share a stamp by sharing a prefix.
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, "0")
+}
+
+const isStamp = (value) => typeof value === "string" && /^[0-9a-f]{8}$/.test(value)
 // Written into the note of every finding an export was allowed to skip, so the override is a
 // recorded decision on the board and not a silent dialog dismissal.
 export const qaExportOverrideNote = "Đã duyệt xuất khi cảnh báo còn mở."
@@ -51,15 +72,16 @@ const emptyReview = () => ({ version: qaReviewVersion, entries: [] })
 // decides what an invalid record means for the file it is reading.
 export function validateQaReviewEntry(entry) {
   if (!entry || typeof entry !== "object") return null
-  const { id, state, note = "", updatedAt = 0 } = entry
+  const { id, state, note = "", updatedAt = 0, boxStamp } = entry
   if (!isText(id) || !id || id.length > qaReviewIdLimit) return null
   if (!qaReviewStates.includes(state)) return null
   if (!isText(note) || note.length > qaReviewNoteLimit) return null
+  if (boxStamp !== undefined && !isStamp(boxStamp)) return null
   // Ignoring a finding means saying why: without a reason the row would come back with no trace
   // of the decision behind it.
   if (state === "ignored" && !note.trim()) return null
   if (!Number.isInteger(updatedAt) || updatedAt < 0) return null
-  return { id, state, note: note.trim(), updatedAt }
+  return { id, state, note: note.trim(), updatedAt, ...(boxStamp && { boxStamp }) }
 }
 
 // Lenient counterpart of the guard above: a record from storage keeps every valid decision and
@@ -76,12 +98,22 @@ export function sanitizeQaReview(review) {
   return { version: qaReviewVersion, entries }
 }
 
+// A decision only speaks for the box it was taken on: no stamp means a decision from a build that
+// predates the field, which keeps the old positional behaviour instead of losing the decision.
+function appliesToBox(entry, issue) {
+  if (!entry) return null
+  // The linter no longer reports this row at all, so the decision goes with it.
+  if (!issue) return null
+  if (!entry.boxStamp || !issue.boxStamp) return entry
+  return entry.boxStamp === issue.boxStamp ? entry : null
+}
+
 // Every finding gets its row state, defaulting to `open`: a finding nobody has looked at yet is
 // exactly what the board must show first.
 export function attachQaReviewState(issues = [], review) {
   const stored = new Map((review?.entries ?? []).map((entry) => [entry.id, entry]))
   return issues.map((issue) => {
-    const entry = stored.get(issue.id)
+    const entry = appliesToBox(stored.get(issue.id), issue)
     return {
       ...issue,
       state: entry?.state ?? "open",
@@ -175,7 +207,7 @@ export function qaFindingBox(pages, finding) {
 
 // Records one decision. A row put back to `open` with nothing written on it is the default, so it
 // is not stored: the project file only carries decisions a human actually took.
-export function setQaFindingState(review, id, { state, note = "", now } = {}) {
+export function setQaFindingState(review, id, { state, note = "", boxStamp, now } = {}) {
   const fail = (error) => ({ review, entry: null, error })
   if (!isText(id) || !id || id.length > qaReviewIdLimit) return fail("Mục QA không hợp lệ.")
   if (!qaReviewStates.includes(state)) return fail("Trạng thái rà soát không hợp lệ.")
@@ -186,7 +218,15 @@ export function setQaFindingState(review, id, { state, note = "", now } = {}) {
   const entries = (review?.entries ?? []).filter((entry) => entry.id !== id)
   let entry = null
   if (state !== "open" || text) {
-    entry = { id, state, note: text, updatedAt: Number.isInteger(now) ? now : Date.now() }
+    entry = {
+      id,
+      state,
+      note: text,
+      updatedAt: Number.isInteger(now) ? now : Date.now(),
+      // Written only when the finding carried one, so a caller that predates the stamp keeps
+      // writing the old shape.
+      ...(isStamp(boxStamp) && { boxStamp }),
+    }
     entries.push(entry)
     // The store is bounded so a long-lived project cannot grow a manifest of decisions forever:
     // the least recently touched decision goes first.
@@ -210,9 +250,10 @@ export function reconcileQaReview(review, qa) {
   const findings = Array.isArray(qa?.issues) ? qa.issues : []
   const total = Number.isInteger(qa?.total) ? qa.total : findings.length
   if (findings.length < total) return { review: { version: qaReviewVersion, entries }, expired: [] }
-  const live = new Set(findings.map((finding) => finding.id))
-  const kept = entries.filter((entry) => live.has(entry.id))
-  const expired = entries.filter((entry) => !live.has(entry.id)).map((entry) => entry.id)
+  // A live id is not enough: the box at that position has to be the one the decision was taken on.
+  const live = new Map(findings.map((finding) => [finding.id, finding]))
+  const kept = entries.filter((entry) => appliesToBox(entry, live.get(entry.id)))
+  const expired = entries.filter((entry) => !appliesToBox(entry, live.get(entry.id))).map((entry) => entry.id)
   return { review: { version: qaReviewVersion, entries: kept }, expired }
 }
 
