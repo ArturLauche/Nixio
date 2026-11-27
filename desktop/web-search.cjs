@@ -362,10 +362,10 @@ async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYT
   throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
 }
 
-async function searchWikipedia(query, lang, limit) {
+async function searchWikipedia(query, lang, limit, signal) {
   const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=${limit}&format=json`
   try {
-    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024 })
+    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024, signal })
     const data = JSON.parse(text)
     return (data?.query?.search ?? []).map((item) => ({
       title: item.title,
@@ -378,10 +378,10 @@ async function searchWikipedia(query, lang, limit) {
   }
 }
 
-async function searchJisho(query, limit) {
+async function searchJisho(query, limit, signal) {
   const url = `https://jisho.org/api/v1/search/words?keyword=${encodeURIComponent(query)}`
   try {
-    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024 })
+    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024, signal })
     const data = JSON.parse(text)
     return (data?.data ?? []).slice(0, limit).map((entry) => {
       const jp = entry.japanese?.[0] ?? {}
@@ -407,6 +407,8 @@ async function searchJisho(query, limit) {
 async function webSearch(query, options = {}) {
   const clean = String(query || "").trim().slice(0, 240)
   if (!clean) throw new Error("Hãy nhập từ khóa tìm kiếm.")
+  const { signal } = options
+  if (signal?.aborted) throw new Error("Đã hủy yêu cầu tìm kiếm.")
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5))
   const results = []
   const hasJapanese = /[\u3040-\u30ff\u4e00-\u9faf]/.test(clean)
@@ -414,6 +416,7 @@ async function webSearch(query, options = {}) {
   try {
     const { text } = await fetchTextLimited(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(clean)}`, {
       maxBytes: 256 * 1024,
+      signal,
     })
     results.push(...parseDuckDuckGoHtml(text, limit))
   } catch {
@@ -421,13 +424,13 @@ async function webSearch(query, options = {}) {
   }
 
   if (hasJapanese) {
-    const jisho = await searchJisho(clean, Math.min(3, limit))
+    const jisho = await searchJisho(clean, Math.min(3, limit), signal)
     results.push(...jisho)
   }
 
   if (results.length < Math.min(3, limit)) {
     const langs = hasJapanese ? ["ja", "en", "vi"] : ["vi", "en"]
-    const wikiGroups = await Promise.all(langs.map((lang) => searchWikipedia(clean, lang, 3)))
+    const wikiGroups = await Promise.all(langs.map((lang) => searchWikipedia(clean, lang, 3, signal)))
     for (const group of wikiGroups) results.push(...group)
   }
 
@@ -444,7 +447,7 @@ async function webSearch(query, options = {}) {
 
 async function fetchUrl(rawUrl, options = {}) {
   const maxChars = Math.max(500, Math.min(16000, Number(options.maxChars) || 8000))
-  const { url, text: raw } = await fetchTextLimited(rawUrl)
+  const { url, text: raw } = await fetchTextLimited(rawUrl, { signal: options.signal })
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)
   const title = titleMatch ? stripHtmlToText(titleMatch[1], 200).replace(/\s+/g, " ") : ""
   return { url, title, text: stripHtmlToText(raw, maxChars) }

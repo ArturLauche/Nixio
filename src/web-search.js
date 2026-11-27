@@ -193,6 +193,37 @@ async function searchSearxng(query, { limit, searchUrl, signal }) {
   }))
 }
 
+function abortError() {
+  return new DOMException("Đã hủy yêu cầu mạng.", "AbortError")
+}
+
+function abortable(promise, signal, onAbort) {
+  let detach = () => {}
+  const aborted = new Promise((_, reject) => {
+    const handler = () => {
+      onAbort()
+      reject(abortError())
+    }
+    signal.addEventListener("abort", handler, { once: true })
+    detach = () => signal.removeEventListener("abort", handler)
+  })
+  return Promise.race([promise, aborted]).finally(() => detach())
+}
+
+/**
+ * Desktop search/fetch run in the main process, and an AbortSignal cannot be cloned through
+ * IPC. The renderer therefore tags the request with an id, asks the main process to abort it,
+ * and stops waiting immediately instead of keeping a cancelled agent turn alive.
+ */
+async function desktopRequest(bridge, method, target, options, signal) {
+  if (!signal) return bridge[method](target, options)
+  if (signal.aborted) throw abortError()
+  const id = crypto.randomUUID()
+  return abortable(bridge[method](target, { ...options, id }), signal, () => {
+    bridge.abortRequest?.(id).catch(() => {})
+  })
+}
+
 export async function searchWeb(
   query,
   { limit = 5, provider = "auto", searchUrl = "", searchApiKey = "", signal } = {},
@@ -211,8 +242,9 @@ export async function searchWeb(
   }
 
   // Auto mode: prefer Electron main-process search (DuckDuckGo + Jisho + Wikipedia, no CORS limits).
-  if (desktop?.webSearch) {
-    const data = await desktop.webSearch(clean, { limit: capped })
+  const bridge = globalThis.khungThoaiDesktop ?? desktop
+  if (bridge?.webSearch) {
+    const data = await desktopRequest(bridge, "webSearch", clean, { limit: capped }, signal)
     return { query: clean, provider: "desktop", results: data?.results ?? [] }
   }
 
@@ -238,8 +270,9 @@ export async function fetchWebPage(rawUrl, { maxChars = 8000, signal } = {}) {
   const safe = isSafePublicHttpsUrl(rawUrl)
   if (!safe) throw new Error("Chỉ cho phép đọc đường dẫn HTTPS công khai.")
 
-  if (desktop?.fetchUrl) {
-    return desktop.fetchUrl(safe, { maxChars })
+  const bridge = globalThis.khungThoaiDesktop ?? desktop
+  if (bridge?.fetchUrl) {
+    return desktopRequest(bridge, "fetchUrl", safe, { maxChars }, signal)
   }
 
   // On Web browser, use Wikipedia REST/Action API with origin=* for Wikipedia links.
