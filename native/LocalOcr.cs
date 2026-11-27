@@ -44,8 +44,11 @@ internal static class LocalOcr
     {
         // The range and the per-operation versions let the renderer detect a feature instead of
         // assuming it, and the older `protocol` field keeps a client built before the handshake working.
+        // `JsonArray.Add(string)` binds to the generic Add<T>, which needs reflection metadata the
+        // trimmed single-file build does not carry. Parsing a quoted literal is the trim-safe form and
+        // the names are compile-time constants.
         var operations = new JsonArray();
-        foreach (var operation in NativeRpc.Operations) operations.Add(operation);
+        foreach (var operation in NativeRpc.Operations) operations.Add(JsonNode.Parse("\"" + operation + "\""));
         var result = new JsonObject {
             ["protocol"] = NativeRpc.ProtocolVersion,
             ["protocolVersion"] = NativeRpc.ProtocolVersion,
