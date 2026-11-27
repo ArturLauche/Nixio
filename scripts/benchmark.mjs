@@ -26,48 +26,55 @@ export function characterErrorRate(expected, actual) {
 export async function benchmark() {
   if (!existsSync(executable)) throw new Error("Build the native worker before running the benchmark.")
   const manifest = JSON.parse(await readFile(path.join(fixtures, "manifest.json"), "utf8"))
-  const clean = gunzipSync(await readFile(path.join(fixtures, "clean.rgba.gz")))
-  const lettered = gunzipSync(await readFile(path.join(fixtures, "lettered.rgba.gz")))
+  const maxBackgroundChangeRate = manifest.thresholds?.maxBackgroundChangeRate ?? .005
   const worker = new native.NativeWorker(executable)
   const report = { redraw: [], ocr: [] }
   try {
-    for (const item of manifest.cases) {
-      const { left, top, right, bottom } = item.rect
-      const margin = item.margin ?? 14
-      const sx = Math.max(0, left - margin)
-      const sy = Math.max(0, top - margin)
-      const width = Math.min(manifest.width, right + margin) - sx
-      const height = Math.min(manifest.height, bottom + margin) - sy
-      const pixels = Buffer.alloc(width * height * 4)
-      for (let y = 0; y < height; y++) lettered.copy(pixels, y * width * 4, ((sy + y) * manifest.width + sx) * 4, ((sy + y) * manifest.width + sx + width) * 4)
-      const inner = { left: left - sx, top: top - sy, right: right - sx, bottom: bottom - sy }
-      const start = performance.now()
-      const { data: patch } = await worker.call("redraw", { width, height, inner }, pixels)
-      let count = 0, before = 0, after = 0, background = 0, changedBackground = 0
-      for (let y = top; y < bottom; y++) {
-        for (let x = left; x < right; x++) {
-          const at = (y * manifest.width + x) * 4
-          const out = ((y - top) * (right - left) + x - left) * 4
-          const isLetter = [0, 1, 2].some((channel) => Math.abs(clean[at + channel] - lettered[at + channel]) > 2)
-          const alpha = (patch[out + 3] ?? 0) / 255
-          const value = (channel) => Math.round((patch[out + channel] ?? 0) * alpha + lettered[at + channel] * (1 - alpha))
-          if (isLetter) {
-            count++
-            for (let c = 0; c < 3; c++) {
-              before += Math.abs(clean[at + c] - lettered[at + c])
-              after += Math.abs(clean[at + c] - value(c))
+    for (const pair of manifest.pairs) {
+      const clean = gunzipSync(await readFile(path.join(fixtures, pair.cleanPixels)))
+      const lettered = gunzipSync(await readFile(path.join(fixtures, pair.letteredPixels)))
+      const expectedPixels = pair.width * pair.height * 4
+      if (clean.length !== expectedPixels || lettered.length !== expectedPixels) {
+        throw new Error(`Fixture ${pair.id} pixel dumps must match ${pair.width}x${pair.height}.`)
+      }
+      for (const item of pair.cases) {
+        const { left, top, right, bottom } = item.rect
+        const margin = item.margin ?? 14
+        const sx = Math.max(0, left - margin)
+        const sy = Math.max(0, top - margin)
+        const width = Math.min(pair.width, right + margin) - sx
+        const height = Math.min(pair.height, bottom + margin) - sy
+        const pixels = Buffer.alloc(width * height * 4)
+        for (let y = 0; y < height; y++) lettered.copy(pixels, y * width * 4, ((sy + y) * pair.width + sx) * 4, ((sy + y) * pair.width + sx + width) * 4)
+        const inner = { left: left - sx, top: top - sy, right: right - sx, bottom: bottom - sy }
+        const start = performance.now()
+        const { data: patch } = await worker.call("redraw", { width, height, inner }, pixels)
+        let count = 0, before = 0, after = 0, background = 0, changedBackground = 0
+        for (let y = top; y < bottom; y++) {
+          for (let x = left; x < right; x++) {
+            const at = (y * pair.width + x) * 4
+            const out = ((y - top) * (right - left) + x - left) * 4
+            const isLetter = [0, 1, 2].some((channel) => Math.abs(clean[at + channel] - lettered[at + channel]) > 2)
+            const alpha = (patch[out + 3] ?? 0) / 255
+            const value = (channel) => Math.round((patch[out + channel] ?? 0) * alpha + lettered[at + channel] * (1 - alpha))
+            if (isLetter) {
+              count++
+              for (let c = 0; c < 3; c++) {
+                before += Math.abs(clean[at + c] - lettered[at + c])
+                after += Math.abs(clean[at + c] - value(c))
+              }
+            } else {
+              background++
+              if ([0, 1, 2].some((c) => Math.abs(value(c) - lettered[at + c]) > 2)) changedBackground++
             }
-          } else {
-            background++
-            if ([0, 1, 2].some((c) => Math.abs(value(c) - lettered[at + c]) > 2)) changedBackground++
           }
         }
+        report.redraw.push({
+          pair: pair.id, id: item.id, beforeMae: before / Math.max(1, count * 3), afterMae: after / Math.max(1, count * 3),
+          backgroundChangeRate: changedBackground / Math.max(1, background), milliseconds: performance.now() - start,
+          maxMae: item.maxMae, maxBackgroundChangeRate, conservative: item.conservative ?? false,
+        })
       }
-      report.redraw.push({
-        id: item.id, beforeMae: before / Math.max(1, count * 3), afterMae: after / Math.max(1, count * 3),
-        backgroundChangeRate: changedBackground / Math.max(1, background), milliseconds: performance.now() - start,
-        maxMae: item.maxMae, conservative: item.conservative ?? false,
-      })
     }
     const { result: capabilities } = await worker.call("capabilities")
     for (const fixture of manifest.ocr) {
@@ -94,6 +101,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   console.log(JSON.stringify(report, null, 2))
   if (report.redraw.some((item) => item.maxMae !== undefined && item.afterMae > item.maxMae) ||
-      report.redraw.some((item) => item.backgroundChangeRate > .005) ||
+      report.redraw.some((item) => item.backgroundChangeRate > item.maxBackgroundChangeRate) ||
       report.ocr.some((item) => item.cer !== undefined && item.cer > item.maxCer)) process.exitCode = 1
 }

@@ -1,0 +1,40 @@
+{
+  "canonicalEnvironment": "Linux x64 with Node 24 and the Chromium build installed by npx playwright install chromium (Playwright 1.65 / Chromium 159 at the time of writing). CI runs it on ubuntu-latest. Windows and macOS baselines are intentionally not calibrated, so comparison is skipped there instead of silently passing.",
+  "viewport": {
+    "width": 1280,
+    "height": 800
+  },
+  "deviceScaleFactor": 1,
+  "locale": "vi-VN",
+  "timezoneId": "Asia/Ho_Chi_Minh",
+  "port": 4173,
+  "baselineDirectory": "test/visual/baselines",
+  "artifactDirectory": "artifacts/visual",
+  "views": [
+    {
+      "name": "editor-light",
+      "page": "editor",
+      "theme": "light",
+      "image": "test/fixtures/comic/screentone.lettered.png"
+    },
+    {
+      "name": "editor-dark",
+      "page": "editor",
+      "theme": "dark",
+      "image": "test/fixtures/comic/screentone.lettered.png"
+    },
+    {
+      "name": "library",
+      "page": "library",
+      "theme": "light",
+      "catalog": "test/visual/catalog.json"
+    }
+  ],
+  "platforms": {
+    "linux": {
+      "channelThreshold": 8,
+      "maxDiffPixels": 40,
+      "maxDiffPixelRatio": 0.000039
+    }
+  }
+}

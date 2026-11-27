@@ -1,73 +1,174 @@
 {
-  "width": 512,
-  "height": 768,
-  "provenance": "Original clean comic art generated with OpenAI ImageGen for this repository. Lettering was added deterministically with Canvas. No third-party manga panels.",
-  "cases": [
+  "version": 2,
+  "thresholds": {
+    "maxBackgroundChangeRate": 0.005,
+    "maxMaeNote": "Per-case maxMae bounds the mean absolute channel error over lettered pixels after redraw. The greenhouse pair measured 1.07 and keeps its original 8. The synthetic pairs measured 0.000-0.003, so they use 4: still an order of magnitude above the observed error, but far below the 124-195 MAE of unredrawn lettering. Raise a threshold only together with the measured image difference that justifies it.",
+    "backgroundChangeNote": "Share of non-lettered pixels inside a graded rectangle whose restored colour differs from the lettered page by more than 2 levels per channel. 0.5% allows isolated texture-phase mistakes without hiding systematic background bleed; every committed ground-truth run measured exactly 0."
+  },
+  "pairs": [
     {
-      "id": "white-balloon",
-      "rect": {
-        "left": 50,
-        "top": 85,
-        "right": 185,
-        "bottom": 200
-      },
-      "text": [
-        "HELLO",
-        "WORLD"
-      ],
-      "x": 72,
-      "y": 125,
-      "size": 20,
-      "maxMae": 8
+      "id": "greenhouse",
+      "width": 512,
+      "height": 768,
+      "clean": "clean.png",
+      "cleanPixels": "clean.rgba.gz",
+      "lettered": "lettered.png",
+      "letteredPixels": "lettered.rgba.gz",
+      "provenance": "Original clean comic art generated with OpenAI ImageGen for this repository. The character and scene are original. Lettering was added deterministically with Canvas after the clean image was saved. No third-party manga panels or font files are included.",
+      "redistribution": "Repository-authored asset. PNG files and the derived gzipped pixel dumps are distributed under the same terms as this repository; no third-party art rights are involved.",
+      "note": "Irregular jacket and colored glass are conservative cases: the worker must defer instead of guessing, so their lettering error is reported unchanged.",
+      "cases": [
+        {
+          "id": "white-balloon",
+          "rect": {
+            "left": 50,
+            "top": 85,
+            "right": 185,
+            "bottom": 200
+          },
+          "text": [
+            "HELLO",
+            "WORLD"
+          ],
+          "x": 72,
+          "y": 125,
+          "size": 20,
+          "maxMae": 8
+        },
+        {
+          "id": "caption",
+          "rect": {
+            "left": 308,
+            "top": 695,
+            "right": 480,
+            "bottom": 742
+          },
+          "text": [
+            "THE GARDEN"
+          ],
+          "x": 315,
+          "y": 724,
+          "size": 19,
+          "maxMae": 8,
+          "margin": 4
+        },
+        {
+          "id": "irregular-jacket",
+          "rect": {
+            "left": 310,
+            "top": 460,
+            "right": 405,
+            "bottom": 535
+          },
+          "text": [
+            "LEAF"
+          ],
+          "x": 320,
+          "y": 500,
+          "size": 22,
+          "conservative": true
+        },
+        {
+          "id": "colored-glass",
+          "rect": {
+            "left": 250,
+            "top": 85,
+            "right": 370,
+            "bottom": 170
+          },
+          "text": [
+            "SUN"
+          ],
+          "x": 265,
+          "y": 135,
+          "size": 24,
+          "conservative": true
+        }
+      ]
     },
     {
-      "id": "caption",
-      "rect": {
-        "left": 308,
-        "top": 695,
-        "right": 480,
-        "bottom": 742
-      },
-      "text": [
-        "THE GARDEN"
-      ],
-      "x": 315,
-      "y": 724,
-      "size": 19,
-      "maxMae": 8,
-      "margin": 4
+      "id": "screentone",
+      "width": 480,
+      "height": 640,
+      "clean": "screentone.clean.png",
+      "cleanPixels": "screentone.clean.rgba.gz",
+      "lettered": "screentone.lettered.png",
+      "letteredPixels": "screentone.lettered.rgba.gz",
+      "provenance": "Generated procedurally by scripts/generate-comic-fixtures.mjs: opaque 8 px-period, 3x3-dot screentone at 14% coverage, an inked panel frame, rules and a shaded block. Lettering uses the project's own 5x7 bitmap font. No third-party art or font files are used.",
+      "redistribution": "Deterministic output of repository code. No third-party rights are involved, so redistribution and derivative use are unrestricted.",
+      "thresholdDerivation": "Measures the periodic-texture path: the worker detects the 8 px period from the sample ring and restores each phase colour. Linux x64 ground-truth run: afterMae 0.000 on both cases, maximum channel error 0, background change 0. maxMae 4 keeps margin for phase rounding and platform math while the unredrawn lettering MAE is 195.",
+      "cases": [
+        {
+          "id": "screentone-body",
+          "rect": {
+            "left": 100,
+            "top": 280,
+            "right": 380,
+            "bottom": 355
+          },
+          "text": [
+            "HALFTONE"
+          ],
+          "note": "Black 35 px block lettering over pure screentone; the sample ring contains only the periodic pattern.",
+          "maxMae": 4
+        },
+        {
+          "id": "screentone-caption",
+          "rect": {
+            "left": 320,
+            "top": 460,
+            "right": 400,
+            "bottom": 505
+          },
+          "text": [
+            "INK"
+          ],
+          "note": "Small 21 px lettering block; checks that a tighter box still samples at least four phases per side.",
+          "maxMae": 4
+        }
+      ]
     },
     {
-      "id": "irregular-jacket",
-      "rect": {
-        "left": 310,
-        "top": 460,
-        "right": 405,
-        "bottom": 535
-      },
-      "text": [
-        "LEAF"
-      ],
-      "x": 320,
-      "y": 500,
-      "size": 22,
-      "conservative": true
-    },
-    {
-      "id": "colored-glass",
-      "rect": {
-        "left": 250,
-        "top": 85,
-        "right": 370,
-        "bottom": 170
-      },
-      "text": [
-        "SUN"
-      ],
-      "x": 265,
-      "y": 135,
-      "size": 24,
-      "conservative": true
+      "id": "gradient",
+      "width": 480,
+      "height": 640,
+      "clean": "gradient.clean.png",
+      "cleanPixels": "gradient.clean.rgba.gz",
+      "lettered": "gradient.lettered.png",
+      "letteredPixels": "gradient.lettered.rgba.gz",
+      "provenance": "Generated procedurally by scripts/generate-comic-fixtures.mjs: a linear RGB paper plane plus an inked frame, a diagonal rule and a circular stamp outside the graded rectangles. Lettering uses the project's own 5x7 bitmap font. No third-party art or font files are used.",
+      "redistribution": "Deterministic output of repository code. No third-party rights are involved, so redistribution and derivative use are unrestricted.",
+      "thresholdDerivation": "Measures the paper-plane fallback: no period repeats, so the worker fits a colour plane from the ring. Linux x64 ground-truth run: afterMae 0.003 on the body case and 0.000 on the caption, maximum channel error 1, background change 0. maxMae 4 leaves room for rounding while the unredrawn lettering MAE is 124-156.",
+      "cases": [
+        {
+          "id": "gradient-body",
+          "rect": {
+            "left": 100,
+            "top": 280,
+            "right": 380,
+            "bottom": 355
+          },
+          "text": [
+            "GRADIENT"
+          ],
+          "note": "Black 35 px block lettering over a smooth plane whose three channels have different slopes.",
+          "maxMae": 4
+        },
+        {
+          "id": "gradient-caption",
+          "rect": {
+            "left": 330,
+            "top": 455,
+            "right": 410,
+            "bottom": 500
+          },
+          "text": [
+            "SKY"
+          ],
+          "note": "Small 21 px lettering block near the lower edge of the plane.",
+          "maxMae": 4
+        }
+      ]
     }
   ],
   "ocr": [

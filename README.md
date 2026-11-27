@@ -119,7 +119,7 @@ Nixio/
 │   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe
 │   ├── desktop-smoke.mjs       # Kiểm thử E2E Playwright cho bản Electron đóng gói
 │   └── benchmark.mjs           # Đối chứng chất lượng redraw/OCR
-├── test/                       # 31 bộ unit test & integration test (Node.js test runner)
+├── test/                       # 32 bộ unit test & integration test (Node.js test runner)
 └── .github/workflows/
     ├── verify.yml              # CI Node 24 build, test C#/Node, benchmark & smoke test trên Linux + Windows
     └── release.yml             # CD Node 24 tự động đóng gói & xuất bản GitHub Release khi gắn tag v*.*.*
@@ -244,10 +244,10 @@ Chạy toàn bộ bộ test bằng Node.js 22.12+:
 npm test
 ```
 
-- **CI (`.github/workflows/verify.yml`)**: Chạy trên GitHub Actions Node 24 (`ubuntu-latest` và `windows-latest`), thực thi 31 bộ unit/integration test (Node + C#), bộ đối chứng chất lượng ảnh/OCR (`npm run benchmark -- --output artifacts/benchmark.json`) và kiểm thử luồng Electron đóng gói bằng Playwright (`npm run test:desktop -- --packaged`). Xem [nguồn và cách bổ sung mẫu](test/fixtures/comic/README.md).
+- **CI (`.github/workflows/verify.yml`)**: Chạy trên GitHub Actions Node 24 (`ubuntu-latest` và `windows-latest`), thực thi 32 bộ unit/integration test (Node + C#), bộ đối chứng chất lượng ảnh/OCR (`npm run benchmark -- --output artifacts/benchmark.json`), so khớp baseline giao diện biên tập/thư viện trên Linux (`npm run test:visual`) và kiểm thử luồng Electron đóng gói bằng Playwright (`npm run test:desktop -- --packaged`). Xem [nguồn và cách bổ sung mẫu](test/fixtures/comic/README.md) và [quy trình baseline giao diện](test/visual/README.md).
 - **CD (`.github/workflows/release.yml`)**: Khi đẩy tag `v*.*.*` (hoặc chạy tay qua `workflow_dispatch`), tự động build, smoke-test trên Linux & Windows, đóng gói `.deb`, `.rpm`, `.tar.gz`, `.exe` (Inno Setup 6), `.zip`, tạo `SHA256SUMS.txt` và xuất bản GitHub Release.
 
-31 bộ test trong `test/`:
+32 bộ test trong `test/`:
 - `placement.test.js` & `ocr.test.js`: Chuẩn hóa tọa độ OCR, gom dòng dọc/ngang và quy tắc ghép khung.
 - `io.test.js`: Nhận diện MIME, đọc DOCX/XLSX và gom nhóm thoại.
 - `gemini.test.js` & `openai-compat.test.js`: Suy luận MIME ảnh, lọc `<think>`/JSON, tự thử lại `withLlmRetry`, dịch ảnh/khung chữ cho Gemini và OpenAI-compatible/Local LLM, xác thực endpoint chống HTTP từ xa không an toàn.
@@ -257,3 +257,4 @@ npm test
 - `project.test.js`, `recovery-catalog.test.js`, `task-queue.test.js` & `workflow.test.js`: Lưu/mở `.khungthoai` v1/v2, danh mục phục hồi theo dự án, hàng đợi tác vụ có hủy và khôi phục lỗi worker, lịch sử Undo/Redo, đồng bộ `translationNotes`/skill và tiếp tục dịch chương.
 - `redraw.test.js`, `native-redraw.test.js`, `native-processing.test.js` & `benchmark.test.js`: Hàng đợi redraw, phục hồi screentone/gradient, PatchMatch SIMD + Poisson seamless inpaint, `seamless_clone` & `content_aware_cleanup` C#, làm sạch raw C# đa luồng, mặt nạ, PNG/ZIP, lưu tệp nguyên tử và benchmark chất lượng từ worker C# (tự động kích hoạt sau khi chạy `npm run desktop:native`).
 - `agent-harness.test.js`, `agent-context.test.js`, `harness-pro.test.js`, `linter-vision.test.js`, `web-search.test.js`, `updater.test.js`, `notifications.test.js` & `release-packaging.test.js`: Pipeline Harness song song/tuần tự, AI Vision (`inspect_page_image`) & tỉa ảnh đính kèm cũ, Glossary & QA Linter 0-token (`lint_chapter_qa`), SSE streaming (Gemini & OpenAI/DeepSeek-R1), `Context Budget Meter`, turn box diffs, Web-Taint Write Gate, DNS IP Pinning chống SSRF/decompression bomb, nén lịch sử, chống lặp công cụ, tự thử lại LLM, hồ sơ kỹ năng, lệnh nhanh slash, `ask_user`, Plan Mode, Todo list, kiểm tra cập nhật SemVer, Trung tâm Thông báo và sinh cấu hình đóng gói `.deb`/`.rpm`/Inno Setup `.exe`.
+- `visual-diff.test.js` & `scripts/visual-regression.mjs`: So khớp ảnh chụp biên tập Sáng/Tối và Thư viện với baseline PNG đã commit trên Linux, ngưỡng sai lệch theo nền tảng, artifact diff trong CI và lệnh cập nhật baseline chỉ dành cho người vận hành (`VISUAL_BASELINE_APPROVAL=1`, từ chối chạy trong CI).

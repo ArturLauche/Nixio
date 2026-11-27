@@ -17,7 +17,9 @@
     "desktop:package": "node scripts/desktop-build.mjs app",
     "desktop:release": "node scripts/package-release.mjs",
     "benchmark": "node scripts/benchmark.mjs",
-    "test:desktop": "node scripts/desktop-smoke.mjs"
+    "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:visual": "node scripts/visual-regression.mjs",
+    "test:visual:update": "node scripts/visual-regression.mjs --update"
   },
   "dependencies": {
     "ag-psd": "^34.2.3",
