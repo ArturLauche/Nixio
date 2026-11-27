@@ -2085,7 +2085,10 @@ const projects = setupProjects({
   commitLiveForm: commitLiveFormCheckpoint,
   registerFontName,
   renderFontOptions,
-  onProjectSwitch: () => chat?.syncProjectSession(),
+  onProjectSwitch: () => {
+    chat?.syncProjectSession()
+    translation.refreshGlossaryStatus()
+  },
 })
 const dialogs = setupDialogs({
   ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,

@@ -11,6 +11,7 @@ import {
   translationSignature,
 } from "../translation.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
+import { glossaryStatusText, parseTerminologyGraph } from "../terminology-graph.js"
 import { groupDialogue } from "../io.js"
 import { createCredentialSettings } from "../credential-settings.js"
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
@@ -449,6 +450,17 @@ export function setupTranslation({
   const scriptAligner = (page, settings, lines) =>
     settings.provider === "openai" ? alignScriptOpenAi(page, settings, lines) : alignScript(page, settings, lines)
 
+  // The field stays one editable textarea; the status line reads the terminology graph out of
+  // it so aliases, variants and relations are visible while typing instead of only in the model.
+  function refreshGlossaryStatus() {
+    const field = byId("translation-glossary")
+    const target = byId("glossary-status")
+    if (!field || !target) return ""
+    const text = glossaryStatusText(parseTerminologyGraph(field.value))
+    target.textContent = text
+    return text
+  }
+
   byId("translate-boxes").onclick = translateExistingBoxes
   byId("translate").onclick = () =>
     processPages([selectedPage()].filter(Boolean), imageTranslator, "dịch")
@@ -476,5 +488,8 @@ export function setupTranslation({
     )
   }
 
-  return { settings: readTranslationSettings }
+  byId("translation-glossary")?.addEventListener("input", refreshGlossaryStatus)
+  refreshGlossaryStatus()
+
+  return { settings: readTranslationSettings, refreshGlossaryStatus }
 }
