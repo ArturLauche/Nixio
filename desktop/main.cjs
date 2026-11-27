@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell } = require("electron")
+const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell, Notification } = require("electron")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const { NativeWorker } = require("./native-worker.cjs")
@@ -84,6 +84,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Windows only shows notifications for apps with an explicit AppUserModelID.
+  if (process.platform === "win32") app.setAppUserModelId("com.khungthoai.editor")
   worker = new NativeWorker(workerExecutable())
   imageWorker = new NativeWorker(workerExecutable())
   tasks = new TaskQueue(() => new NativeWorker(workerExecutable(), { isolated: true }), (update) => {
@@ -126,6 +128,21 @@ app.whenReady().then(() => {
     isPackaged: app.isPackaged,
   }))
   handle("khung-thoai:check-update", () => checkForUpdates(app.getVersion()))
+  handle("khung-thoai:notify", (payload) => {
+    if (!Notification.isSupported()) return false
+    const title = String(payload?.title || "Khung Thoại").trim().slice(0, 120)
+    const body = String(payload?.body || "").trim().slice(0, 400)
+    if (!title && !body) return false
+    const notification = new Notification({ title, body, silent: Boolean(payload?.silent) })
+    notification.on("click", () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    })
+    notification.show()
+    return true
+  })
   handle("khung-thoai:open-external", async (url) => {
     const safe = isSafePublicHttpsUrl(url)
     if (!safe) throw new Error("Chỉ cho phép mở liên kết HTTPS công khai.")
@@ -133,8 +150,14 @@ app.whenReady().then(() => {
     return true
   })
 
-  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  session.defaultSession.setPermissionCheckHandler(() => false)
+  // Only system notifications are allowed; every other permission stays denied.
+  const isAppContents = (contents) => Boolean(contents) && contents === mainWindow?.webContents
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
+    callback(permission === "notifications" && isAppContents(contents))
+  })
+  session.defaultSession.setPermissionCheckHandler((contents, permission) => {
+    return permission === "notifications" && isAppContents(contents)
+  })
   protocol.handle("app", async ({ url }) => {
     try {
       const target = localFile(url)

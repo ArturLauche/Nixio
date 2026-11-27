@@ -1,6 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { NotificationStore } from "../src/notifications.js"
+import {
+  NotificationStore,
+  createSystemNotifier,
+  readSystemNotifyPref,
+  writeSystemNotifyPref,
+} from "../src/notifications.js"
 
 test("NotificationStore adds, deduplicates by key, caps visible/history, and tracks unread", () => {
   const store = new NotificationStore({ maxItems: 5, maxVisible: 2 })
@@ -42,4 +47,34 @@ test("NotificationStore adds, deduplicates by key, caps visible/history, and tra
   assert.equal(store.snapshot().items.length, 0)
   assert.equal(store.snapshot().visible.length, 0)
   assert.ok(events > 0)
+})
+
+function memoryStorage() {
+  const map = new Map()
+  return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)) }
+}
+
+test("createSystemNotifier sends OS notifications only while hidden and when enabled", () => {
+  const storage = memoryStorage()
+  const calls = []
+  const desktopBridge = {
+    notifyDesktop: (payload) => {
+      calls.push(payload)
+      return Promise.resolve(true)
+    },
+  }
+  const hiddenDoc = { hidden: true, hasFocus: () => false }
+  const notifier = createSystemNotifier({ desktopBridge, storage, doc: hiddenDoc })
+
+  assert.equal(notifier({ title: "Có bản mới", message: "v1.4.0" }), true)
+  assert.deepEqual(calls, [{ title: "Có bản mới", body: "v1.4.0" }])
+
+  const focused = createSystemNotifier({ desktopBridge, storage, doc: { hidden: false, hasFocus: () => true } })
+  assert.equal(focused({ title: "Có bản mới", message: "v1.4.0" }), false)
+  assert.equal(calls.length, 1)
+
+  writeSystemNotifyPref(false, storage)
+  assert.equal(readSystemNotifyPref(storage), false)
+  assert.equal(notifier({ title: "Có bản mới", message: "v1.4.0" }), false)
+  assert.equal(calls.length, 1)
 })

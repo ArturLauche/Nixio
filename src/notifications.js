@@ -1,4 +1,75 @@
 const VALID_KINDS = new Set(["info", "success", "warning", "error", "update"])
+export const SYSTEM_NOTIFY_STORAGE_KEY = "khung-thoai-system-notifications"
+
+export function readSystemNotifyPref(storage = globalThis.localStorage) {
+  try {
+    const raw = storage?.getItem(SYSTEM_NOTIFY_STORAGE_KEY)
+    // Desktop notifications are on unless the user turned them off.
+    return raw === null || raw === undefined ? true : raw === "true"
+  } catch {
+    return true
+  }
+}
+
+export function writeSystemNotifyPref(enabled, storage = globalThis.localStorage) {
+  const value = Boolean(enabled)
+  try {
+    storage?.setItem(SYSTEM_NOTIFY_STORAGE_KEY, String(value))
+  } catch {
+    // Ignore storage errors.
+  }
+  return value
+}
+
+/**
+ * Bridges the in-app notification center to the operating system so a toast that
+ * happens while the window is hidden still reaches the user's default notifier.
+ */
+export function createSystemNotifier({
+  desktopBridge = globalThis.window?.khungThoaiDesktop,
+  storage = globalThis.localStorage,
+  doc = globalThis.document,
+} = {}) {
+  let permissionRequested = false
+  return function notifySystem(item) {
+    if (!item || !readSystemNotifyPref(storage)) return false
+    const title = String(item.title || "Khung Thoại").trim()
+    const body = String(item.message || "").trim()
+    if (!title && !body) return false
+    const windowHidden = !doc || doc.hidden || doc.hasFocus?.() === false
+    if (!windowHidden) return false
+
+    if (desktopBridge?.notifyDesktop) {
+      try {
+        Promise.resolve(desktopBridge.notifyDesktop({ title, body })).catch(() => {})
+        return true
+      } catch {
+        // Fall through to the Web Notification API.
+      }
+    }
+
+    const Ctor = globalThis.Notification
+    if (typeof Ctor !== "function") return false
+    if (Ctor.permission === "default") {
+      if (!permissionRequested) {
+        permissionRequested = true
+        try {
+          Promise.resolve(Ctor.requestPermission()).catch(() => {})
+        } catch {
+          // Ignore denied permission.
+        }
+      }
+      return false
+    }
+    if (Ctor.permission !== "granted") return false
+    try {
+      new Ctor(title, { body })
+      return true
+    } catch {
+      return false
+    }
+  }
+}
 const DEFAULT_DURATIONS = {
   info: 5000,
   success: 4500,
@@ -157,7 +228,7 @@ function formatShortTime(ts) {
   }
 }
 
-export function createNotificationCenter({ byId, store = new NotificationStore() }) {
+export function createNotificationCenter({ byId, store = new NotificationStore(), systemNotifier = null }) {
   const toastContainer = byId("toast-container")
   const panel = byId("notifications-panel")
   const listEl = byId("notifications-list")
@@ -341,7 +412,15 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
   return {
     store,
     notify(options) {
-      return store.add(options)
+      const item = store.add(options)
+      if (item && typeof systemNotifier === "function") {
+        try {
+          systemNotifier(item)
+        } catch {
+          // System notifications must never break the in-app center.
+        }
+      }
+      return item
     },
     dismissToast(id) {
       store.dismissToast(id)

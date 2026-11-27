@@ -20,7 +20,12 @@ import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "
 import { alignBoxes, distributeBoxes, duplicateBox, nudgeBox, reorderBox } from "./tools.js"
 import { cleanRawPageImage, cleanRawPixels } from "./raw-cleanup.js"
 import { smartSlicePageImage, stitchPagesVertically } from "./webtoon.js"
-import { createNotificationCenter } from "./notifications.js"
+import {
+  createNotificationCenter,
+  createSystemNotifier,
+  readSystemNotifyPref,
+  writeSystemNotifyPref,
+} from "./notifications.js"
 import {
   APP_VERSION,
   RELEASES_PAGE_URL,
@@ -1607,7 +1612,7 @@ window.addEventListener("blur", () => {
   commitNudgeCheckpoint()
 })
 
-const notifications = createNotificationCenter({ byId })
+const notifications = createNotificationCenter({ byId, systemNotifier: createSystemNotifier() })
 const notify = (options) => notifications.notify(options)
 
 function notifyOverflowIfAny(page, sourceLabel = "") {
@@ -1760,6 +1765,39 @@ byId("check-update").onclick = () => runUpdateCheck({ force: true })
 byId("notifications-check-update").onclick = () => {
   notifications.closePanel()
   runUpdateCheck({ force: true })
+}
+
+const settingsDialog = byId("settings-dialog")
+byId("open-settings").onclick = () => {
+  if (settingsDialog && !settingsDialog.open) settingsDialog.showModal()
+}
+byId("settings-close").onclick = () => settingsDialog.close()
+byId("settings-dismiss")?.addEventListener("click", () => settingsDialog?.close())
+byId("settings-release").onclick = () => {
+  openExternalUrl(RELEASES_PAGE_URL).catch(() => {})
+}
+// These dialogs live inside Settings now, so close it before they open.
+byId("open-find").addEventListener("click", () => settingsDialog.close())
+byId("open-shortcuts").addEventListener("click", () => settingsDialog.close())
+
+const systemNotifyToggle = byId("settings-system-notify")
+if (systemNotifyToggle) {
+  systemNotifyToggle.checked = readSystemNotifyPref()
+  systemNotifyToggle.onchange = () => {
+    const enabled = writeSystemNotifyPref(systemNotifyToggle.checked)
+    status(enabled ? "Đã bật thông báo hệ điều hành." : "Đã tắt thông báo hệ điều hành.")
+  }
+}
+
+const settingsVersion = byId("settings-version")
+if (settingsVersion) {
+  settingsVersion.textContent = `Phiên bản ${APP_VERSION}`
+  Promise.resolve(window.khungThoaiDesktop?.appInfo?.())
+    .then((info) => {
+      if (!info?.version) return
+      settingsVersion.textContent = `Phiên bản ${info.version} · ${info.platform}/${info.arch}${info.isPackaged ? "" : " (bản chạy thử)"}`
+    })
+    .catch(() => {})
 }
 
 window.addEventListener("offline", () => {

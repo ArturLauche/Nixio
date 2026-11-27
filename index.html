@@ -15,12 +15,17 @@
       <a href="#library" data-view="library">Thư viện chương</a>
     </nav>
     <div class="header-actions">
-      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
-      <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)">Trợ lý AI</button>
-      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H)">Tìm &amp; thay</button>
-      <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
-      <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại">Cập nhật</button>
-      <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" title="Trung tâm thông báo">Thông báo <span id="notif-badge" class="notif-badge" hidden>0</span></button>
+      <button type="button" class="button header-secondary header-icon" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)" aria-label="Trợ lý AI">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" stroke="none" d="M11 3l1.9 5.1L18 10l-5.1 1.9L11 17l-1.9-5.1L4 10l5.1-1.9L11 3z"/><path fill="currentColor" stroke="none" d="M18.5 14.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"/></svg>
+        <span>AI</span>
+      </button>
+      <button type="button" class="button header-secondary header-icon" id="open-settings" title="Cài đặt: giao diện, phím tắt, thông báo và cập nhật" aria-label="Cài đặt">
+        <svg class="is-fill" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.02 7.02 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54a7.1 7.1 0 0 0 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+      </button>
+      <button type="button" class="button header-secondary notif-btn header-icon" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" title="Trung tâm thông báo">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        <span id="notif-badge" class="notif-badge" hidden>0</span>
+      </button>
       <button type="button" class="button header-export" id="export-all">Xuất cả lượt</button>
     </div>
   </header>
@@ -639,6 +644,37 @@
   </aside>
 
   <div id="toast-container" class="toast-container" aria-live="polite" aria-relevant="additions"></div>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-head">
+      <h2 id="settings-title">Cài đặt</h2>
+      <button type="button" class="dialog-close" id="settings-dismiss" aria-label="Đóng cài đặt" title="Đóng (Esc)">×</button>
+    </div>
+    <p id="settings-version" class="muted">Phiên bản 1.3.0</p>
+    <section class="dialog-group">
+      <h3>Giao diện &amp; công cụ</h3>
+      <div class="form-actions">
+        <button type="button" class="button" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
+        <button type="button" class="button" id="open-find" title="Tìm và thay thế (Ctrl+H)">Tìm &amp; thay</button>
+        <button type="button" class="button" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
+      </div>
+    </section>
+    <section class="dialog-group">
+      <h3>Thông báo hệ điều hành</h3>
+      <label class="choice"><input id="settings-system-notify" type="checkbox" checked> Hiện thông báo trên máy khi cửa sổ ẩn hoặc thu nhỏ</label>
+      <p class="muted">Dùng trung tâm thông báo mặc định của hệ điều hành. Khi cửa sổ đang mở, thông báo chỉ hiện trong ứng dụng.</p>
+    </section>
+    <section class="dialog-group">
+      <h3>Cập nhật</h3>
+      <div class="form-actions">
+        <button type="button" class="button primary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại">Kiểm tra cập nhật</button>
+        <button type="button" class="button" id="settings-release" title="Mở trang GitHub Releases">Trang phát hành</button>
+      </div>
+    </section>
+    <div class="dialog-footer">
+      <button type="button" class="button" id="settings-close">Đóng</button>
+    </div>
+  </dialog>
 
   <dialog id="update-dialog">
     <h2 id="update-dialog-title">Cập nhật Khung Thoại</h2>

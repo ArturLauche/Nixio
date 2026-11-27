@@ -138,6 +138,28 @@ test("checkAppUpdate respects cooldown, dismissed version, force override, and o
   assert.match(offline.error, /network down/)
 })
 
+test("desktop normalizeReleasePayload keeps GitHub download assets instead of throwing", () => {
+  const result = desktopUpdater.normalizeReleasePayload(
+    {
+      tag_name: "v1.4.0",
+      name: "Khung Thoại 1.4.0",
+      html_url: "https://github.com/wiothemilo-lang/Nixio/releases/tag/v1.4.0",
+      published_at: "2026-11-27T00:00:00Z",
+      body: "Notes",
+      assets: [
+        { name: "Khung-Thoai-win-x64.zip", size: 1000, browser_download_url: "https://github.com/wiothemilo-lang/Nixio/releases/download/v1.4.0/app.zip" },
+        { name: "bad.exe", size: 10, browser_download_url: "http://127.0.0.1/bad.exe" },
+      ],
+    },
+    "1.3.0",
+  )
+
+  assert.equal(result.ok, true)
+  assert.equal(result.hasUpdate, true)
+  assert.equal(result.release.assets[0].downloadUrl, "https://github.com/wiothemilo-lang/Nixio/releases/download/v1.4.0/app.zip")
+  assert.equal(result.release.assets[1].downloadUrl, RELEASES_PAGE_URL)
+})
+
 test("desktop checkForUpdates handles 404 (no public releases yet) cleanly", async () => {
   const res = await desktopUpdater.checkForUpdates("1.0.0", {
     fetchImpl: async () => ({ ok: false, status: 404 }),

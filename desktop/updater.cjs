@@ -47,11 +47,18 @@ function compareSemver(a, b) {
 }
 
 function safeGitHubUrl(rawUrl, fallback = RELEASES_PAGE_URL) {
-  const safe = isSafePublicHttpsUrl(rawUrl)
-  if (!safe) return fallback
-  const host = safe.hostname.toLowerCase()
+  // isSafePublicHttpsUrl returns an href string, not a URL object.
+  const safeHref = isSafePublicHttpsUrl(rawUrl)
+  if (!safeHref) return fallback
+  let parsed
+  try {
+    parsed = new URL(safeHref)
+  } catch {
+    return fallback
+  }
+  const host = parsed.hostname.toLowerCase()
   if (host === "github.com" || host.endsWith(".github.com") || host.endsWith(".githubusercontent.com")) {
-    return safe.toString()
+    return parsed.toString()
   }
   return fallback
 }
