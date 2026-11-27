@@ -13,6 +13,7 @@ import {
   serializePresetsJson,
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
+import { holdFocus } from "./focus.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -616,6 +617,7 @@ function syncToolControls() {
 }
 
 function renderPages() {
+  const restoreFocus = holdFocus(byId("pages"))
   projects.refreshDirty()
   const current = selectedIndex()
   const count = state.pages.length
@@ -657,15 +659,19 @@ function renderPages() {
     const li = document.createElement("li")
     const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
     button.className = "page-name"
+    button.dataset.focusKey = "page:" + page.id
     if (current === index) button.setAttribute("aria-current", "true")
     const up = listButton("↑", () => movePage(index, -1), "Đưa lên " + page.name)
     up.disabled = index === 0 || projectBusy()
     up.id = "move-" + page.id + "--1"
+    up.dataset.focusKey = "page-up:" + page.id
     const down = listButton("↓", () => movePage(index, 1), "Đưa xuống " + page.name)
     down.disabled = index === count - 1 || projectBusy()
     down.id = "move-" + page.id + "-1"
+    down.dataset.focusKey = "page-down:" + page.id
     const remove = listButton("×", () => removePage(index), "Bỏ " + page.name)
     remove.disabled = projectBusy()
+    remove.dataset.focusKey = "page-remove:" + page.id
     const job = document.createElement("span")
     job.className = "page-job"
     job.dataset.state = page.translationJob?.state ?? "pending"
@@ -673,6 +679,7 @@ function renderPages() {
     li.append(button, up, down, remove, job)
     return li
   }))
+  restoreFocus()
 }
 
 function rectStyle(element, rect) {
@@ -720,6 +727,7 @@ function syncSplitCompare(page) {
 }
 
 function renderCanvas() {
+  const restoreFocus = holdFocus(overlays)
   gestures.cancelPendingPaint()
   const page = selectedPage()
   const tool = byId("cleanup-tool").value
@@ -756,6 +764,7 @@ function renderCanvas() {
     outline.setAttribute("tabindex", "0")
     outline.setAttribute("aria-label", box.text)
     outline.dataset.box = box.id
+    outline.dataset.focusKey = "box:" + box.id
     const isPrimary = box.id === state.boxId
     const isMulti = state.selectedBoxIds.has(box.id)
     if (isPrimary) outline.setAttribute("aria-current", "true")
@@ -783,6 +792,7 @@ function renderCanvas() {
   }))
   renderCleanupOverlay()
   gestures.renderCloneMarker()
+  restoreFocus()
   syncSplitCompare(page)
 }
 
@@ -1281,6 +1291,7 @@ function toggleSelectBox(box) {
 }
 
 function renderInspector() {
+  const restoreFocus = holdFocus(byId("boxes"), byId("queue"))
   const page = selectedPage()
   const box = selectedBox()
   const boxes = page?.boxes ?? []
@@ -1344,6 +1355,7 @@ function renderInspector() {
       if (event.shiftKey) toggleSelectBox(item)
       else selectBox(item)
     })
+    button.dataset.focusKey = "box-list:" + item.id
     if (box?.id === item.id || state.selectedBoxIds.has(item.id)) button.setAttribute("aria-current", "true")
     li.append(button)
     return li
@@ -1354,6 +1366,14 @@ function renderInspector() {
       ...line, remove: () => page.unplaced.splice(index, 1),
     })),
   ]
+  // Identical lines share their text, so the occurrence number keeps each row's key stable while
+  // other rows come and go.
+  const occurrences = new Map()
+  const queueKey = (text) => {
+    const seen = (occurrences.get(text) ?? 0) + 1
+    occurrences.set(text, seen)
+    return `queue:${seen}:${text}`
+  }
   byId("queue-section").hidden = !queue.length
   byId("queue").replaceChildren(...queue.map((line) => {
     const li = document.createElement("li")
@@ -1364,10 +1384,12 @@ function renderInspector() {
       line.remove()
       addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text, false)
     })
+    button.dataset.focusKey = queueKey(line.text)
     button.disabled = !page || projectBusy()
     li.append(button)
     return li
   }))
+  restoreFocus()
 }
 
 function render() {

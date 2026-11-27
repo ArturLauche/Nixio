@@ -146,6 +146,35 @@ test("task panel renders native progress, hides cancel for finished work, and ke
   assert.equal(list.children.length, 10, "the panel keeps only the ten most recent tasks")
 })
 
+test("a cancel press keeps the caret on the button and the panel leaves once the work ends", async () => {
+  const { byId } = createById()
+  const { setupTasks } = await controllers("tasks")
+  setupTasks(byId)
+  const emit = desktopCalls.tasks.at(-1)
+  const panel = byId("task-panel")
+  const list = byId("task-list")
+  desktopCalls.cancelled.length = 0
+  const cancelButton = () => list.children[0].children.find((child) => child.tagName === "BUTTON")
+
+  emit({ id: "a", operation: "ocr", stage: "đọc chữ", progress: 10, state: "running" })
+  globalThis.document.activeElement = cancelButton()
+
+  emit({ id: "a", operation: "ocr", stage: "đang đọc", progress: 55, state: "running" })
+  assert.equal(cancelButton().focused, true, "the progress tick must not drop the caret out of the panel")
+
+  cancelButton().click()
+  assert.deepEqual(desktopCalls.cancelled, ["a"], "one press cancels the task once")
+  assert.equal(cancelButton().textContent, "Đang hủy…")
+  assert.equal(cancelButton().getAttribute("aria-disabled"), "true")
+  cancelButton().click()
+  assert.deepEqual(desktopCalls.cancelled, ["a"], "a second press must not queue another cancellation")
+
+  emit({ id: "a", operation: "ocr", stage: "xong", progress: 100, state: "done" })
+  assert.equal(panel.hidden, true, "the panel hides when nothing is running or queued")
+  assert.equal(list.children[0].children.length, 2)
+  globalThis.document.activeElement = null
+})
+
 test("find and replace renders matches, jumps to boxes, and reports replacements", async () => {
   const { byId } = createById()
   const { setupDialogs } = await controllers("dialogs")
