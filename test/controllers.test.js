@@ -9,7 +9,7 @@ function fakeElement(tag = "div") {
     tagName: tag.toUpperCase(),
     children: [],
     dataset: {},
-    style: {},
+    style: { setProperty() {} },
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
     value: "",
     checked: false,
@@ -281,6 +281,60 @@ test("gesture setup tracks pressed space and updates the zoom label", async () =
   assert.equal(byId("zoom-level").textContent, "150%")
   assert.equal(api.abortGesture(), null)
   api.cancelPendingPaint()
+})
+
+test("split compare handle takes focus on drag and adjusts the curtain from keys", async () => {
+  const { byId } = createById()
+  const state = { pages: [], splitPos: 50 }
+  const { setupGestures } = await controllers("gestures")
+  setupGestures({
+    ...baseArguments(byId, state),
+    stage: fakeElement(),
+    overlays: fakeElement(),
+    pageCanvas: fakeElement(),
+    viewport: fakeElement(),
+    editorSnapshot: () => ({}),
+    toggleSelectBox() {},
+    addBox() {},
+    freezeCleanup() {},
+    rectStyle: () => ({}),
+    paintPreview() {},
+    renderCleanupOverlay() {},
+    renderCanvas() {},
+    renderInspector() {},
+    changePage() {},
+  })
+  const handle = byId("split-handle")
+
+  const pointerEvent = {
+    pointerId: 1, clientX: 62,
+    defaultPrevented: false, stopped: false,
+    preventDefault() { this.defaultPrevented = true },
+    stopPropagation() { this.stopped = true },
+  }
+  handle.dispatch("pointerdown", pointerEvent)
+  assert.equal(handle.focused, true, "dragging the curtain moves focus to the handle")
+  assert.equal(state.splitPos, 62, "pointer position maps to curtain percent")
+  assert.equal(handle.getAttribute("aria-valuenow"), "62")
+  assert.equal(handle.getAttribute("aria-valuetext"), "Rèm ở 62%")
+
+  const keyEvent = (key, shiftKey = false) => ({
+    key, shiftKey,
+    defaultPrevented: false, stopped: false,
+    preventDefault() { this.defaultPrevented = true },
+    stopPropagation() { this.stopped = true },
+  })
+  const right = keyEvent("ArrowRight")
+  handle.dispatch("keydown", right)
+  assert.equal(state.splitPos, 64)
+  assert.equal(right.stopped, true, "handle keys must not bubble to page/document handlers")
+  const up = keyEvent("ArrowUp", true)
+  handle.dispatch("keydown", up)
+  assert.equal(state.splitPos, 54, "Shift+Arrow jumps 10%")
+  handle.dispatch("keydown", keyEvent("End"))
+  assert.equal(state.splitPos, 100)
+  handle.dispatch("keydown", keyEvent("Home"))
+  assert.equal(state.splitPos, 0)
 })
 
 test("OCR setup wires its dialog controls and stops without a selected page", async () => {

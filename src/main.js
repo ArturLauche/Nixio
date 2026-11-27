@@ -420,6 +420,7 @@ function syncSplitCompare(page) {
   compareCanvas.hidden = !active
   handle.hidden = !active
   handle.setAttribute("aria-valuenow", String(Math.round(state.splitPos)))
+  handle.setAttribute("aria-valuetext", `Rèm ở ${Math.round(state.splitPos)}%`)
   if (active && page?.image) {
     const w = page.image.naturalWidth
     const h = page.image.naturalHeight
@@ -1184,42 +1185,6 @@ byId("split-compare")?.addEventListener("click", () => {
   renderCanvas()
   status(state.splitCompare ? "Đang bật thanh kéo so sánh gốc (kéo rèm hoặc nhấn Shift+\\ để tắt)." : "Đã tắt thanh kéo so sánh.")
 })
-
-const splitHandle = byId("split-handle")
-if (splitHandle) {
-  let draggingSplit = false
-  const updateSplitFromClientX = (clientX) => {
-    const rect = stage.getBoundingClientRect()
-    if (!rect.width) return
-    state.splitPos = clamp(Math.round(((clientX - rect.left) / rect.width) * 100), 0, 100)
-    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
-    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
-  }
-  splitHandle.addEventListener("pointerdown", (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    draggingSplit = true
-    splitHandle.setPointerCapture?.(event.pointerId)
-    updateSplitFromClientX(event.clientX)
-  })
-  splitHandle.addEventListener("pointermove", (event) => {
-    if (!draggingSplit) return
-    event.preventDefault()
-    updateSplitFromClientX(event.clientX)
-  })
-  const stopSplit = () => { draggingSplit = false }
-  splitHandle.addEventListener("pointerup", stopSplit)
-  splitHandle.addEventListener("pointercancel", stopSplit)
-  splitHandle.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
-    event.preventDefault()
-    event.stopPropagation()
-    const step = event.shiftKey ? 10 : 2
-    state.splitPos = clamp(state.splitPos + (event.key === "ArrowRight" ? step : -step), 0, 100)
-    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
-    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
-  })
-}
 
 byId("script-file").onchange = async (event) => {
   const file = event.target.files[0]
