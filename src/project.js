@@ -1,4 +1,5 @@
 import { imageMimeType, imageTypes } from "./io.js"
+import { qaReviewEntryLimit, qaReviewVersion, validateQaReviewEntry } from "./qa-review.js"
 import { validateRetouchStroke } from "./retouch.js"
 import {
   translationMemoryEntryLimit,
@@ -151,6 +152,24 @@ function projectTranslationMemory(memory) {
   }
 }
 
+// The triage decisions are a project-level record like the memory: a file without one (version 1
+// to 3) opens with an empty board, and one invalid decision rejects the file instead of silently
+// dropping a review the user took.
+function projectQaReview(review) {
+  if (review === undefined) return undefined
+  if (review?.version !== qaReviewVersion ||
+      !Array.isArray(review.entries) || review.entries.length > qaReviewEntryLimit) {
+    throw invalidProject()
+  }
+  const entries = review.entries.map((entry) => {
+    const valid = validateQaReviewEntry(entry)
+    if (!valid) throw invalidProject()
+    return valid
+  })
+  if (new Set(entries.map(({ id }) => id)).size !== entries.length) throw invalidProject()
+  return { version: review.version, entries }
+}
+
 function projectPage(page) {
   const { name, type, size, boxes, unplaced, retouchStrokes, translationContext, translationJob } = page ?? {}
   if (!isText(name) || !name || !imageTypes.has(type) || !Number.isSafeInteger(size) || size <= 0 ||
@@ -184,7 +203,7 @@ function projectStyleGuide(raw) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory, styleGuide }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory, styleGuide, qaReview }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
   settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
@@ -196,10 +215,12 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
   }
   const memory = projectTranslationMemory(translationMemory)
   const guide = projectStyleGuide(styleGuide)
+  const review = projectQaReview(qaReview)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
     ...(memory && { translationMemory: memory }),
     ...(guide && { styleGuide: guide }),
+    ...(review && { qaReview: review }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
   }
 }
@@ -211,10 +232,10 @@ export function writeProject(project) {
     translationContext, translationJob,
   }))
   const data = projectData({ ...project, pages })
-  // A file only claims the version it needs: a project without remembered pairs stays readable by
-  // builds that predate the translation memory.
+  // A file only claims the version it needs: a project without remembered pairs or triage
+  // decisions stays readable by builds that predate them.
   const manifest = encoder.encode(JSON.stringify({
-    version: data.translationMemory?.entries.length ? 3 : 2,
+    version: data.qaReview?.entries.length ? 4 : data.translationMemory?.entries.length ? 3 : 2,
     ...data,
   }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")
@@ -260,7 +281,7 @@ export async function readProject(file) {
     throw invalidProject()
   }
   if (!Number.isInteger(manifest?.version) || manifest.version < 1) throw invalidProject()
-  if (![1, 2, 3].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
+  if (![1, 2, 3, 4].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
   const project = projectData(manifest)
   if (project.pages.reduce((total, page) => total + page.size, offset) !== file.size) throw invalidProject()
   const pages = project.pages.map(({ name, type, size, ...page }) => {

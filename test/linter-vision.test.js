@@ -74,8 +74,9 @@ test("English source left untranslated is reported without flagging target text,
   })
   assert.deepEqual(
     Object.keys(reported.issues[0]),
-    ["type", "severity", "pageIndex", "pageName", "boxId", "snippet", "message"],
+    ["type", "severity", "pageIndex", "boxIndex", "pageName", "boxId", "snippet", "message", "id"],
   )
+  assert.equal(reported.issues[0].id, "1:0:untranslated_source")
   assert.equal(reported.issues[0].snippet, "Hello everyone")
   assert.match(reported.issues[0].message, /^Còn sót câu tiếng Anh chưa dịch trong "Hello everyone"\.$/)
 

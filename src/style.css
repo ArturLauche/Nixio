@@ -916,7 +916,14 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .find-error:empty { display: none; }
 #find-results, #preflight-issues { max-height: min(40dvh, 220px); overflow: auto; margin: 10px 0; }
 #find-results button, #preflight-issues button { white-space: normal; }
-#preflight-dialog { width: min(560px, 94vw); }
+#preflight-dialog { width: min(620px, 94vw); }
+#qa-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
+#qa-summary { margin: 0 0 4px; font-size: .78rem; }
+.qa-finding { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.qa-finding-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+.qa-finding-controls select, .qa-finding-controls input { flex: 1 1 130px; min-width: 0; }
+.qa-error { color: var(--danger); font-size: .78rem; margin: 3px 0 0; }
+.qa-error:empty { display: none; }
 #shortcuts-dialog { width: min(460px, 94vw); }
 #webtoon-dialog, #raw-cleanup-dialog { width: min(520px, 94vw); }
 #ocr-preview { width: min(800px, 94vw); }

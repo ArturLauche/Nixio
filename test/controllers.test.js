@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
+import { createQaReviewStore, qaExportOverrideNote } from "../src/qa-review.js"
 
 const desktopCalls = { tasks: [], cancelled: [] }
 
@@ -46,7 +47,7 @@ function fakeElement(tag = "div") {
     insertBefore() {},
     cloneNode() { return fakeElement(tag) },
     requestSubmit() { element.submitted = true },
-    getContext() { return { putImageData() {}, drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }) } },
+    getContext() { return { putImageData() {}, drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }), measureText: (text) => ({ width: String(text).length * 8 }) } },
   }
   return element
 }
@@ -314,6 +315,141 @@ test("export setup binds the script exporter and ignores exports without pages",
   assert.equal(typeof scriptButton.onclick, "function")
   scriptButton.onclick()
   assert.deepEqual(statuses, [])
+})
+
+// Nixio #76. The board is driven through the dialog the user actually sees: the QA check opens it,
+// each row carries its own state select and note, the filters narrow the list, and applying a
+// suggestion edits the box before the re-run retires the row.
+function qaRowControls(byId, findingId, tag) {
+  const stack = [...byId("preflight-issues").children]
+  while (stack.length) {
+    const node = stack.shift()
+    if (!node) continue
+    if (node.dataset?.qaFinding === findingId && node.tagName === tag) return node
+    if (Array.isArray(node.children)) stack.push(...node.children)
+  }
+  return null
+}
+
+function qaButton(byId, label) {
+  const stack = [...byId("preflight-issues").children]
+  while (stack.length) {
+    const node = stack.shift()
+    if (!node) continue
+    if (node.tagName === "BUTTON" && node.textContent === label) return node
+    if (Array.isArray(node.children)) stack.push(...node.children)
+  }
+  return null
+}
+
+test("the QA board stores a note with its state, filters rows, and applies the punctuation fix", async () => {
+  const { byId } = createById()
+  const box = (id, text) => ({
+    id, text, x: .1, y: .1, w: .5, h: .25,
+    size: 24, font: "Arial", color: "#171717", align: "center", rotation: 0, fill: true,
+  })
+  const page = {
+    id: "p1",
+    name: "01.png",
+    image: { naturalWidth: 800, naturalHeight: 1200 },
+    boxes: [box("b1", ""), box("b2", "Chào bạn  , đi thôi....")],
+    unplaced: [],
+  }
+  const state = { pages: [page], queue: [], exporting: false, openingProject: false }
+  const events = []
+  const store = createQaReviewStore()
+  const { setupExports } = await controllers("export")
+  setupExports({
+    ...baseArguments(byId, state),
+    status: (message, error) => events.push(["status", message, error]),
+    checkpoint: (snapshot, meta) => events.push(["checkpoint", meta?.kind]),
+    render: () => events.push(["render"]),
+    readTranslationSettings: () => ({}),
+    qaReview: store,
+  })
+
+  byId("check-export").onclick()
+  assert.equal(byId("preflight-dialog").open, true)
+  assert.equal(byId("preflight-issues").children.length, 2)
+  assert.equal(byId("qa-summary").textContent, "2 mục QA · 2 chờ xử lý · 0 đã xử lý · hiện 2")
+  assert.equal(byId("qa-filter-state").value, "all")
+  assert.match(byId("preflight-issues").children[0].children[0].textContent, /^01\.png · Cảnh báo — Khung thoại bị trống/)
+
+  const emptyRow = byId("preflight-issues").children[0]
+  const stateSelect = qaRowControls(byId, "1:0:empty_or_placeholder", "SELECT")
+  const noteInput = qaRowControls(byId, "1:0:empty_or_placeholder", "INPUT")
+  assert.equal(stateSelect.value, "open")
+
+  // Ignoring a finding without a reason is refused in the row, not in the status bar.
+  stateSelect.value = "ignored"
+  stateSelect.onchange()
+  assert.equal(emptyRow.children[2].textContent, "Bỏ qua một mục QA cần lý do.")
+  assert.equal(store.size, 0)
+
+  noteInput.value = "Trang bìa, không cần thoại"
+  noteInput.onchange()
+  assert.equal(emptyRow.children[2].textContent, "")
+  assert.equal(store.entry("1:0:empty_or_placeholder").state, "ignored")
+  assert.equal(store.entry("1:0:empty_or_placeholder").note, "Trang bìa, không cần thoại")
+  assert.equal(byId("qa-summary").textContent, "2 mục QA · 1 chờ xử lý · 1 đã xử lý · hiện 2")
+
+  byId("qa-filter-state").value = "ignored"
+  byId("qa-filter-state").onchange()
+  assert.equal(byId("preflight-issues").children.length, 1)
+  assert.equal(byId("qa-summary").textContent, "2 mục QA · 1 chờ xử lý · 1 đã xử lý · hiện 1")
+
+  byId("qa-filter-state").value = "all"
+  byId("qa-filter-state").onchange()
+  byId("qa-filter-severity").value = "info"
+  byId("qa-filter-severity").onchange()
+  assert.equal(byId("preflight-issues").children.length, 1)
+  assert.equal(qaButton(byId, "Áp dụng & tiếp").textContent, "Áp dụng & tiếp")
+
+  events.length = 0
+  qaButton(byId, "Áp dụng & tiếp").onclick()
+  assert.equal(page.boxes[1].text, "Chào bạn, đi thôi...")
+  assert.deepEqual(events.slice(0, 2), [["checkpoint", "qa"], ["render"]])
+  assert.equal(store.entry("1:1:punctuation_spacing"), null)
+  assert.equal(byId("preflight-issues").children.length, 1, "the fixed row is retired by the re-run")
+  assert.match(byId("preflight-issues").children[0].children[0].textContent, /bị trống nội dung/)
+  assert.deepEqual(events.at(-1), ["status", "Đã sửa khung và đánh dấu mục QA là đã xử lý.", undefined])
+
+  byId("close-preflight").onclick()
+  assert.equal(byId("preflight-dialog").open, false)
+})
+
+test("an open warning gates the export and continuing records the override as a decision", async () => {
+  const { byId } = createById()
+  const page = {
+    id: "p1",
+    name: "01.png",
+    image: { naturalWidth: 800, naturalHeight: 1200 },
+    boxes: [{
+      id: "b1", text: "", x: .1, y: .1, w: .5, h: .25,
+      size: 24, font: "Arial", color: "#171717", align: "center", rotation: 0, fill: true,
+    }],
+    unplaced: [],
+  }
+  const state = { pages: [page], queue: [], exporting: false, openingProject: false }
+  const store = createQaReviewStore()
+  const { setupExports } = await controllers("export")
+  setupExports({
+    ...baseArguments(byId, state),
+    readTranslationSettings: () => ({}),
+    qaReview: store,
+  })
+
+  byId("check-export").onclick()
+  assert.equal(byId("continue-export").textContent, "Duyệt cảnh báo & xuất")
+  byId("continue-export").onclick()
+  assert.equal(store.entry("1:0:empty_or_placeholder").state, "accepted")
+  assert.equal(store.entry("1:0:empty_or_placeholder").note, qaExportOverrideNote)
+  assert.equal(byId("preflight-dialog").open, false)
+
+  // The decision is visible the next time the board opens, so the gate no longer counts the row.
+  byId("check-export").onclick()
+  assert.equal(byId("continue-export").textContent, "Vẫn xuất")
+  assert.equal(byId("qa-summary").textContent, "1 mục QA · 0 chờ xử lý · 1 đã xử lý · hiện 1")
 })
 
 test("gesture setup tracks pressed space and updates the zoom label", async () => {
