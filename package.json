@@ -19,6 +19,7 @@
     "benchmark": "node scripts/benchmark.mjs",
     "eval:agent": "node scripts/agent-eval.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:autosave": "node scripts/autosave-browser.mjs",
     "test:visual": "node scripts/visual-regression.mjs",
     "test:visual:update": "node scripts/visual-regression.mjs --update"
   },

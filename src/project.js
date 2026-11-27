@@ -164,6 +164,27 @@ export function writeProject(project) {
   return new Blob([header, manifest, ...project.pages.map(({ file }) => file)], { type: "application/octet-stream" })
 }
 
+// Reads only the header and manifest so recovery snapshots can be identified
+// without decoding image payloads.
+export async function readProjectIdentity(source) {
+  try {
+    if (!source || typeof source.size !== "number" || source.size < headerSize) return null
+    const header = new Uint8Array(await source.slice(0, headerSize).arrayBuffer())
+    if (header.length !== headerSize || !magic.every((byte, index) => header[index] === byte)) return null
+    const length = new DataView(header.buffer).getUint32(magic.length, true)
+    if (!length || length > manifestLimit || headerSize + length > source.size) return null
+    const manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await source.slice(headerSize, headerSize + length).arrayBuffer()))
+    const projectId = typeof manifest?.projectId === "string" && /^[0-9a-f-]{36}$/i.test(manifest.projectId) ? manifest.projectId : null
+    return {
+      projectId,
+      version: Number.isInteger(manifest?.version) ? manifest.version : 0,
+      pageCount: Array.isArray(manifest?.pages) ? manifest.pages.length : 0,
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function readProject(file) {
   const header = new Uint8Array(await file.slice(0, headerSize).arrayBuffer())
   if (header.length !== headerSize || !magic.every((byte, index) => header[index] === byte)) throw invalidProject()

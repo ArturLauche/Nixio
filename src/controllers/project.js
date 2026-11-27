@@ -9,9 +9,12 @@ import {
 } from "../native.js"
 import {
   clearWebSnapshot,
-  getWebSnapshotInfo,
+  clearWebSnapshotsForProject,
+  listWebSnapshots,
   loadWebSnapshot,
+  onWebSnapshotsChanged,
   saveWebSnapshot,
+  webStorageState,
 } from "../web-storage.js"
 
 export function setupProjects({
@@ -42,11 +45,24 @@ export function setupProjects({
   let revision = 0
   let savedRevision = 0
   let diskRevision = 0
+  // Bumped whenever the editing session is replaced (open or new project) so a
+  // write that finishes late can never mark the next session as saved.
+  let generation = 0
   let lastSaveReminderAt = 0
   let lastSaveReminderRev = 0
   let notifiedWebRecovery = false
   state.projectId = crypto.randomUUID()
   let autosaving = false
+  let manualSave = null
+  let closing = false
+  let webAutosaving = false
+  let webRetryQueued = false
+  let webStorageNote = ""
+  let lastWebSnapshot = null
+  const isCurrentSession = (snapshot) =>
+    snapshot.projectId === state.projectId && snapshot.generation === generation
+  const currentSaved = () =>
+    revision === savedRevision || revision === diskRevision
   function projectBlob() {
     const settings = Object.fromEntries(
       projectSettings.map(({ id, value }) => [id, value]),
@@ -62,8 +78,8 @@ export function setupProjects({
     })
   }
 
-  byId("save-project").onclick = async () => {
-    if (projectBusy()) return
+  async function saveProjectFile() {
+    if (projectBusy()) return false
     commitLiveForm?.()
     try {
       const file = projectBlob()
@@ -81,7 +97,7 @@ export function setupProjects({
             state.projectId,
           ))
         )
-          return
+          return false
         status("Đã lưu dự án vào máy.")
       } else {
         saveFile(file, name + projectExtension)
@@ -96,12 +112,25 @@ export function setupProjects({
         message: `${name}${projectExtension} đã được lưu an toàn.`,
         key: "project-save",
       })
+      // A file on disk supersedes the temporary browser snapshots of this project.
+      await clearWebSnapshotsForProject(state.projectId).catch(() => {})
+      await refreshWebRecovery()
+      return true
     } catch (error) {
       status("Không lưu được dự án. " + error.message, true)
+      return false
     } finally {
       state.savingProject = false
       renderPages()
     }
+  }
+
+  byId("save-project").onclick = () => {
+    if (manualSave) return manualSave
+    manualSave = saveProjectFile().finally(() => {
+      manualSave = null
+    })
+    return manualSave
   }
 
   byId("open-project").onclick = () => {
@@ -177,6 +206,8 @@ export function setupProjects({
       if (nativeReady)
         await desktop.projectActivate(projectId, file.nativeOpenId)
       commitLiveForm?.()
+      generation++
+      lastWebSnapshot = null
       revision++
       history.clear()
       state.projectId = projectId
@@ -305,6 +336,8 @@ export function setupProjects({
     state.selectedBoxIds?.clear()
     state.projectId = crypto.randomUUID()
     projectName = undefined
+    generation++
+    lastWebSnapshot = null
     revision = savedRevision = diskRevision = 0
     projectSettings.forEach((field, index) => {
       field.value = defaultProjectSettings[index]
@@ -330,27 +363,30 @@ export function setupProjects({
       hasGesture() ||
       savedRevision === revision
     )
-      return
+      return false
     autosaving = true
-    const snapshotRevision = revision
-    const snapshotProjectId = state.projectId
+    const snapshot = { revision, projectId: state.projectId, generation }
     try {
-      await saveDesktopProject(
+      const saved = await saveDesktopProject(
         projectBlob(),
         "autosave",
         displayName() + projectExtension,
         state.projectId,
       )
-      if (state.projectId !== snapshotProjectId) {
+      if (!saved) return false
+      // A different project or a reloaded session must not inherit this marker.
+      if (!isCurrentSession(snapshot)) {
         await refreshRecovery()
-        return
+        return false
       }
-      savedRevision = snapshotRevision
+      savedRevision = snapshot.revision
       byId("autosave-status").textContent =
         "Đã tự lưu lúc " + new Date().toLocaleTimeString("vi-VN")
       await refreshRecovery()
+      return true
     } catch (error) {
       byId("autosave-status").textContent = "Tự lưu thất bại. " + error.message
+      return false
     } finally {
       autosaving = false
     }
@@ -372,127 +408,261 @@ export function setupProjects({
         byId("native-mask-control").hidden = !nativeReady
         byId("desktop-recovery").hidden = !nativeReady
         if (nativeReady) {
+          // The C# worker owns autosave again, so a stale browser note is noise.
+          webStorageNote = ""
           await desktop.projectActivate(state.projectId)
           await refreshRecovery()
-          setInterval(autosave, 20000)
           byId("autosave-status").textContent =
             "Tự lưu mỗi 20 giây và khi đóng app."
         }
+        await refreshWebRecovery()
         renderPages()
       })
       .catch((error) => status(error.message, true))
   }
-  let webAutosaving = false
+
+  function webStorageMessage(reason) {
+    if (reason === "blocked")
+      return "Tab khác đang giữ kho lưu trên trình duyệt. Đóng tab đó rồi thử lại."
+    if (reason === "unsupported") return "Trình duyệt này không lưu được bản tạm."
+    if (reason === "unavailable") return "Không mở được kho lưu trên trình duyệt."
+    return "Không ghi được bản tạm trên trình duyệt."
+  }
+
+  function snapshotLabel(snapshot) {
+    return [
+      snapshot.name,
+      `${snapshot.pageCount} trang`,
+      new Date(snapshot.savedAt).toLocaleString("vi-VN"),
+      snapshot.legacy ? "bản cũ" : null,
+      snapshot.mine ? null : "phiên khác",
+    ]
+      .filter(Boolean)
+      .join(" · ")
+  }
+
+  const webSnapshotDue = () =>
+    !(
+      lastWebSnapshot &&
+      lastWebSnapshot.projectId === state.projectId &&
+      lastWebSnapshot.generation === generation &&
+      lastWebSnapshot.revision === revision
+    )
+
   async function refreshWebRecovery() {
-    if (desktop?.native) return
-    const info = await getWebSnapshotInfo()
+    const statusLine = byId("web-autosave-status")
+    if (!statusLine) return
+    const snapshots = await listWebSnapshots()
+    const storage = webStorageState()
+    const hint = webStorageNote || (storage.blocked ? webStorageMessage("blocked") : "")
     const panel = byId("web-recovery")
-    if (!panel) return
-    panel.hidden = !info
-    if (info) {
-      const time = new Date(info.savedAt).toLocaleTimeString("vi-VN")
-      byId("web-autosave-status").textContent =
-        `Bản tự lưu web (${info.pageCount} trang) lúc ${time}.`
-      if (!notifiedWebRecovery && !state.pages.length) {
-        notifiedWebRecovery = true
-        notify?.({
-          kind: "info",
-          title: "Có bản tự lưu phiên trước",
-          message: `Tìm thấy bản tự lưu web (${info.pageCount} trang) lúc ${time}.`,
-          key: "web-recovery",
-          silentToast: true,
-          actions: [{ label: "Khôi phục", primary: true, onClick: () => byId("recover-web")?.click() }],
-        })
-      }
+    if (panel) panel.hidden = !snapshots.length && !hint
+    const actions = byId("web-recovery-actions")
+    if (actions) actions.hidden = !snapshots.length
+    const select = byId("web-recovery-select")
+    if (select) {
+      const previous = typeof select.value === "string" ? select.value : ""
+      select.replaceChildren(
+        ...snapshots.map((snapshot) => new Option(snapshotLabel(snapshot), snapshot.id)),
+      )
+      const keep = snapshots.some((snapshot) => snapshot.id === previous)
+        ? previous
+        : (snapshots[0]?.id ?? "")
+      select.value = keep
+    }
+    const recover = byId("recover-web")
+    if (recover) recover.disabled = !snapshots.length
+    const clear = byId("clear-web-recovery")
+    if (clear) clear.disabled = !snapshots.length
+    if (hint) {
+      statusLine.textContent = hint
+      return
+    }
+    if (!snapshots.length) {
+      statusLine.textContent = ""
+      return
+    }
+    const newest = snapshots[0]
+    const time = new Date(newest.savedAt).toLocaleTimeString("vi-VN")
+    statusLine.textContent =
+      snapshots.length === 1
+        ? `Bản tự lưu trên trình duyệt (${newest.pageCount} trang) lúc ${time}.`
+        : `Có ${snapshots.length} bản tự lưu trên trình duyệt; mới nhất ${time}.`
+    if (!notifiedWebRecovery && !state.pages.length) {
+      notifiedWebRecovery = true
+      notify?.({
+        kind: "info",
+        title: "Có bản tự lưu trên trình duyệt",
+        message: `Tìm thấy ${snapshots.length} bản tự lưu; mới nhất ${newest.pageCount} trang lúc ${time}.`,
+        key: "web-recovery",
+        silentToast: true,
+        actions: [
+          {
+            label: "Khôi phục",
+            primary: true,
+            onClick: () => byId("recover-web")?.click(),
+          },
+        ],
+      })
     }
   }
-  async function webAutosave() {
+
+  function flushQueuedWebAutosave() {
+    if (!webRetryQueued) return
+    webRetryQueued = false
+    setTimeout(() => {
+      webAutosave()
+    }, 0)
+  }
+
+  function queueWebAutosave() {
+    webRetryQueued = true
+    // A running write owns the flag until its own finally, otherwise the retry
+    // would be skipped and the new generation would wait for the next timer.
+    if (!webAutosaving) flushQueuedWebAutosave()
+  }
+
+  async function webAutosave({ fallback = false } = {}) {
+    if (nativeReady && !fallback) return false
     if (
-      desktop?.native ||
       webAutosaving ||
       projectBusy() ||
       hasGesture() ||
-      savedRevision === revision ||
-      !state.pages.length
+      (!state.pages.length && !fallback) ||
+      !webSnapshotDue()
     )
-      return
+      return false
     webAutosaving = true
-    const snapshotRevision = revision
+    const snapshot = { revision, projectId: state.projectId, generation }
     try {
-      const saved = await saveWebSnapshot(projectBlob(), {
+      const result = await saveWebSnapshot(projectBlob(), {
         name: displayName() + projectExtension,
         pageCount: state.pages.length,
+        projectId: snapshot.projectId,
+        revision: snapshot.revision,
+        generation: snapshot.generation,
       })
-      if (saved) {
-        savedRevision = snapshotRevision
+      if (!result.ok) {
+        webStorageNote = webStorageMessage(result.reason)
         await refreshWebRecovery()
+        return false
       }
+      webStorageNote = ""
+      if (!isCurrentSession(snapshot)) {
+        // The session changed during the write. Keep the snapshot visible, but do
+        // not mark the new generation as saved and save it right away instead of
+        // waiting for the next timer or a pagehide that may never come.
+        await refreshWebRecovery()
+        queueWebAutosave()
+        return false
+      }
+      lastWebSnapshot = snapshot
+      savedRevision = snapshot.revision
+      await refreshWebRecovery()
+      return true
     } catch {
-      // Ignore storage quota or private browsing errors.
+      webStorageNote = webStorageMessage("error")
+      await refreshWebRecovery()
+      return false
     } finally {
       webAutosaving = false
+      flushQueuedWebAutosave()
     }
   }
-  if (!desktop?.native) {
+
+  refreshWebRecovery()
+  onWebSnapshotsChanged(() => {
     refreshWebRecovery()
-    setInterval(webAutosave, 20000)
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") webAutosave()
-    })
-    window.addEventListener("pagehide", () => {
-      webAutosave()
-    })
-  }
+  })
+  const heartbeat = setInterval(() => {
+    autosave()
+    webAutosave()
+  }, 20000)
+  // Keep the timer from holding a non-browser host (tests, tooling) open.
+  heartbeat?.unref?.()
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") webAutosave()
+    else refreshWebRecovery()
+  })
+  window.addEventListener("pagehide", () => {
+    webAutosave()
+  })
+
   const recoverWebBtn = byId("recover-web")
   if (recoverWebBtn) {
     recoverWebBtn.onclick = async () => {
       if (projectBusy()) return
-      const file = await loadWebSnapshot()
+      const file = await loadWebSnapshot(byId("web-recovery-select")?.value || undefined)
       if (!file) return status("Không còn bản lưu tạm trên trình duyệt.", true)
-      file.recovery = true
       await loadProject(file)
     }
   }
   const clearWebBtn = byId("clear-web-recovery")
   if (clearWebBtn) {
     clearWebBtn.onclick = async () => {
-      await clearWebSnapshot()
+      const cleared = await clearWebSnapshot(byId("web-recovery-select")?.value || undefined)
+      // The deleted snapshot is no longer durable, so the next flush has to write
+      // a fresh one instead of trusting the old marker.
+      lastWebSnapshot = null
       await refreshWebRecovery()
-      status("Đã xóa bản tự lưu trên trình duyệt.")
+      status(
+        cleared
+          ? "Đã xóa bản tự lưu trên trình duyệt."
+          : "Không xóa được bản tự lưu trên trình duyệt.",
+        !cleared,
+      )
     }
   }
 
-  let closing = false
-  desktop?.onClose?.(() => {
-    if (!nativeReady || savedRevision === revision) {
-      desktop.closeWindow()
-      return
-    }
+  const waitForWrites = async (timeout = 5000) => {
+    const deadline = Date.now() + timeout
+    const pending = () => autosaving || webAutosaving || Boolean(manualSave)
+    while (pending() && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    return !pending()
+  }
+
+  async function flushForClose() {
+    await waitForWrites()
+    if (manualSave) await manualSave.catch(() => {})
+    if (currentSaved()) return "saved"
+    if (projectBusy()) return "busy"
+    if (nativeReady && (await autosave()) && currentSaved()) return "saved"
+    // Native autosave is unavailable, pending or failed: keep a durable browser
+    // snapshot so closing the window cannot silently drop the edits.
+    if (await webAutosave({ fallback: true })) return "saved"
+    return currentSaved() ? "saved" : "unsaved"
+  }
+
+  async function requestClose() {
     if (closing) return
     closing = true
-    const finish = async () => {
-      // Let a running snapshot finish, then save the latest edit before closing.
-      while (autosaving)
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      if (projectBusy()) {
+    try {
+      const outcome = await flushForClose()
+      if (outcome === "busy") {
         status("Hãy chờ tác vụ hiện tại hoàn tất trước khi đóng app.", true)
         closing = false
         return
       }
-      await autosave()
       if (
-        savedRevision === revision ||
-        window.confirm("Tự lưu thất bại. Đóng app và bỏ các thay đổi chưa lưu?")
+        outcome !== "saved" &&
+        !window.confirm(
+          "Chưa lưu được thay đổi vào máy hay trình duyệt. Vẫn đóng app và bỏ các thay đổi chưa lưu?",
+        )
       ) {
-        savedRevision = revision
-        await desktop.closeWindow()
+        status("Đã hủy đóng app; các thay đổi vẫn còn trên màn hình.")
+        closing = false
+        return
       }
+      await desktop.closeWindow()
+    } catch (error) {
       closing = false
+      status("Không đóng được app. " + error.message, true)
     }
-    finish().catch((error) => {
-      closing = false
-      status(error.message, true)
-    })
+  }
+
+  desktop?.onClose?.(() => {
+    requestClose()
   })
 
   return {

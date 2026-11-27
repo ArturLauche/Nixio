@@ -58,6 +58,9 @@ jobs:
       - name: Compare visual baselines
         if: runner.os == 'Linux'
         run: npm run test:visual
+      - name: Exercise browser autosave storage across tabs
+        if: runner.os == 'Linux'
+        run: npm run test:autosave
       - name: Evaluate agent output against golden fixtures
         run: npm run eval:agent -- --output artifacts/agent-eval.json
       - name: Upload agent evaluation report
