@@ -1,9 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { existsSync } from "node:fs"
-import { benchmark, executable, characterErrorRate } from "../scripts/benchmark.mjs"
+import { benchmark, characterErrorRate } from "../scripts/benchmark.mjs"
+import { nativeWorker } from "../scripts/native-worker.mjs"
 
-test("comic fixtures preserve artwork and restore annotated clean lettering regions", { skip: !existsSync(executable) }, async () => {
+const { available } = nativeWorker()
+
+test("comic fixtures preserve artwork and restore annotated clean lettering regions", { skip: !available }, async () => {
   const report = await benchmark()
   for (const item of report.redraw) {
     if (item.maxMae !== undefined) assert.ok(item.afterMae <= item.maxMae, JSON.stringify(item))

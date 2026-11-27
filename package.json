@@ -11,6 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test",
+    "test:coverage": "node scripts/coverage.mjs",
     "desktop": "npm run build && electron .",
     "desktop:native": "node scripts/desktop-build.mjs native",
     "desktop:package": "node scripts/desktop-build.mjs app",

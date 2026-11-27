@@ -1,18 +1,10 @@
 import assert from "node:assert/strict"
-import { existsSync } from "node:fs"
-import path from "node:path"
-import { fileURLToPath } from "node:url"
 import test from "node:test"
 import bridge from "../desktop/worker.cjs"
+import { nativeWorker } from "../scripts/native-worker.mjs"
 
 const { TextureWorker } = bridge
-const platform = { win32: "win", linux: "linux", darwin: "osx" }[process.platform]
-const rid = platform + "-" + process.arch
-const executable = fileURLToPath(new URL(
-  path.posix.join("../native/out", rid, "native-worker", "KhungThoai.Redraw" + (platform === "win" ? ".exe" : "")),
-  import.meta.url,
-))
-const available = existsSync(executable)
+const { available, executable } = nativeWorker()
 const fixtureSize = 160
 const area = { left: 44, top: 39, right: 111, bottom: 106 }
 

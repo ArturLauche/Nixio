@@ -4,11 +4,10 @@ import { gunzipSync } from "node:zlib"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import native from "../desktop/native-worker.cjs"
+import { executable } from "./native-worker.mjs"
 
 const root = fileURLToPath(new URL("..", import.meta.url))
 const fixtures = path.join(root, "test/fixtures/comic")
-const rid = ({ linux: "linux", win32: "win", darwin: "osx" })[process.platform] + "-" + process.arch
-export const executable = path.join(root, "native/out", rid, "native-worker", "KhungThoai.Redraw" + (process.platform === "win32" ? ".exe" : ""))
 
 export function characterErrorRate(expected, actual) {
   const a = [...expected.replace(/\s/g, "")]
