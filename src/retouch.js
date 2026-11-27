@@ -1,4 +1,5 @@
 import { inpaintRegion } from "./inpaint.js"
+import { isLayerId, strokeVisible } from "./layers.js"
 import { desktop } from "./native.js"
 
 const nativeInpaintCache = new WeakMap()
@@ -40,20 +41,25 @@ export function validateRetouchStroke(stroke) {
       !stroke.points.every((point) => isFraction(point?.x) && isFraction(point.y))) {
     return null
   }
+  if (stroke.hidden !== undefined && typeof stroke.hidden !== "boolean") return null
+  if (stroke.layerId !== undefined && !isLayerId(stroke.layerId)) return null
+  // The layer the stroke paints into and the per-stroke visibility travel with the stroke, so a
+  // single stroke can be hidden, deleted or moved while the rest of the page keeps its layers.
+  const marks = { ...(stroke.hidden && { hidden: true }), ...(stroke.layerId && { layerId: stroke.layerId }) }
   const points = stroke.points.map(({ x, y }) => ({ x, y }))
   if (stroke.mode === "paint") {
     if (typeof stroke.color !== "string" || !hexColor.test(stroke.color)) return null
-    return { mode: "paint", size: stroke.size, color: stroke.color, ...(opacity !== 1 && { opacity }), points }
+    return { mode: "paint", size: stroke.size, color: stroke.color, ...(opacity !== 1 && { opacity }), ...marks, points }
   }
   if (stroke.mode === "inpaint" || stroke.mode === "erase") {
-    return { mode: stroke.mode, size: stroke.size, ...(opacity !== 1 && { opacity }), points }
+    return { mode: stroke.mode, size: stroke.size, ...(opacity !== 1 && { opacity }), ...marks, points }
   }
   if (!inRange(stroke.offsetX, -1, 1) || !inRange(stroke.offsetY, -1, 1)) return null
   if (stroke.seamless !== undefined && typeof stroke.seamless !== "boolean") return null
   return {
     mode: "clone", size: stroke.size, offsetX: stroke.offsetX, offsetY: stroke.offsetY,
     ...(stroke.seamless && { seamless: true }),
-    ...(opacity !== 1 && { opacity }), points,
+    ...(opacity !== 1 && { opacity }), ...marks, points,
   }
 }
 
@@ -86,8 +92,8 @@ function drawStrokePath(context, points, width, height, left = 0, top = 0) {
 
 const retouchCache = new WeakMap()
 
-function retouchSignature(strokes, width, height) {
-  return JSON.stringify([width, height, strokes])
+function retouchSignature(strokes, width, height, opacity = 1) {
+  return JSON.stringify([width, height, opacity, strokes])
 }
 
 function renderRetouchStrokes(context, page, width, height) {
@@ -421,24 +427,41 @@ async function buildNativeSeamlessClonePatch(page, stroke, bridge) {
   return { canvas: dstCanvas, left, top, width, height }
 }
 
-export function paintRetouchStrokes(canvas, page) {
-  const strokes = page.retouchStrokes
-  if (!strokes?.length) return false
+// One cache entry per layer key, so a page that paints three retouch layers keeps three rendered
+// layers instead of rebuilding the whole stack on every stroke of every layer.
+export function paintRetouchStrokes(canvas, page, { strokes, opacity = 1, key = "page" } = {}) {
+  const list = (strokes ?? page.retouchStrokes)?.filter(strokeVisible)
+  if (!list?.length || opacity <= 0) return false
   const width = canvas.width
   const height = canvas.height
   if (typeof document !== "undefined" && page.image && typeof page.image === "object") {
-    const signature = retouchSignature(strokes, width, height)
-    let entry = retouchCache.get(page.image)
+    const signature = retouchSignature(list, width, height, opacity)
+    let cache = retouchCache.get(page.image)
+    if (!cache) {
+      cache = new Map()
+      retouchCache.set(page.image, cache)
+    }
+    let entry = cache.get(key)
     if (!entry || entry.signature !== signature) {
       const layer = document.createElement("canvas")
       layer.width = width
       layer.height = height
-      const painted = renderRetouchStrokes(layer.getContext("2d"), page, width, height)
+      const painted = renderRetouchStrokes(layer.getContext("2d"), { ...page, retouchStrokes: list }, width, height)
       entry = { signature, layer, painted }
-      retouchCache.set(page.image, entry)
+      cache.set(key, entry)
     }
-    if (entry.painted) canvas.getContext("2d").drawImage(entry.layer, 0, 0)
+    if (entry.painted) {
+      const context = canvas.getContext("2d")
+      if (opacity < 1) {
+        context.save()
+        context.globalAlpha = opacity
+        context.drawImage(entry.layer, 0, 0)
+        context.restore()
+      } else {
+        context.drawImage(entry.layer, 0, 0)
+      }
+    }
     return entry.painted
   }
-  return renderRetouchStrokes(canvas.getContext("2d"), page, width, height)
+  return renderRetouchStrokes(canvas.getContext("2d"), { ...page, retouchStrokes: list }, width, height)
 }

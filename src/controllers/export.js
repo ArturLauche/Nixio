@@ -1,4 +1,5 @@
 import { copyEditor } from "../history.js"
+import { layersNativeFriendly } from "../layers.js"
 import { exportPage, nativePageLayers, textOverflows } from "../canvas.js"
 import { filenameStem, saveFile } from "../io.js"
 import { translationSignature } from "../translation.js"
@@ -357,7 +358,9 @@ export function setupExports({
     requestExport(state.pages, () =>
       performExport(async () => {
         const pages = copyEditor({ pages: state.pages }).pages
-        if (format === "png" && isNativeReady()) {
+        // The native path composites one fixed order, so a stack with a reordered or translucent
+        // layer is exported by the renderer instead, exactly as the canvas shows it.
+        if (format === "png" && isNativeReady() && pages.every(layersNativeFriendly)) {
           const transfer = await desktop.projectBegin(
             "zip",
             "khung-thoai-png.zip",

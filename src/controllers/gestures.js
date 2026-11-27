@@ -1,5 +1,6 @@
 import { clamp } from "../canvas.js"
 import { detectBubbleOnImage } from "../bubble.js"
+import { addStroke } from "../layers.js"
 import { prepareNativeClone, prepareNativeInpaint, samplePixelColor } from "../retouch.js"
 import { resizeBox, rotateBox, snapBox } from "../tools.js"
 import { resizeGroup } from "../selection.js"
@@ -263,8 +264,7 @@ export function setupGestures({
         gesture = { kind: "inpaint-preview", pointer: event.pointerId, stroke, before }
         drawInpaintPreview(stroke)
       } else {
-        page.retouchStrokes ??= []
-        page.retouchStrokes.push(stroke)
+        addStroke(page, stroke, state.layerId)
         gesture = { kind: "retouch", pointer: event.pointerId, stroke, before }
         paintPreview(page)
       }
@@ -487,8 +487,7 @@ export function setupGestures({
     if (completed.kind === "inpaint-preview") {
       const page = selectedPage()
       if (page) {
-        page.retouchStrokes ??= []
-        page.retouchStrokes.push(completed.stroke)
+        addStroke(page, completed.stroke, state.layerId)
         checkpoint(completed.before, { label: "Tẩy chữ và tái tạo nền (Inpaint)", kind: "retouch" })
         prepareNativeInpaint(page, completed.stroke).then((usedNative) => {
           if (usedNative && selectedPage() === page) {

@@ -1,4 +1,5 @@
 import { psdFontName } from "./fonts.js"
+import { compositedLayers, hasVisibleLayer, layersNativeFriendly, strokeVisible } from "./layers.js"
 import { nativeCapabilities, runNativeTask } from "./native.js"
 import { paintRedraw, redrawLayout } from "./redraw.js"
 import { paintRetouchStrokes, waitForNativeRetouch } from "./retouch.js"
@@ -27,9 +28,9 @@ function makeCanvas(width, height) {
   return canvas
 }
 
-function baseCanvas(page) {
-  const canvas = makeCanvas(page.image.naturalWidth, page.image.naturalHeight)
-  canvas.getContext("2d").drawImage(page.image, 0, 0)
+function baseCanvas(page, image = page.image) {
+  const canvas = makeCanvas(image.naturalWidth, image.naturalHeight)
+  canvas.getContext("2d").drawImage(image, 0, 0)
   return canvas
 }
 
@@ -330,6 +331,44 @@ function drawBox(canvas, box, {
   context.restore()
 }
 
+// The scan the page paints first: while the cleanup layer is visible it is the working scan, and a
+// hidden cleanup layer shows the untouched scan the page arrived with.
+function scanImage(page) {
+  return !hasVisibleLayer(page, "cleanup") && page.originalImage ? page.originalImage : page.image
+}
+
+function paintCleanupLayer(canvas, patches, opacity) {
+  if (!patches.length || opacity <= 0) return false
+  if (opacity >= 1) {
+    paintRedraw(canvas, patches)
+    return true
+  }
+  const layer = makeCanvas(canvas.width, canvas.height)
+  paintRedraw(layer, patches)
+  const context = canvas.getContext("2d")
+  context.save()
+  context.globalAlpha = opacity
+  context.drawImage(layer, 0, 0)
+  context.restore()
+  return true
+}
+
+function paintTextLayer(canvas, page, opacity) {
+  if (!page.boxes.length || opacity <= 0) return false
+  const context = canvas.getContext("2d")
+  context.save()
+  context.globalAlpha = opacity
+  page.boxes.forEach((box) => drawBox(canvas, box))
+  context.restore()
+  return true
+}
+
+function visibleRetouchStrokes(page) {
+  return (page.retouchStrokes ?? []).filter(strokeVisible)
+}
+
+// Paints the stack bottom to top. `showCleanup` and `showText` stay as the master switches compare
+// mode uses; per-layer visibility and opacity are applied on top of them.
 function paintPage(canvas, page, patches, { showCleanup = true, showText = true } = {}) {
   const width = page.image.naturalWidth
   const height = page.image.naturalHeight
@@ -339,12 +378,16 @@ function paintPage(canvas, page, patches, { showCleanup = true, showText = true 
   }
   const context = canvas.getContext("2d")
   context.clearRect(0, 0, width, height)
-  context.drawImage(page.image, 0, 0)
-  if (showCleanup) {
-    paintRedraw(canvas, patches)
-    paintRetouchStrokes(canvas, page)
+  context.drawImage(scanImage(page), 0, 0)
+  for (const { layer, opacity, strokes } of compositedLayers(page)) {
+    if (layer.kind === "cleanup") {
+      if (showCleanup) paintCleanupLayer(canvas, patches, opacity)
+    } else if (layer.kind === "retouch") {
+      if (showCleanup) paintRetouchStrokes(canvas, page, { strokes, opacity, key: layer.id })
+    } else if (showText) {
+      paintTextLayer(canvas, page, opacity)
+    }
   }
-  if (showText) page.boxes.forEach((box) => drawBox(canvas, box))
 }
 
 export function drawPage(canvas, page, options) {
@@ -429,17 +472,33 @@ export function psdTextLayer(canvas, box) {
   }
 }
 
+// The cleanup and retouch layers over transparency, in stack order, for the PSD layer tree.
+function paintEffects(canvas, page, patches) {
+  for (const { layer, opacity, strokes } of compositedLayers(page)) {
+    if (layer.kind === "cleanup") paintCleanupLayer(canvas, patches, opacity)
+    else if (layer.kind === "retouch") paintRetouchStrokes(canvas, page, { strokes, opacity, key: layer.id })
+  }
+}
+
+// Returns null when the stack needs an order or an opacity the native compositor cannot express, so
+// the caller falls back to the renderer instead of exporting something the user did not see.
 export async function nativePageLayers(page) {
+  if (!layersNativeFriendly(page)) return null
   const redraw = redrawLayout(page, { cancellable: false })
   await Promise.all([redraw.pending, waitForNativeRetouch(page)])
-  const base = baseCanvas(page)
+  const base = baseCanvas(page, scanImage(page))
   const text = makeCanvas(base.width, base.height)
-  page.boxes.forEach((box) => drawBox(text, box))
+  if (hasVisibleLayer(page, "text")) page.boxes.forEach((box) => drawBox(text, box))
   const read = (canvas) => canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data
-  let patches = [...redraw.patches]
-  if (page.retouchStrokes?.length) {
-    const retouch = makeCanvas(base.width, base.height)
-    if (paintRetouchStrokes(retouch, page)) patches.push({ patch: retouch, left: 0, top: 0 })
+  const retouchStrokes = hasVisibleLayer(page, "retouch") ? visibleRetouchStrokes(page) : []
+  let patches = []
+  if (retouchStrokes.length) {
+    // One full-size patch keeps the painted layers in the order the stack shows them.
+    const effects = makeCanvas(base.width, base.height)
+    paintEffects(effects, page, redraw.patches)
+    patches = [{ patch: effects, left: 0, top: 0 }]
+  } else if (hasVisibleLayer(page, "cleanup")) {
+    patches = [...redraw.patches]
   }
   if (patches.reduce((sum, { patch }) => sum + patch.width * patch.height, 0) > base.width * base.height) {
     const merged = makeCanvas(base.width, base.height)
@@ -461,9 +520,11 @@ export async function nativePageLayers(page) {
 export async function exportPage(page, format) {
   if (format === "png" && globalThis.khungThoaiDesktop?.native) {
     if (await nativeCapabilities()) {
-      const { options, data } = await nativePageLayers(page)
-      const response = await runNativeTask("png", options, data)
-      return new Blob([response.data], { type: "image/png" })
+      const layers = await nativePageLayers(page)
+      if (layers) {
+        const response = await runNativeTask("png", layers.options, layers.data)
+        return new Blob([response.data], { type: "image/png" })
+      }
     }
   }
   const redraw = redrawLayout(page, { cancellable: false })
@@ -476,16 +537,16 @@ export async function exportPage(page, format) {
     return result
   }
   const { writePsd } = await import("ag-psd")
-  const base = baseCanvas(page)
+  const base = baseCanvas(page, scanImage(page))
   const children = [{ name: "Ảnh gốc", canvas: base }]
-  if (redraw.patches.length || page.retouchStrokes?.length) {
+  // Hidden layers are simply absent from the file, so the exported layer tree matches the canvas.
+  if (hasVisibleLayer(page, "cleanup") || (hasVisibleLayer(page, "retouch") && visibleRetouchStrokes(page).length)) {
     const cleaned = makeCanvas(base.width, base.height)
-    paintRedraw(cleaned, redraw.patches)
-    paintRetouchStrokes(cleaned, page)
+    paintEffects(cleaned, page, redraw.patches)
     children.push({ name: "Nền đã xóa chữ", canvas: cleaned })
   }
   const dialogue = []
-  for (const box of page.boxes) {
+  for (const box of hasVisibleLayer(page, "text") ? page.boxes : []) {
     const title = box.text.split(/\r?\n/)[0].slice(0, 72)
     if (format === "raster") {
       children.push({ name: title, ...croppedLayer(base, box) })

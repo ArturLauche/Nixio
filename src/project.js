@@ -1,4 +1,5 @@
 import { imageMimeType, imageTypes } from "./io.js"
+import { serializeLayers, validateLayers } from "./layers.js"
 import { qaReviewEntryLimit, qaReviewVersion, validateQaReviewEntry } from "./qa-review.js"
 import { validateRetouchStroke } from "./retouch.js"
 import {
@@ -170,18 +171,34 @@ function projectQaReview(review) {
   return { version: review.version, entries }
 }
 
+// A stroke keeps the layer it was painted into only when that layer is written too: the default
+// stack has one retouch layer, which every stroke belongs to when no id is stored.
+function strokeForLayer(stroke, stack) {
+  if (!stroke.layerId) return stroke
+  const known = stack?.some((layer) => layer.kind === "retouch" && layer.id === stroke.layerId)
+  if (known) return stroke
+  const { layerId, ...rest } = stroke
+  return rest
+}
+
 function projectPage(page) {
-  const { name, type, size, boxes, unplaced, retouchStrokes, translationContext, translationJob } = page ?? {}
+  const { name, type, size, boxes, unplaced, retouchStrokes, layers, translationContext, translationJob } = page ?? {}
   if (!isText(name) || !name || !imageTypes.has(type) || !Number.isSafeInteger(size) || size <= 0 ||
       !Array.isArray(boxes) || !Array.isArray(unplaced) ||
       (retouchStrokes !== undefined && !Array.isArray(retouchStrokes))) {
     throw invalidProject()
   }
+  const validLayers = validateLayers(layers)
+  if (validLayers === null) throw invalidProject()
+  // A stack that says nothing beyond the default is not written, so a project that never touched
+  // the layers keeps claiming the version every build can read. Reading expands it again, which is
+  // why the page carries the full stack and the manifest is compacted on the way out.
+  const stack = serializeLayers(validLayers)
   const cleanedRetouch = retouchStrokes?.length
     ? retouchStrokes.map((stroke) => {
       const valid = validateRetouchStroke(stroke)
       if (!valid) throw invalidProject()
-      return valid
+      return strokeForLayer(valid, stack)
     })
     : undefined
   return {
@@ -189,6 +206,7 @@ function projectPage(page) {
     boxes: boxes.map(projectBox),
     unplaced: unplaced.map(projectLine),
     ...(cleanedRetouch && { retouchStrokes: cleanedRetouch }),
+    ...(validLayers && { layers: validLayers }),
     translationContext: projectContext(translationContext),
     translationJob: projectJob(translationJob),
   }
@@ -226,17 +244,26 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
 }
 
 export function writeProject(project) {
-  const pages = project.pages.map(({ file, name, boxes, unplaced, retouchStrokes, translationContext, translationJob }) => ({
+  const pages = project.pages.map(({ file, name, boxes, unplaced, retouchStrokes, layers, translationContext, translationJob }) => ({
     name, type: imageMimeType(name, file.type), size: file.size, boxes, unplaced,
     ...(retouchStrokes?.length && { retouchStrokes }),
+    ...(layers?.length && { layers }),
     translationContext, translationJob,
   }))
   const data = projectData({ ...project, pages })
-  // A file only claims the version it needs: a project without remembered pairs or triage
-  // decisions stays readable by builds that predate them.
+  // Only what differs from the default stack is written, so a page that never touched a layer name,
+  // opacity or order keeps the shortest manifest — and a build that predates layers ignores nothing.
+  const written = data.pages.map(({ layers, ...page }) => {
+    const stack = layers && serializeLayers(layers)
+    return stack ? { ...page, layers: stack } : page
+  })
+  // A file only claims the version it needs: triage decisions and layer stacks share version 4,
+  // remembered pairs claim 3, and a project that used neither stays readable by builds predating both.
   const manifest = encoder.encode(JSON.stringify({
-    version: data.qaReview?.entries.length ? 4 : data.translationMemory?.entries.length ? 3 : 2,
+    version: data.qaReview?.entries.length || written.some((page) => page.layers?.length) ? 4
+      : data.translationMemory?.entries.length ? 3 : 2,
     ...data,
+    pages: written,
   }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")
   const header = new Uint8Array(headerSize)
