@@ -10,51 +10,13 @@ import {
   retainHeadTailText,
 } from "./agent-context.js"
 import { RepeatToolGuard } from "./agent-guards.js"
-import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
-import { callProvider, providerCredentialsInMain, validateEndpointUrl } from "./provider-bridge.js"
+import { withLlmRetry } from "./llm-retry.js"
+import { providerRegistry } from "./provider-registry.js"
 import { countCall, emptyTotals, estimatePromptChars, normalizeUsage } from "./token-accounting.js"
 
-export async function readSseEvents(body, onData) {
-  const reader = body.getReader()
-  const decoder = new TextDecoder("utf-8")
-  let buffer = ""
-  let dataLines = []
-  const flush = () => {
-    if (!dataLines.length) return
-    const payload = dataLines.join("\n").trim()
-    dataLines = []
-    if (payload && payload !== "[DONE]") onData(payload)
-  }
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split(/\r?\n/)
-      buffer = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.trim()) {
-          flush()
-          continue
-        }
-        if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trimStart())
-        }
-      }
-    }
-    buffer += decoder.decode()
-    if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).trimStart())
-    flush()
-  } finally {
-    reader.releaseLock?.()
-  }
-}
-
-const geminiModelOptions = {
-  auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
-  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite"],
-  "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite"],
-}
+// The wire encodings live with their provider now, and these stay exported here because this module
+// was already the public name for them.
+export { parseTextToolCalls, readSseEvents } from "./provider-registry.js"
 
 export function buildSystemPrompt({
   allowEdits = true,
@@ -88,307 +50,22 @@ export function stripReasoning(raw) {
   return { thought: thoughts.join("\n\n"), answer: cleaned }
 }
 
-// Text-form tool calls follow the OpenAI function-call convention, so `arguments` is often a
-// JSON-encoded string emitted by local/quantized models. Decode it instead of dropping it.
-function decodeToolArgs(value) {
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value)
-      return parsed && typeof parsed === "object" ? parsed : {}
-    } catch {
-      return {}
-    }
-  }
-  return typeof value === "object" && value !== null ? value : {}
+// The thread owns which shape carries the prompt, so it also owns the estimated size: Gemini keeps the
+// system instruction outside `contents`, while OpenAI already carries it as the first message. The
+// estimate never sees the image bytes.
+function threadPromptChars(thread) {
+  const request = thread.request()
+  return estimatePromptChars(request.contents ?? request.messages ?? "") + (request.systemPrompt?.length ?? 0)
 }
 
-export function parseTextToolCalls(text) {
-  const calls = []
-  const pattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi
-  let match
-  while ((match = pattern.exec(String(text || ""))) !== null) {
-    try {
-      const parsed = JSON.parse(match[1])
-      if (parsed && typeof parsed.name === "string") {
-        calls.push({
-          id: "tc_" + (calls.length + 1),
-          name: parsed.name,
-          args: decodeToolArgs(parsed.arguments),
-        })
-      }
-    } catch {
-      // Ignore malformed inline tool_call blocks.
-    }
-  }
-  return calls
-}
-
-async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, signal, stream = false, onDelta }) {
-  const key = String(settings.key || "").trim()
-  // On the desktop the key is read from the OS vault in main, so a missing settings value is not a
-  // configuration error there: main answers with a credential error only when nothing is stored.
-  if (!key && !providerCredentialsInMain()) throw new Error("Hãy nhập khóa API Gemini ở mục Dịch ảnh & LLM.")
-  const models = geminiModelOptions[settings.model] ?? geminiModelOptions.auto
-  const payload = {
-    systemInstruction: { parts: [{ text: systemPrompt }] },
-    contents,
-    ...(toolDefs.length && { tools: [{ functionDeclarations: toolDefs }] }),
-  }
-  let response
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i]
-    response = await callProvider({
-      provider: "gemini",
-      model,
-      payload,
-      key,
-      stream,
-      signal,
-      timeoutMs: 90000,
-    })
-    if (response.ok) {
-      const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
-      const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
-      const parts = []
-      const textParts = []
-      const thoughtParts = []
-      const toolCalls = []
-      let usage = null
-
-      const ingestPayload = (payload) => {
-        const meta = payload?.usageMetadata
-        if (meta && (meta.promptTokenCount || meta.totalTokenCount)) {
-          usage = {
-            promptTokens: Number(meta.promptTokenCount || 0),
-            outputTokens: Number(meta.candidatesTokenCount || 0),
-            cachedTokens: Number(meta.cachedContentTokenCount || 0),
-            totalTokens: Number(meta.totalTokenCount || 0),
-          }
-        }
-        const chunkParts = payload?.candidates?.[0]?.content?.parts ?? []
-        for (const part of chunkParts) {
-          parts.push(part)
-          if (part.thought) {
-            if (typeof part.text === "string" && part.text) {
-              thoughtParts.push(part.text)
-              onDelta?.({ text: "", thought: part.text })
-            }
-            continue
-          }
-          if (typeof part.text === "string" && part.text) {
-            textParts.push(part.text)
-            onDelta?.({ text: part.text, thought: "" })
-          }
-          if (part.functionCall?.name) {
-            toolCalls.push({
-              id: "gem_" + (toolCalls.length + 1) + "_" + Date.now(),
-              name: part.functionCall.name,
-              args: part.functionCall.args ?? {},
-            })
-          }
-        }
-      }
-
-      if (isSse) {
-        await readSseEvents(response.body, (raw) => {
-          try {
-            ingestPayload(JSON.parse(raw))
-          } catch {
-            // Ignore partial or non-JSON SSE keepalive frames.
-          }
-        })
-      } else {
-        ingestPayload(await response.json())
-      }
-
-      return {
-        rawModelContent: { role: "model", parts },
-        text: textParts.join(isSse ? "" : "\n").trim(),
-        thought: thoughtParts.join("").trim(),
-        toolCalls,
-        usage,
-      }
-    }
-    const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && i + 1 < models.length
-    if (!canFallback) break
-  }
-  const err = new Error(`Gemini trả lỗi ${response.status}. Kiểm tra khóa API và hạn mức.`)
-  err.status = response.status
-  err.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
-  throw err
-}
-
-async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = false, onDelta }) {
-  const endpoint = validateEndpointUrl(settings.baseUrl)
-  const model = String(settings.llmModel || "").trim()
-  if (!model) throw new Error("Hãy nhập tên Model LLM ở mục Dịch ảnh & LLM.")
-
-  const body = {
-    model,
-    temperature: 0.3,
-    messages,
-    ...(stream && { stream: true, stream_options: { include_usage: true } }),
-    ...(toolDefs.length && {
-      tools: toolDefs.map((def) => ({
-        type: "function",
-        function: { name: def.name, description: def.description, parameters: def.parameters },
-      })),
-      tool_choice: "auto",
-    }),
-  }
-
-  const response = await callProvider({
-    provider: "openai",
-    endpoint,
-    payload: body,
-    key: settings.apiKey,
-    stream,
-    signal,
-    timeoutMs: 120000,
-  })
-  if (!response.ok) {
-    const err = new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)
-    err.status = response.status
-    err.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
-    throw err
-  }
-
-  const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
-  const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
-
-  if (isSse) {
-    let rawText = ""
-    let rawReasoning = ""
-    let usage = null
-    const toolMap = new Map()
-    // OpenAI-compatible servers may omit `index` on streamed tool_call fragments (valid per
-    // spec) or send `id` only on the first fragment. Alias both hints to a single slot so later
-    // argument fragments keep accumulating instead of opening orphan slots that drop them.
-    const toolAliases = new Map()
-    let pendingKey = null
-    const aliasKey = (hint, key) => {
-      if (hint) toolAliases.set(hint, key)
-    }
-    const resolveToolKey = (item) => {
-      const byId = item.id ? "id:" + item.id : ""
-      const byIndex = Number.isInteger(item.index) ? "i:" + item.index : ""
-      const known = (byId && toolAliases.get(byId)) || (byIndex && toolAliases.get(byIndex))
-      if (known) return known
-      return byId || byIndex || pendingKey || "tc:" + toolMap.size
-    }
-    await readSseEvents(response.body, (raw) => {
-      let chunk
-      try {
-        chunk = JSON.parse(raw)
-      } catch {
-        return
-      }
-      if (chunk?.usage && (chunk.usage.prompt_tokens || chunk.usage.total_tokens)) {
-        usage = {
-          promptTokens: Number(chunk.usage.prompt_tokens || 0),
-          outputTokens: Number(chunk.usage.completion_tokens || 0),
-          cachedTokens: Number(chunk.usage.prompt_tokens_details?.cached_tokens || 0),
-          totalTokens: Number(chunk.usage.total_tokens || 0),
-        }
-      }
-      const delta = chunk?.choices?.[0]?.delta
-      if (!delta) return
-      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
-        rawReasoning += delta.reasoning_content
-        onDelta?.({ text: "", thought: delta.reasoning_content })
-      }
-      if (typeof delta.content === "string" && delta.content) {
-        rawText += delta.content
-        onDelta?.({ text: delta.content, thought: "" })
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        const seen = new Set()
-        for (const item of delta.tool_calls) {
-          let key = resolveToolKey(item)
-          // Two hint-less fragments inside one delta are separate calls, never one continuation.
-          if (!item.id && !Number.isInteger(item.index) && seen.has(key)) key = "tc:" + toolMap.size
-          seen.add(key)
-          aliasKey(item.id ? "id:" + item.id : "", key)
-          aliasKey(Number.isInteger(item.index) ? "i:" + item.index : "", key)
-          const prev = toolMap.get(key) ?? { order: toolMap.size, id: "", name: "", argumentsText: "" }
-          if (item.id) prev.id = item.id
-          if (item.function?.name) prev.name += item.function.name
-          if (typeof item.function?.arguments === "string") prev.argumentsText += item.function.arguments
-          toolMap.set(key, prev)
-          pendingKey = key
-        }
-      }
-    })
-    let toolCalls = [...toolMap.values()]
-      .sort((a, b) => a.order - b.order)
-      .map((item, index) => {
-        let args = {}
-        try {
-          args = JSON.parse(item.argumentsText || "{}")
-        } catch {
-          args = {}
-        }
-        return { id: item.id || "call_" + (index + 1), name: item.name, args }
-      })
-      .filter((tc) => tc.name)
-    if (!toolCalls.length && rawText.includes("<tool_call>")) {
-      toolCalls = parseTextToolCalls(rawText)
-    }
-    return {
-      rawMessage: { role: "assistant", content: rawText },
-      text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
-      thought: rawReasoning.trim(),
-      toolCalls,
-      usage,
-    }
-  }
-
-  const payload = await response.json()
-  const usage = payload?.usage && (payload.usage.prompt_tokens || payload.usage.total_tokens)
-    ? {
-      promptTokens: Number(payload.usage.prompt_tokens || 0),
-      outputTokens: Number(payload.usage.completion_tokens || 0),
-      cachedTokens: Number(payload.usage.prompt_tokens_details?.cached_tokens || 0),
-      totalTokens: Number(payload.usage.total_tokens || 0),
-    }
-    : null
-  const message = payload.choices?.[0]?.message ?? {}
-  const rawText = Array.isArray(message.content)
-    ? message.content.filter((p) => p?.type === "text" && p.text).map((p) => p.text).join("\n")
-    : String(message.content ?? "")
-  const rawReasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : ""
-
-  let toolCalls = []
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
-    toolCalls = message.tool_calls.map((tc, index) => {
-      let args = {}
-      try {
-        args = typeof tc.function?.arguments === "string"
-          ? JSON.parse(tc.function.arguments || "{}")
-          : (tc.function?.arguments ?? {})
-      } catch {
-        args = {}
-      }
-      return {
-        id: tc.id || "call_" + (index + 1),
-        name: tc.function?.name || "",
-        args,
-      }
-    }).filter((tc) => tc.name)
-  } else if (rawText.includes("<tool_call>")) {
-    toolCalls = parseTextToolCalls(rawText)
-  }
-
-  return {
-    rawMessage: message,
-    text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
-    thought: rawReasoning,
-    toolCalls,
-    usage,
-  }
-}
-
-export async function summarizeHistoryWithLlm({ history = [], settings, keepRecentMessages = 4, signal, accounting = null } = {}) {
+export async function summarizeHistoryWithLlm({
+  history = [],
+  settings,
+  keepRecentMessages = 4,
+  signal,
+  providers = providerRegistry,
+  accounting = null,
+} = {}) {
   const list = Array.isArray(history) ? history.filter((m) => m && typeof m.text === "string" && m.text.trim()) : []
   if (list.length <= keepRecentMessages + 1) {
     return compactChatHistory(list, { keepRecentMessages, force: true })
@@ -405,35 +82,29 @@ export async function summarizeHistoryWithLlm({ history = [], settings, keepRece
     "Chỉ xuất nội dung tóm tắt, không gọi công cụ.",
   ].join("\n")
 
-  const isOpenAi = settings?.provider === "openai"
-  const summaryPrompt = "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio."
-  const summaryMessages = [
-    { role: "system", content: summaryPrompt },
-    { role: "user", content: `${transcript}\n\n---\n${directive}` },
-  ]
-  const summaryContents = [{ role: "user", parts: [{ text: summaryMessages[1].content }] }]
-  const reply = isOpenAi
-    ? await withLlmRetry(
-      () => callOpenAiStep({ settings, messages: summaryMessages, toolDefs: [], signal }),
-      { maxRetries: 1, signal },
-    )
-    : await withLlmRetry(
-      () => callGeminiStep({ settings, systemPrompt: summaryPrompt, contents: summaryContents, toolDefs: [], signal }),
-      { maxRetries: 1, signal },
-    )
+  const provider = providers.resolve(settings)
+  const thread = provider.conversation.createThread({
+    history: [],
+    systemPrompt: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio.",
+    userText: `${transcript}\n\n---\n${directive}`,
+  })
+  const reply = await withLlmRetry(
+    () => provider.callStep({ settings, thread, toolDefs: [], signal }),
+    { maxRetries: 1, signal },
+  )
 
+  const summary = stripReasoning(reply.text).answer.trim()
   // The compaction call is a paid call like any step, so it enters the same ledger.
   const usage = accounting?.record?.({
-    provider: isOpenAi ? "openai" : "gemini",
-    model: isOpenAi ? settings.llmModel : settings.model,
+    provider: provider.id,
+    model: provider.models.resolve(settings)[0],
     kind: "summary",
     tokens: normalizeUsage({
       usage: reply.usage,
-      promptChars: estimatePromptChars(isOpenAi ? summaryMessages : summaryContents) + (isOpenAi ? 0 : summaryPrompt.length),
+      promptChars: threadPromptChars(thread),
       completionChars: reply.text.length,
     }),
   }) ?? null
-  const summary = stripReasoning(reply.text).answer.trim()
   if (!summary) return { ...compactChatHistory(list, { keepRecentMessages, force: true }), usage }
   const checkpointMessage = {
     role: "assistant",
@@ -466,6 +137,7 @@ export async function runAgentTurn({
   maxRetries = 2,
   stream = false,
   signal,
+  providers = providerRegistry,
   onEvent = () => {},
   // Injected by the editor: `record(call)` books a paid call in the project ledger and `gate()` reads
   // the soft budget. Absent in an offline run, where the turn still reports its own token totals.
@@ -495,9 +167,8 @@ export async function runAgentTurn({
     direction: settings.direction,
     skillPrompt,
   })
-  const providerLabel = settings.provider === "openai"
-    ? (settings.llmModel || "OpenAI/Local")
-    : `Gemini (${settings.model || "auto"})`
+  const provider = providers.resolve(settings)
+  const providerLabel = provider.labels.agent(settings)
   const runtimeReminder = buildRuntimeContextReminder({
     snapshot: tools.getRuntimeSnapshot?.() ?? {},
     allowEdits: effectiveAllowEdits,
@@ -505,8 +176,10 @@ export async function runAgentTurn({
     planMode,
     providerLabel,
   })
-  const toolDefs = tools.definitions({ allowEdits: effectiveAllowEdits, allowWebSearch, planMode })
-  const isOpenAi = settings.provider === "openai"
+  const toolDefs = provider.capabilities.tools
+    ? tools.definitions({ allowEdits: effectiveAllowEdits, allowWebSearch, planMode })
+    : []
+  const streaming = stream && provider.capabilities.stream
   const toolTrace = []
   const thoughts = []
   const repeatGuard = new RepeatToolGuard()
@@ -517,21 +190,13 @@ export async function runAgentTurn({
   // every write is gated behind an explicit human approval, whatever confirmBulkEdits says.
   let webContentSeen = false
 
-  // Build provider-specific message thread from clean chat history ({ role: "user"|"assistant", text }).
-  const geminiContents = workingHistory.map((msg) => ({
-    role: msg.role === "assistant" ? "model" : "user",
-    parts: [{ text: msg.text }],
-  }))
-  geminiContents.push({
-    role: "user",
-    parts: [{ text: `${runtimeReminder}\n\n${promptText}` }],
+  // The provider owns the message shape; the harness only knows clean chat history
+  // ({ role: "user"|"assistant", text }) and the text of this turn.
+  const thread = provider.conversation.createThread({
+    history: workingHistory,
+    systemPrompt,
+    userText: `${runtimeReminder}\n\n${promptText}`,
   })
-
-  const openAiMessages = [
-    { role: "system", content: systemPrompt },
-    ...workingHistory.map((msg) => ({ role: msg.role, content: msg.text })),
-    { role: "user", content: `${runtimeReminder}\n\n${promptText}` },
-  ]
 
   let finalAnswer = ""
   let stepsUsed = 0
@@ -557,8 +222,8 @@ export async function runAgentTurn({
 
     // Replay-safe old tool-result pruning between steps (inspired by DeepSeek Harness).
     if (step > 2) {
-      const pruned = pruneOldToolResults(isOpenAi ? openAiMessages : geminiContents, {
-        provider: isOpenAi ? "openai" : "gemini",
+      const pruned = pruneOldToolResults(thread.messages, {
+        provider: provider.conversation.pruneShape,
       })
       if (pruned.charsSaved > 0) {
         totalPrunedChars += pruned.charsSaved
@@ -568,13 +233,11 @@ export async function runAgentTurn({
 
     onEvent({ type: "step", step, maxSteps })
 
-    const onDelta = stream
+    const onDelta = streaming
       ? (delta) => onEvent({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
       : undefined
     const reply = await withLlmRetry(
-      () => (isOpenAi
-        ? callOpenAiStep({ settings, messages: openAiMessages, toolDefs, signal, stream, onDelta })
-        : callGeminiStep({ settings, systemPrompt, contents: geminiContents, toolDefs, signal, stream, onDelta })),
+      () => provider.callStep({ settings, thread, toolDefs, signal, stream: streaming, onDelta }),
       {
         maxRetries,
         signal,
@@ -587,26 +250,22 @@ export async function runAgentTurn({
 
     signal?.throwIfAborted()
     if (reply.usage) latestUsage = reply.usage
-    // openAiMessages already carries the system prompt as its first message; Gemini keeps it in
-    // systemInstruction, outside contents. Count it once in either shape.
-    const fallbackChars = JSON.stringify(isOpenAi ? openAiMessages : geminiContents).length
-      + (isOpenAi ? 0 : systemPrompt.length)
+    // The thread owns which shape carries the system prompt, so it also owns the estimated size.
     contextBudget = computeContextBudget({
       promptTokens: latestUsage?.promptTokens || 0,
-      fallbackChars,
-      provider: isOpenAi ? "openai" : "gemini",
-      model: isOpenAi ? settings.llmModel : settings.model,
+      fallbackChars: thread.fallbackChars(),
+      provider: provider.id,
+      model: provider.models.resolve(settings)[0],
     })
     // Tokens come from the provider answer when it reported them; only a missing count is estimated
-    // from the text size, and the estimate never sees the image bytes.
+    // from the text size.
     const call = accounting?.record?.({
-      provider: isOpenAi ? "openai" : "gemini",
-      model: isOpenAi ? settings.llmModel : settings.model,
+      provider: provider.id,
+      model: provider.models.resolve(settings)[0],
       kind: "chat",
       tokens: normalizeUsage({
         usage: reply.usage,
-        promptChars: estimatePromptChars(isOpenAi ? openAiMessages : geminiContents)
-          + (isOpenAi ? 0 : systemPrompt.length),
+        promptChars: threadPromptChars(thread),
         completionChars: reply.text.length,
       }),
     }) ?? null
@@ -628,19 +287,7 @@ export async function runAgentTurn({
       break
     }
 
-    if (isOpenAi) {
-      openAiMessages.push({
-        role: "assistant",
-        content: reply.text || null,
-        tool_calls: reply.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-        })),
-      })
-    } else {
-      geminiContents.push(reply.rawModelContent)
-    }
+    thread.appendAssistant(reply)
 
     // A batch that itself reads the web must not be allowed to mutate in the same step.
     const batchReadsWeb = reply.toolCalls.some((call) => tools.categoryOf?.(call.name) === "web")
@@ -656,9 +303,8 @@ export async function runAgentTurn({
       onEvent,
     })
 
-    const geminiResponses = []
-    const openAiAttachments = []
     const guardReminders = []
+    const resolved = []
     for (const entry of settled) {
       toolTrace.push(entry)
       if (entry.ok && entry.category === "web") webContentSeen = true
@@ -678,56 +324,9 @@ export async function runAgentTurn({
         tailChars: 2400,
       })
       if (retained.truncated) totalPrunedChars += retained.omittedChars
-
-      if (isOpenAi) {
-        openAiMessages.push({ role: "tool", tool_call_id: entry.id, content: retained.text })
-        if (entry.ok && entry.attachment?.base64) {
-          openAiAttachments.push({
-            summary: entry.summary,
-            mimeType: entry.attachment.mimeType || "image/jpeg",
-            base64: entry.attachment.base64,
-          })
-        }
-      } else {
-        geminiResponses.push({
-          functionResponse: {
-            name: entry.name,
-            response: entry.ok
-              ? (entry.modelText || retained.truncated
-                ? { ok: true, summary: entry.summary, content: retained.text }
-                : { ok: true, summary: entry.summary, data: entry.data })
-              : { ok: false, error: entry.error, ...(entry.code && { code: entry.code }) },
-          },
-        })
-        if (entry.ok && entry.attachment?.base64) {
-          geminiResponses.push({
-            inlineData: {
-              mimeType: entry.attachment.mimeType || "image/jpeg",
-              data: entry.attachment.base64,
-            },
-          })
-        }
-      }
+      resolved.push({ ...entry, retained })
     }
-    if (isOpenAi) {
-      for (const att of openAiAttachments) {
-        openAiMessages.push({
-          role: "user",
-          content: [
-            { type: "text", text: `[Ảnh đính kèm từ inspect_page_image: ${att.summary}]` },
-            { type: "image_url", image_url: { url: `data:${att.mimeType};base64,${att.base64}` } },
-          ],
-        })
-      }
-      for (const reminder of guardReminders) {
-        openAiMessages.push({ role: "user", content: reminder })
-      }
-    } else {
-      for (const reminder of guardReminders) {
-        geminiResponses.push({ text: reminder })
-      }
-      geminiContents.push({ role: "user", parts: geminiResponses })
-    }
+    thread.appendToolResults({ entries: resolved, reminders: guardReminders })
 
     if (step === maxSteps) {
       finalAnswer = answer || `Đã thực hiện ${toolTrace.length} bước công cụ (đạt giới hạn ${maxSteps} bước). Bạn có thể nhắn tiếp để AI tiếp tục.`

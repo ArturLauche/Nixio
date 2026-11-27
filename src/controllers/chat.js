@@ -5,6 +5,7 @@ import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkill
 import { createAgentTools } from "../agent-tools.js"
 import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
+import { providerLabel, resolveProvider } from "../provider-registry.js"
 import { formatTokens, formatUsd } from "../token-accounting.js"
 
 const searchStorageKey = "khung-thoai-search-config"
@@ -212,17 +213,11 @@ export function setupChat({
   // a Vietnamese message instead of echoing main's own wording.
   function providerFailureText(error) {
     if (error?.code !== PROVIDER_BRIDGE_CODES.CREDENTIAL) return error?.message || String(error)
-    return readTranslationSettings().provider === "gemini"
-      ? "Chưa có khóa API Gemini trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
-      : "Chưa có khóa API cho endpoint này trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
+    return resolveProvider(readTranslationSettings()).credential.vaultMessage
   }
 
   function refreshModelBadge() {
-    const settings = readTranslationSettings()
-    const label = settings.provider === "openai"
-      ? (settings.llmModel || "Local/OpenAI LLM")
-      : `Gemini (${settings.model})`
-    byId("chat-model-badge").textContent = label
+    byId("chat-model-badge").textContent = providerLabel(readTranslationSettings(), "badge")
   }
   refreshModelBadge()
 
