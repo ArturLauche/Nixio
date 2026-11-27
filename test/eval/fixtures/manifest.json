@@ -110,7 +110,7 @@
     },
     {
       "id": "openai-boxes-missing-id-guard",
-      "note": "The simulated model drops B2. The case passes only when production rejects the incomplete ID set instead of silently translating the subset.",
+      "note": "The simulated model drops B2 on every attempt. An incomplete ID set is a transient content error (#40), so production retries it and then rejects it; the case passes only when the guard fires instead of silently translating the subset.",
       "kind": "translate",
       "provider": "openai",
       "expectError": "thiếu hoặc trùng mã thoại",
@@ -136,16 +136,42 @@
             ],
             "usage": { "prompt_tokens": 640, "completion_tokens": 18, "total_tokens": 658 }
           }
+        },
+        {
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"lines\":[{\"id\":\"B1\",\"text\":\"Là Gojo Satoru.\"}]}"
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 640, "completion_tokens": 18, "total_tokens": 658 }
+          }
+        },
+        {
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"lines\":[{\"id\":\"B1\",\"text\":\"Là Gojo Satoru.\"}]}"
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 640, "completion_tokens": 18, "total_tokens": 658 }
+          }
         }
       ],
       "expected": {
-        "steps": 1,
+        "steps": 3,
         "translations": {
           "b1": "Là Gojo Satoru.",
           "b2": "Đi thôi."
         }
       },
-      "gates": { "maxSteps": 1 }
+      "gates": { "maxSteps": 3 }
     },
     {
       "id": "openai-agent-update-boxes",

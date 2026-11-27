@@ -9,6 +9,25 @@ export function readOcrBox(coordinates) {
   return right > left && bottom > top ? [left, top, right, bottom] : null
 }
 
+// A box that a vision model reported, rather than a box this app computed.
+//
+// A model asked for integers still answers with decimals — the OpenAI-compatible route sends no
+// response schema at all, and a schema on the Gemini route is only a hint — so every finite coordinate
+// is rounded before the integer invariant, the 0-1000 range and the [top,left,bottom,right] ordering
+// are checked. Normalizing the representation keeps a usable box instead of dropping every hit the
+// model found; the shape is still enforced, so a non-numeric coordinate, a wrong length and an
+// inverted rectangle all remain invalid.
+export function readModelOcrBox(coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.length !== 4) return null
+  const rounded = []
+  for (let index = 0; index < 4; index++) {
+    const value = coordinates[index]
+    if (typeof value !== "number" || !Number.isFinite(value)) return null
+    rounded.push(Math.round(value))
+  }
+  return readOcrBox(rounded)
+}
+
 export function toRectangle([left, top, right, bottom]) {
   return { x: left / 1000, y: top / 1000, w: (right - left) / 1000, h: (bottom - top) / 1000 }
 }

@@ -1,31 +1,20 @@
 import { imageMimeType } from "./io.js"
-import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
-import { readOcrBox } from "./placement.js"
+import { parseRetryAfterMs, retryableContentError, withLlmRetry } from "./llm-retry.js"
+import {
+  extractJsonObject,
+  readLines,
+  readProviderJson,
+  readRequestedTranslations,
+} from "./llm-response.js"
+import { readModelOcrBox } from "./placement.js"
 import { callProvider, validateEndpointUrl } from "./provider-bridge.js"
 
 // The endpoint guard lives with the transport adapter so the browser route and the desktop route
 // accept exactly the same base URLs; it stays exported here for the modules that already import it.
 export { validateEndpointUrl }
-
-export function extractJsonObject(rawText) {
-  if (typeof rawText !== "string" || !rawText.trim()) {
-    throw new Error("LLM không trả dữ liệu.")
-  }
-  // Strip <think>...</think> reasoning blocks emitted by local reasoning models (DeepSeek/Qwen).
-  let cleaned = rawText.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
-  const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(cleaned)
-  if (fenced) cleaned = fenced[1].trim()
-  const firstBrace = cleaned.indexOf("{")
-  const lastBrace = cleaned.lastIndexOf("}")
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1)
-  }
-  try {
-    return JSON.parse(cleaned)
-  } catch {
-    throw new Error("LLM trả dữ liệu JSON không hợp lệ.")
-  }
-}
+// Extraction is shared with the Gemini adapter now, and this module keeps re-exporting it because it
+// was already the public name for the behaviour.
+export { extractJsonObject }
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -41,7 +30,7 @@ function fileToDataUrl(file) {
   })
 }
 
-async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800 }, messages) {
+async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRetries = 2, retryDelayMs = 800 }, messages, { expectedIds = null } = {}) {
   const endpoint = validateEndpointUrl(baseUrl)
   const model = String(llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model (ví dụ: qwen2.5:7b, hy-mt2-manga, gpt-4o-mini).")
@@ -69,16 +58,21 @@ async function chatCompletion({ baseUrl, apiKey, llmModel, signal, report, maxRe
         error.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
         throw error
       }
-      const payload = await response.json()
-      const content = payload.choices?.[0]?.message?.content
+      // Every read of the answer stays inside the bounded retry: a body that is not JSON, an answer that
+      // is not the requested object, a cut-off answer and a malformed line list are all content errors.
+      const payload = await readProviderJson(response, { label: "LLM", signal })
+      const choice = payload.choices?.[0]
+      if (choice?.finish_reason === "length") {
+        throw retryableContentError("LLM trả nội dung bị cắt ngắn.")
+      }
+      const content = choice?.message?.content
       const text = Array.isArray(content)
         ? content.filter((part) => part?.type === "text" && part.text).map((part) => part.text).join("")
         : String(content ?? "")
-      const parsed = extractJsonObject(text)
-      if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
-        throw new Error("LLM trả danh sách thoại sai định dạng.")
-      }
-      return parsed.lines
+      const lines = readLines(extractJsonObject(text))
+      // A missing, duplicated or blank translation belongs inside this bounded retry: validating it
+      // after the retry loop would end a whole batch on the first flaky answer.
+      return expectedIds ? readRequestedTranslations(lines, expectedIds, { label: "LLM" }) : lines
     },
     {
       maxRetries,
@@ -107,19 +101,16 @@ export async function translateBoxesOpenAi(boxes, settings) {
     notes: settings.notes ?? "",
     glossary: settings.glossary ?? "",
   })
-  const lines = await chatCompletion(settings, [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userPayload },
-  ])
-  const byId = new Map(lines.map(({ id, text }) => [String(id), text.replace(/\s+/g, " ").trim()]))
-  if (byId.size !== lines.length || byId.size !== items.length || items.some(({ id }) => !byId.has(id))) {
-    throw new Error("LLM trả thiếu hoặc trùng mã thoại. Hãy thử lại.")
-  }
+  const byId = await chatCompletion(
+    settings,
+    [{ role: "system", content: systemPrompt }, { role: "user", content: userPayload }],
+    { expectedIds: items.map(({ id }) => id) },
+  )
   return items.map(({ id, text }, index) => ({
     id,
     boxId: boxes[index].id,
     source: text,
-    text: byId.get(id) || text,
+    text: byId.get(id),
   }))
 }
 
@@ -153,7 +144,7 @@ export async function translateImageOpenAi(page, settings) {
     .filter((item) => item.text.trim())
     .map((item, index) => ({
       id: "B" + (index + 1),
-      box: readOcrBox(item.box_2d),
+      box: readModelOcrBox(item.box_2d),
       source: typeof item.source === "string" ? item.source.trim() : "",
       text: item.text.replace(/\s+/g, " ").trim(),
     }))
@@ -188,7 +179,7 @@ export async function alignScriptOpenAi(page, settings, script) {
   const byId = new Map()
   for (const item of lines) {
     const id = String(item.id || item.text || "").trim()
-    const box = readOcrBox(item.box_2d)
+    const box = readModelOcrBox(item.box_2d)
     if (id && box && !byId.has(id)) {
       byId.set(id, { box, source: typeof item.source === "string" ? item.source.trim() : "" })
     }
