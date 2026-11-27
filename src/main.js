@@ -63,6 +63,7 @@ const state = {
   compareRestore: "edit", splitPos: 50, cloneSource: null,
   exporting: false, importing: false, translating: false, importingScript: false,
   openingProject: false, processingNative: false, savingProject: false,
+  styleGuide: null,
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
@@ -117,6 +118,7 @@ function editorSnapshot() {
   return copyEditor({
     pages: state.pages, queue: state.queue, presets: state.presets,
     pageId: state.pageId, boxId: state.boxId,
+    styleGuide: state.styleGuide,
     settings: Object.fromEntries(projectSettings.map(({ id, value }) => [id, value])),
   })
 }
@@ -596,6 +598,7 @@ function syncProjectActions() {
   byId("save-project").disabled = projectBusy()
   byId("new-project").disabled = projectBusy()
   byId("open-find").disabled = projectBusy()
+  byId("open-style-guide").disabled = projectBusy()
   byId("recent-projects-button").disabled = projectBusy()
   byId("images").disabled = projectBusy()
   byId("script-file").disabled = projectBusy()
@@ -2089,6 +2092,7 @@ const projects = setupProjects({
 })
 const dialogs = setupDialogs({
   ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,
+  editorSnapshot, onStyleGuideChange: syncTranslationActions,
 })
 const recordNudge = (before) => checkpoint(before, NUDGE_META)
 

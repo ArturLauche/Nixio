@@ -97,6 +97,7 @@ export function setupProjects({
       settings,
       currentPage: selectedIndex(),
       fit: state.fit,
+      styleGuide: state.styleGuide,
     })
   }
 
@@ -222,6 +223,7 @@ export function setupProjects({
         state.pages.length ||
         revision !== diskRevision ||
         state.queue.length ||
+        state.styleGuide ||
         projectSettings.some(
           ({ value }, index) => value !== defaultProjectSettings[index],
         )
@@ -253,6 +255,7 @@ export function setupProjects({
       state.queue = project.queue
       state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
+      state.styleGuide = project.styleGuide ?? null
       state.zoom = null
       state.selectedBoxIds?.clear()
       updateFitLabel()
@@ -390,6 +393,7 @@ export function setupProjects({
     state.selectedBoxIds?.clear()
     state.projectId = crypto.randomUUID()
     projectName = undefined
+    state.styleGuide = null
     generation++
     lastWebSnapshot = null
     savedKind = null

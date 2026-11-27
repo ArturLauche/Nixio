@@ -1,8 +1,9 @@
 import { translateBoxesGemini } from "./gemini.js"
 import { translateBoxesOpenAi } from "./openai-compat.js"
+import { styleGuidePrompt } from "./style-guide.js"
 
-export function translationNotes({ notes, skillPrompt }) {
-  return skillPrompt ? [notes, skillPrompt].filter(Boolean).join("\n\n") : notes
+export function translationNotes({ notes, skillPrompt, styleGuide }) {
+  return [notes, skillPrompt, styleGuidePrompt(styleGuide)].filter(Boolean).join("\n\n")
 }
 
 export function translationSignature(settings) {

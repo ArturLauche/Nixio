@@ -1,5 +1,6 @@
 import { imageMimeType, imageTypes } from "./io.js"
 import { validateRetouchStroke } from "./retouch.js"
+import { normalizeStyleGuide } from "./style-guide.js"
 
 export const projectExtension = ".khungthoai"
 export const projectPageLimit = 50
@@ -134,7 +135,16 @@ function projectPage(page) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId }) {
+function projectStyleGuide(raw) {
+  if (raw === undefined) return undefined
+  try {
+    return normalizeStyleGuide(raw, { strict: true }) ?? undefined
+  } catch {
+    throw invalidProject()
+  }
+}
+
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, styleGuide }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
   settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
@@ -144,8 +154,10 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
       !presets.every((preset) => isText(preset?.name) && preset.name.trim())) {
     throw invalidProject()
   }
+  const guide = projectStyleGuide(styleGuide)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
+    ...(guide && { styleGuide: guide }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
   }
 }
