@@ -150,9 +150,11 @@ Nixio/
 ├── docs/
 │   ├── architecture.md         # Sơ đồ RPC KTR1, máy trạng thái tác vụ/phục hồi, bảng ranh giới tin cậy IPC, checklist thêm operation
 │   └── i18n.md                 # Catalogue giao diện, data-i18n, ô chọn ngôn ngữ trên header & đường dẫn thêm ngôn ngữ
+│   └── release-reproducibility.md # Các đầu vào build đã pin, manifest digest & phần chưa tái lập
 ├── scripts/
 │   ├── desktop-build.mjs       # Build native C# + Vite + @electron/packager (.app trên macOS)
-│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe; .app, .dmg + ký & notarise macOS
+│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe; .app, .dmg + ký & notarise macOS; manifest đầu vào tái lập
+│   ├── verify-release-repro.mjs # Build hai lần & đối chiếu digest artifact (reproducible build gate)
 │   ├── desktop-smoke.mjs       # Kiểm thử E2E Playwright cho bản Electron đóng gói (giải mã đường dẫn .app trên macOS)
 │   ├── benchmark.mjs           # Đối chứng chất lượng redraw/OCR
 │   └── agent-eval.mjs          # Chấm output AI offline bằng fixture vàng (glossary, ID, tool, token)
