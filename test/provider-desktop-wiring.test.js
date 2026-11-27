@@ -5,7 +5,8 @@ import { credentialHandle } from "../desktop/credential-ipc.cjs"
 import { ProviderTransport } from "../desktop/provider-transport.cjs"
 import { runAgentTurn } from "../src/agent-harness.js"
 import { translateBoxesGemini } from "../src/gemini.js"
-import { translateBoxesOpenAi } from "../src/openai-compat.js"
+import { translateImageOpenAi, translateBoxesOpenAi } from "../src/openai-compat.js"
+import { matchDialogue } from "../src/placement.js"
 
 // End-to-end wiring without Electron: the real main-process transport answers the real renderer
 // adapter through a synthetic IPC layer, so the envelope, the acknowledgement and the cancel token
@@ -361,4 +362,83 @@ test("a direct abort destroys the in-flight main request instead of dropping a r
   streamController.abort()
   await assert.rejects(streaming, (error) => error.name === "AbortError")
   assert.equal(transport.entries.size, 0)
+})
+
+test("a malformed model answer is retried through the bridge, not at the caller", async (t) => {
+  const { bridge, layer, envelopes } = wire({
+    keys: { [openAiHandle]: VAULT_OPENAI_KEY },
+    handler: (_options, index) => ({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      chunks: [JSON.stringify({
+        choices: [{
+          message: {
+            content: index === 0
+              ? "I cannot answer that."
+              : '{"lines":[{"id":"B1","text":"Chào buổi sáng"}]}',
+          },
+        }],
+      })],
+    }),
+  })
+  installBridge(t, bridge)
+  const result = await translateBoxesOpenAi([{ id: "box-1", text: "おはよう" }], {
+    provider: "openai",
+    baseUrl: OPENAI_BASE,
+    apiKey: RENDERER_KEY,
+    llmModel: "hy-mt2-manga",
+    source: "Japanese",
+    target: "Vietnamese",
+    notes: "",
+    glossary: "",
+    context: [],
+    retryDelayMs: 1,
+  })
+  assert.deepEqual(result, [{ id: "B1", boxId: "box-1", source: "おはよう", text: "Chào buổi sáng" }])
+  assert.equal(layer.calls.length, 2, "a prose answer did not reach the bounded retry")
+  // The retry is a second full exchange in main, and it still carries the vault key rather than the
+  // renderer's settings key.
+  assert.equal(layer.calls[1].headers.Authorization, "Bearer " + VAULT_OPENAI_KEY)
+  for (const envelope of envelopes) {
+    assert.equal(JSON.stringify(envelope).includes(RENDERER_KEY), false)
+    assert.equal(JSON.stringify(envelope).includes(VAULT_OPENAI_KEY), false)
+  }
+})
+
+test("a decimal box from the model survives the bridge and still places dialogue", async (t) => {
+  installFileReader(t, "data:image/png;base64,AAAA")
+  const { bridge, layer, envelopes } = wire({
+    keys: { [openAiHandle]: VAULT_OPENAI_KEY },
+    handler: () => ({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      chunks: [JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              lines: [{ source: "こんにちは", text: "Xin chào", box_2d: [100.4, 200.6, 300.8, 400.2] }],
+            }),
+          },
+        }],
+      })],
+    }),
+  })
+  installBridge(t, bridge)
+  const lines = await translateImageOpenAi(
+    { file: { name: "page.png", type: "image/png", size: 64 } },
+    {
+      provider: "openai",
+      baseUrl: OPENAI_BASE,
+      apiKey: RENDERER_KEY,
+      llmModel: "gpt-4o-mini",
+      source: "Japanese",
+      target: "Vietnamese",
+      direction: "rtl",
+    },
+  )
+  assert.deepEqual(lines, [{ id: "B1", box: [201, 100, 400, 301], source: "こんにちは", text: "Xin chào" }])
+  assert.deepEqual(matchDialogue(lines, [{ id: "region-1", box: [201, 100, 400, 301] }]).placed.length, 1)
+  assert.equal(layer.calls.length, 1)
+  assert.equal(envelopes[0].operation, "chat.completions")
+  assert.equal(JSON.stringify(envelopes).includes(RENDERER_KEY), false)
 })
