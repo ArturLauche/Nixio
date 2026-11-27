@@ -237,10 +237,30 @@ export function pruneOldToolResults(
         charsSaved += retained.omittedChars
       }
     }
+    for (let i = 0; i < Math.max(0, messages.length - 3); i++) {
+      if (messages[i]?.role === "user" && Array.isArray(messages[i].content)) {
+        const hadImage = messages[i].content.some((p) => p?.type === "image_url")
+        if (hadImage) {
+          messages[i] = { ...messages[i], content: "[Ảnh trang ở bước trước đã được rút gọn để tiết kiệm ngữ cảnh.]" }
+          prunedCount++
+          charsSaved += 4000
+        }
+      }
+    }
     return { prunedCount, charsSaved }
   }
 
   // Gemini `contents` array: tool responses live inside user messages with `parts[].functionResponse`.
+  for (let i = 0; i < Math.max(0, messages.length - 3); i++) {
+    const parts = messages[i]?.parts
+    if (!Array.isArray(parts) || !parts.some((p) => p?.inlineData)) continue
+    messages[i] = {
+      ...messages[i],
+      parts: parts.map((p) => (p?.inlineData ? { text: "[Ảnh trang ở bước trước đã được rút gọn.]" } : p)),
+    }
+    prunedCount++
+    charsSaved += 4000
+  }
   const slots = []
   for (let i = 0; i < messages.length; i++) {
     const parts = messages[i]?.parts

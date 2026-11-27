@@ -1,4 +1,5 @@
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
+import { lintChapter } from "./linter.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
 import { translationSignature } from "./translation.js"
 import {
@@ -53,6 +54,51 @@ function resolvePage(state, selectedPage, pageIndex) {
   return { page: current ?? null, index }
 }
 
+function defaultCapturePageImage(page, { box = null, maxDim = 768 } = {}) {
+  const img = page?.image
+  const natW = img?.naturalWidth ?? 0
+  const natH = img?.naturalHeight ?? 0
+  if (!natW || !natH || typeof document === "undefined") {
+    throw new Error("Không thể chụp ảnh trang hiện tại trong môi trường này.")
+  }
+  let sx = 0
+  let sy = 0
+  let sw = natW
+  let sh = natH
+  let cropped = false
+  if (box) {
+    const padX = Math.max(0.14, box.w * 0.6)
+    const padY = Math.max(0.14, box.h * 0.6)
+    const x0 = clamp(box.x - padX, 0, 1)
+    const y0 = clamp(box.y - padY, 0, 1)
+    const x1 = clamp(box.x + box.w + padX, 0, 1)
+    const y1 = clamp(box.y + box.h + padY, 0, 1)
+    sx = Math.floor(x0 * natW)
+    sy = Math.floor(y0 * natH)
+    sw = Math.max(16, Math.ceil((x1 - x0) * natW))
+    sh = Math.max(16, Math.ceil((y1 - y0) * natH))
+    cropped = true
+  }
+  const scale = Math.min(1, clamp(Number(maxDim) || 768, 384, 1280) / Math.max(sw, sh))
+  const width = Math.max(16, Math.round(sw * scale))
+  const height = Math.max(16, Math.round(sh * scale))
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext("2d")
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height)
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.82)
+  const comma = dataUrl.indexOf(",")
+  if (comma < 0) throw new Error("Không thể mã hóa ảnh trang để AI xem.")
+  return {
+    mimeType: "image/jpeg",
+    base64: dataUrl.slice(comma + 1),
+    width,
+    height,
+    cropped,
+  }
+}
+
 export function createAgentTools({
   state,
   byId,
@@ -75,6 +121,7 @@ export function createAgentTools({
   makeBoxFn = defaultMakeBox,
   autoFitBoxFn = defaultAutoFitBox,
   textOverflowsFn = defaultTextOverflows,
+  capturePageImageFn = defaultCapturePageImage,
 }) {
   let currentTodos = []
   let currentPlan = null
@@ -659,11 +706,102 @@ export function createAgentTools({
             }
           }
         }
+        const settings = readTranslationSettings?.() ?? {}
+        const qa = lintChapter(targetPages, {
+          glossaryText: settings.glossary ?? "",
+          sourceLanguage: settings.source ?? "Japanese",
+          targetLanguage: settings.target ?? "Vietnamese",
+          maxIssues: 25,
+        })
+        for (const item of qa.issues) {
+          if (item.severity !== "warning") continue
+          issues.push({
+            type: item.type,
+            pageIndex: item.pageIndex,
+            pageName: item.pageName,
+            boxId: item.boxId,
+            text: item.message,
+          })
+        }
         return {
           summary: issues.length
             ? `Phát hiện ${issues.length} vấn đề trên ${targetPages.length} trang`
             : `Tất cả ${targetPages.length} trang đều đạt chuẩn, sẵn sàng xuất`,
-          data: { checkedPages: targetPages.length, totalIssues: issues.length, issues: issues.slice(0, 50) },
+          data: { checkedPages: targetPages.length, totalIssues: issues.length, qaSummary: qa.byType, issues: issues.slice(0, 50) },
+        }
+      },
+    },
+    {
+      name: "lint_chapter_qa",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 8000,
+      description:
+        "Quét tức thì toàn bộ chương (hoặc một trang) để tìm lỗi dịch thuật & biên tập: sót chữ gốc (Nhật/Hàn/Trung), lệch tên/thuật ngữ so với Bảng thuật ngữ, khung thoại mẫu/rỗng, và lỗi dấu câu/khoảng trắng thừa.",
+      parameters: {
+        type: "object",
+        properties: {
+          pageIndex: { type: "integer", description: "Số trang (1-based). Bỏ trống để quét cả chương." },
+        },
+      },
+      async run(args) {
+        const targetPages = Number.isInteger(args?.pageIndex)
+          ? [resolvePage(state, selectedPage, args.pageIndex).page].filter(Boolean)
+          : state.pages
+        if (!targetPages.length) {
+          return { summary: "Không có trang nào để rà QA.", data: { total: 0, byType: {}, issues: [] } }
+        }
+        const settings = readTranslationSettings?.() ?? {}
+        const qa = lintChapter(targetPages, {
+          glossaryText: settings.glossary ?? "",
+          sourceLanguage: settings.source ?? "Japanese",
+          targetLanguage: settings.target ?? "Vietnamese",
+        })
+        return {
+          summary: qa.total
+            ? `Phát hiện ${qa.total} lỗi QA (sót gốc: ${qa.byType.untranslated_source}, thuật ngữ: ${qa.byType.glossary_violation}, dấu câu: ${qa.byType.punctuation_spacing})`
+            : `Không có lỗi QA nào trên ${targetPages.length} trang`,
+          data: qa,
+        }
+      },
+    },
+    {
+      name: "inspect_page_image",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 12000,
+      description:
+        "Xem trực tiếp hình ảnh trang truyện hiện tại (hoặc ảnh cắt phóng to xung quanh một khung thoại cụ thể) để quan sát biểu cảm nhân vật, bối cảnh, đại từ xưng hô hoặc kiểm tra chữ có đè lên nét vẽ không.",
+      parameters: {
+        type: "object",
+        properties: {
+          pageIndex: { type: "integer", description: "Số trang (1-based). Mặc định trang đang mở." },
+          boxId: { type: "string", description: "Mã khung thoại (tùy chọn) để cắt phóng to xung quanh bong bóng thoại và nhân vật đang nói." },
+          maxDim: { type: "integer", description: "Cạnh lớn nhất (px, 384–1280, mặc định 768)." },
+        },
+      },
+      async run(args) {
+        const { page, index } = resolvePage(state, selectedPage, args?.pageIndex)
+        if (!page) throw new Error("Không tìm thấy trang để xem ảnh.")
+        const box = args?.boxId ? page.boxes.find((b) => b.id === args.boxId) : null
+        if (args?.boxId && !box) throw new Error(`Không tìm thấy khung "${args.boxId}" trên trang ${index + 1}.`)
+        const captured = await capturePageImageFn(page, { box, maxDim: args?.maxDim })
+        return {
+          summary: box
+            ? `Đã đính kèm ảnh cắt quanh khung "${box.id}" (trang ${index + 1}, ${captured.width}×${captured.height})`
+            : `Đã đính kèm ảnh trang ${index + 1} (${captured.width}×${captured.height})`,
+          data: {
+            pageIndex: index + 1,
+            pageName: page.name,
+            boxId: box?.id ?? null,
+            cropped: Boolean(captured.cropped),
+            width: captured.width,
+            height: captured.height,
+          },
+          attachment: {
+            mimeType: captured.mimeType,
+            base64: captured.base64,
+          },
         }
       },
     },
