@@ -81,6 +81,7 @@ test("English source left untranslated is reported without flagging target text,
 
   for (const [text, why] of [
     ["Mọi người ơi, đi thôi!", "accented Vietnamese"],
+    ["Hello everyone, café".normalize("NFD"), "decomposed Latin accents"],
     ["Anh ấy đã đi rồi.", "accented Vietnamese"],
     ["Xin chào", "accented Vietnamese"],
     ["Toi khong biet gi ca", "diacritic-free Vietnamese"],
@@ -146,6 +147,7 @@ test("glossary casing QA ignores sentence-initial capitals but keeps proper-noun
   assert.equal(violations("Đây là Gojo Satoru.", terms), 0)
   assert.equal(violations("Gojo Satoru dùng lãnh địa triển khai", terms), 1)
   assert.equal(violations("Gojo Satoru dùng Lãnh Địa Triển Khai!", terms), 0)
+  assert.equal(violations("Gojo Satoru dùng Lãnh Địa Triển Khai!".normalize("NFD"), terms), 0)
   assert.equal(violations("Gojo Satoru dung lanh dia trien khai", terms), 1)
 
   // A single-word target cannot separate a capital from a sentence start, so only its

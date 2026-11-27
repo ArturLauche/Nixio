@@ -61,7 +61,7 @@ function normalizedTokens(text) {
 // whole words, or when the box still carries its own source text and the text was not
 // rewritten at all. Names, loan words, short noises and single words never qualify.
 function detectUntranslatedEnglish(text, sourceText = "") {
-  const value = String(text ?? "").trim()
+  const value = String(text ?? "").normalize("NFC").trim()
   if (!value || LATIN_ACCENT.test(value) || NON_LATIN_LETTER.test(value)) return false
   const words = (value.match(WORD_TOKEN) ?? []).filter((token) => ASCII_WORD.test(token))
   if (words.length < 2 || value.replace(/[^A-Za-z]/g, "").length < 6) return false
@@ -243,7 +243,7 @@ export function lintChapter(
         }
         // Casing drift stays meaningful only for an explicit proper noun or term, where a
         // capital is part of the spelling rather than a sentence position.
-        if (isTitleCaseTerm(entry.target) && !trimmed.includes(entry.target)) {
+        if (isTitleCaseTerm(entry.target) && !trimmed.normalize("NFC").includes(entry.target.normalize("NFC"))) {
           if (matchesWholeWord(normText, normTarget)) {
             pushIssue({
               type: "glossary_violation",
