@@ -11,6 +11,9 @@ export const GLOBAL_EXPORT_PROFILE_KEY = "khung-thoai-export-profile"
 export const DEFAULT_EXPORT_PROFILE_ID = "goc"
 export const DEFAULT_JPEG_QUALITY = 0.92
 export const exportManifestFileName = "manifest.json"
+// Every archive entry is stamped with this fixed date (the DOS epoch) so exporting the same project
+// twice produces the same bytes; JSZip otherwise writes the moment of export into each entry.
+export const exportArchiveDate = new Date("1980-01-01T00:00:00Z")
 
 export const EXPORT_PROFILE_LIMITS = Object.freeze({
   minWidth: 320,

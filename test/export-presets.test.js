@@ -4,6 +4,7 @@ import {
   DEFAULT_EXPORT_PROFILE_ID,
   GLOBAL_EXPORT_PROFILE_KEY,
   describeExportProfile,
+  exportArchiveDate,
   exportManifest,
   exportManifestFileName,
   exportProfilePresets,
@@ -246,6 +247,8 @@ test("exportManifest lists the slice order of every page and carries no timestam
   assert.ok(!/\d{4}-\d{2}-\d{2}T/.test(json), "the manifest stays byte-identical between runs")
   assert.deepEqual(JSON.parse(json).slices[0], manifest.slices[0])
   assert.equal(exportManifest({ profile: resolveExportProfile("goc"), plans: [] }).profile.quality, null)
+  // Archive entries carry a fixed date, so the ZIP bytes do not change between runs either.
+  assert.equal(exportArchiveDate.toISOString(), "1980-01-01T00:00:00.000Z")
   assert.throws(() => exportManifest({ profile: naver, plans: null }), /Danh sách mảnh xuất không hợp lệ/)
   assert.throws(() => exportManifest({ profile: naver, plans: [{}] }), /Kế hoạch xuất theo hồ sơ không hợp lệ/)
   assert.throws(

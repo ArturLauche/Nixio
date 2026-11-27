@@ -6,6 +6,7 @@ import { exportDialogueScript } from "../tools.js"
 import { lintChapter } from "../linter.js"
 import {
   describeExportProfile,
+  exportArchiveDate,
   exportManifest,
   exportManifestFileName,
   loadGlobalExportProfileId,
@@ -79,7 +80,7 @@ export function setupExports({
             status(`Trang ${index + 1}/${pages.length} · mảnh ${sliceIndex}/${total}: ${fileName} (${width}×${height} px).`)
           },
         })
-        for (const file of files) zip.file(file.name, file)
+        for (const file of files) zip.file(file.name, file, { date: exportArchiveDate })
         plans.push({ pageName: page.name, plan })
         order += files.length
       } finally {
@@ -89,6 +90,7 @@ export function setupExports({
     zip.file(
       exportManifestFileName,
       serializeExportManifest(exportManifest({ profile, plans })),
+      { date: exportArchiveDate },
     )
     saveFile(await zip.generateAsync({ type: "blob" }), `khung-thoai-${profile.id}.zip`)
     return plans.reduce((total, { plan }) => total + plan.slices.length, 0)
