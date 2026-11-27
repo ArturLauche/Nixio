@@ -3,6 +3,7 @@ import test from "node:test"
 import {
   DEFAULT_STARTER_PRESETS,
   GLOBAL_PRESETS_KEY,
+  MAX_GLOBAL_PRESETS,
   loadGlobalPresets,
   mergePresets,
   parsePresetsJson,
@@ -50,6 +51,22 @@ test("global presets seed starter defaults, persist updates, and merge cleanly",
   saveGlobalPresets([], storage)
   assert.deepEqual(loadGlobalPresets(storage), [])
   assert.equal(validatePreset({ name: "Bad", style: { size: 9999 } }), null)
+})
+
+test("saving past the preset cap returns the truncated list callers must adopt", () => {
+  const storage = memoryStorage()
+  const style = { size: 22, font: "Georgia", color: "#111111", align: "left", rotation: 0, fill: true, fillColor: "#f7f4e9" }
+  const presets = Array.from({ length: MAX_GLOBAL_PRESETS + 1 }, (_, i) => ({ name: `Mẫu ${i + 1}`, style }))
+
+  const saved = saveGlobalPresets(presets, storage)
+  assert.equal(saved.length, MAX_GLOBAL_PRESETS, "the 61st preset cannot be persisted")
+  assert.equal(saved.at(-1).name, `Mẫu ${MAX_GLOBAL_PRESETS}`)
+  assert.equal(JSON.parse(storage.getItem(GLOBAL_PRESETS_KEY)).length, MAX_GLOBAL_PRESETS)
+
+  // Callers that keep the return value stay in sync with storage after reload.
+  const reloaded = loadGlobalPresets(storage)
+  assert.equal(reloaded.length, saved.length)
+  assert.equal(reloaded.at(-1).name, saved.at(-1).name)
 })
 
 test("serializePresetsJson and parsePresetsJson round-trip and reject invalid payloads", () => {

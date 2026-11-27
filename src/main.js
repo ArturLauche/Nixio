@@ -6,6 +6,7 @@ import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "
 import { detectAllBubblesOnImage } from "./bubble.js"
 import {
   loadGlobalPresets,
+  MAX_GLOBAL_PRESETS,
   mergePresets,
   parsePresetsJson,
   saveGlobalPresets,
@@ -562,10 +563,13 @@ byId("save-preset").onclick = () => {
   const index = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
   if (index < 0) state.presets.push(preset)
   else state.presets[index] = preset
-  saveGlobalPresets(state.presets)
+  state.presets = saveGlobalPresets(state.presets)
   renderPresets()
-  byId("style-preset").value = String(index < 0 ? state.presets.length - 1 : index)
-  status("Đã lưu mẫu toàn cục " + name + ".")
+  const savedIndex = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
+  byId("style-preset").value = String(savedIndex >= 0 ? savedIndex : 0)
+  status(savedIndex >= 0
+    ? "Đã lưu mẫu toàn cục " + name + "."
+    : `Đã đủ ${MAX_GLOBAL_PRESETS} mẫu dàn chữ; mẫu mới không được lưu.`)
 }
 
 byId("apply-preset").onclick = () => {
@@ -622,8 +626,7 @@ byId("presets-file")?.addEventListener("change", async (event) => {
     const imported = parsePresetsJson(await file.text())
     commitLiveFormCheckpoint()
     checkpoint()
-    state.presets = mergePresets(state.presets, imported)
-    saveGlobalPresets(state.presets)
+    state.presets = saveGlobalPresets(mergePresets(state.presets, imported))
     for (const preset of imported) registerFontName(preset.style.font)
     renderFontOptions()
     renderPresets()
