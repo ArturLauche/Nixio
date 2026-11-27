@@ -1,4 +1,5 @@
 import { normalizedSearch } from "./io.js"
+import { parseTerminologyGraph, termRenderings } from "./terminology-graph.js"
 
 // Each range list holds the canonical block plus the compatibility and half-width forms
 // that OCR and copy-paste keep verbatim, so half-width katakana (ｱﾘｶﾞﾄｳ) and
@@ -86,24 +87,10 @@ function createSourceLeakCheck(sourceLanguage, targetLanguage) {
   return null
 }
 
+// The flat projection of the terminology graph: the canonical pairs, in file order, which is
+// all a plain glossary reader ever needed.
 export function parseGlossary(glossaryText) {
-  const entries = []
-  const seen = new Set()
-  for (const rawLine of String(glossaryText || "").split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (!line || line.startsWith("#") || line.startsWith("//")) continue
-    const sep = line.includes("=") ? "=" : line.includes("->") ? "->" : line.includes(":") ? ":" : null
-    if (!sep) continue
-    const idx = line.indexOf(sep)
-    const source = line.slice(0, idx).trim()
-    const target = line.slice(idx + sep.length).trim()
-    if (!source || !target) continue
-    const key = source.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    entries.push({ source, target })
-  }
-  return entries
+  return parseTerminologyGraph(glossaryText).terms.map(({ source, target }) => ({ source, target }))
 }
 
 function escapeRegExp(text) {
@@ -137,6 +124,45 @@ function isTitleCaseTerm(target) {
   return words.length >= 2 && words.every((word) => /^\p{Lu}/u.test(word))
 }
 
+// A source form is matched as a whole word when it is written in the ASCII range, and as a
+// plain substring otherwise, which is how Han and kana terms behave in running text.
+function matchesSourceForm(text, form) {
+  if (form.length < 2) return false
+  const isAscii = /^[a-z0-9 _-]+$/i.test(form)
+  return isAscii
+    ? new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(form)}(?![\\p{L}\\p{N}_])`, "iu").test(text)
+    : text.includes(form)
+}
+
+// A variant or an alias resolves to its term, so any listed source form counts as the term.
+function sourceFormIn(text, term) {
+  return [term.source, ...term.aliases].find((form) => matchesSourceForm(text, form)) ?? ""
+}
+
+// Casing belongs to the spelling of a declared name; for a phrase or an honorific the capital
+// only mirrors its position in the glossary, so the heuristic applies to plain terms only.
+function casingIsMeaningful(term) {
+  if (term.partOfSpeech === "name") return true
+  if (term.partOfSpeech !== "term") return false
+  return isTitleCaseTerm(term.target)
+}
+
+// Two terms linked by a conflict relation are alternative address forms: a line that mixes
+// them breaks the register the pair encodes (kính ngữ versus cách nói suồng sã).
+function conflictingTerm(term, text, termsById, renderingsById) {
+  const own = renderingsById.get(term.id)?.accepted ?? []
+  if (!own.some((rendering) => text.includes(rendering))) return null
+  for (const id of term.relations.conflict) {
+    const other = termsById.get(id)
+    if (!other) continue
+    const others = renderingsById.get(other.id)?.accepted ?? []
+    if (!others.some((rendering) => text.includes(rendering))) continue
+    if (others.some((rendering) => own.includes(rendering))) continue
+    return other
+  }
+  return null
+}
+
 export function autoFixPunctuation(text) {
   return String(text || "")
     .replace(/[ \t]{2,}/g, " ")
@@ -150,7 +176,10 @@ export function lintChapter(
   pages = [],
   { glossaryText = "", sourceLanguage = "Japanese", targetLanguage = "Vietnamese", maxIssues = 80 } = {},
 ) {
-  const glossary = parseGlossary(glossaryText)
+  const graph = parseTerminologyGraph(glossaryText)
+  const terms = graph.terms
+  const termsById = new Map(terms.map((term) => [term.id, term]))
+  const renderingsById = new Map(terms.map((term) => [term.id, termRenderings(term)]))
   const checkSourceLeak = createSourceLeakCheck(sourceLanguage, targetLanguage)
   const englishSource = sourceLanguage === "English"
   const issues = []
@@ -201,32 +230,61 @@ export function lintChapter(
       }
 
       const normText = normalizedSearch(trimmed)
-      for (const entry of glossary) {
-        if (entry.source.length >= 2 && entry.source.toLowerCase() !== entry.target.toLowerCase()) {
-          const isAscii = /^[a-z0-9 _-]+$/i.test(entry.source)
-          const sourceMatched = isAscii
-            ? new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(entry.source)}(?![\\p{L}\\p{N}_])`, "iu").test(trimmed)
-            : trimmed.includes(entry.source)
-          if (sourceMatched && !trimmed.includes(entry.target)) {
-            pushIssue({
-              type: "glossary_violation",
-              severity: "warning",
-              pageIndex,
-              pageName: page.name,
-              boxId: box.id,
-              snippet: clipText(trimmed),
-              message: `Thuật ngữ "${entry.source}" chưa đổi sang "${entry.target}".`,
-              suggestion: entry.target,
-            })
-            break
-          }
+      for (const term of terms) {
+        const { accepted, forbidden, translationRequired } = renderingsById.get(term.id)
+        // A forbidden rendering is wrong wherever it appears, so it is reported first.
+        const banned = forbidden.find((rendering) => trimmed.includes(rendering))
+        if (banned) {
+          pushIssue({
+            type: "glossary_violation",
+            severity: "warning",
+            pageIndex,
+            pageName: page.name,
+            boxId: box.id,
+            snippet: clipText(trimmed),
+            message: `"${banned}" là dạng bị cấm của "${term.source}"; phải dùng "${term.target}".`,
+            suggestion: term.target,
+          })
+          break
         }
-        const normTarget = normalizedSearch(entry.target)
+        // Any listed source form - the term itself or an alias - counts as the term, but a
+        // listed rendering of any accepted shape satisfies the translation requirement.
+        const sourceForm = translationRequired ? sourceFormIn(trimmed, term) : ""
+        if (sourceForm && !accepted.some((rendering) => trimmed.includes(rendering))) {
+          pushIssue({
+            type: "glossary_violation",
+            severity: "warning",
+            pageIndex,
+            pageName: page.name,
+            boxId: box.id,
+            snippet: clipText(trimmed),
+            message: `Thuật ngữ "${sourceForm}" chưa đổi sang "${term.target}".`,
+            suggestion: term.target,
+          })
+          break
+        }
+        // Conflicting address terms carry the register of the pair: mixing them in one line
+        // breaks the kính ngữ the glossary declares.
+        const conflict = conflictingTerm(term, trimmed, termsById, renderingsById)
+        if (conflict) {
+          pushIssue({
+            type: "glossary_violation",
+            severity: "warning",
+            pageIndex,
+            pageName: page.name,
+            boxId: box.id,
+            snippet: clipText(trimmed),
+            message: `Xung đột xưng hô: "${term.target}" và "${conflict.target}" không dùng cùng một câu.`,
+            suggestion: term.target,
+          })
+          break
+        }
+        const normTarget = normalizedSearch(term.target)
         if (normTarget.length < 3) continue
         // Accent drift: the term is present once diacritics are stripped, so the accents
         // were dropped. Casing is not part of this check — a lower-case occurrence of a
         // term listed with an initial capital is ordinary Vietnamese, not an error.
-        if (carriesDiacritics(entry.target) && !caseFolded(trimmed).includes(caseFolded(entry.target).trim())) {
+        if (carriesDiacritics(term.target) && !caseFolded(trimmed).includes(caseFolded(term.target).trim())) {
           if (matchesWholeWord(normText, normTarget)) {
             pushIssue({
               type: "glossary_violation",
@@ -235,15 +293,15 @@ export function lintChapter(
               pageName: page.name,
               boxId: box.id,
               snippet: clipText(trimmed),
-              message: `Thuật ngữ "${entry.target}" bị mất dấu trong "${clipText(trimmed)}".`,
-              suggestion: entry.target,
+              message: `Thuật ngữ "${term.target}" bị mất dấu trong "${clipText(trimmed)}".`,
+              suggestion: term.target,
             })
             break
           }
         }
         // Casing drift stays meaningful only for an explicit proper noun or term, where a
         // capital is part of the spelling rather than a sentence position.
-        if (isTitleCaseTerm(entry.target) && !trimmed.normalize("NFC").includes(entry.target.normalize("NFC"))) {
+        if (casingIsMeaningful(term) && !trimmed.normalize("NFC").includes(term.target.normalize("NFC"))) {
           if (matchesWholeWord(normText, normTarget)) {
             pushIssue({
               type: "glossary_violation",
@@ -252,8 +310,8 @@ export function lintChapter(
               pageName: page.name,
               boxId: box.id,
               snippet: clipText(trimmed),
-              message: `Tên/thuật ngữ lệch chuẩn chữ hoa hoặc dấu so với "${entry.target}".`,
-              suggestion: entry.target,
+              message: `Tên/thuật ngữ lệch chuẩn chữ hoa hoặc dấu so với "${term.target}".`,
+              suggestion: term.target,
             })
             break
           }
