@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import JSZip from "jszip"
+import { DOMParser as XmlDOMParser } from "@xmldom/xmldom"
 import {
   extractParagraphText,
   extractSpreadsheetText,
@@ -9,8 +10,6 @@ import {
   isImageFile,
   readDialogueFile,
 } from "../src/io.js"
-
-const { DOMParser: XmlDOMParser } = await import("@xmldom/xmldom").catch(() => ({}))
 
 const el = (localName, children = [], textContent = "") => ({ localName, childNodes: children, textContent })
 
@@ -63,8 +62,13 @@ const xlsxFile = async (sheetXml, sharedStringsXml) => {
   return new File([buffer], "thoai.xlsx")
 }
 
-test("readDialogueFile imports XLSX whose header row omits an interior cell", { skip: !XmlDOMParser && "@xmldom/xmldom is not installed" }, async () => {
+test("readDialogueFile imports XLSX whose header row omits an interior cell", async (t) => {
+  const original = globalThis.DOMParser
   globalThis.DOMParser = XmlDOMParser
+  t.after(() => {
+    if (original === undefined) delete globalThis.DOMParser
+    else globalThis.DOMParser = original
+  })
   const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
 <row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>
@@ -80,8 +84,13 @@ test("readDialogueFile imports XLSX whose header row omits an interior cell", { 
   assert.equal(text, "Trang 1\nXin chào\nTạm biệt\nTrang 2\nHẹn gặp")
 })
 
-test("readDialogueFile falls back to plain rows for headerless sparse XLSX", { skip: !XmlDOMParser && "@xmldom/xmldom is not installed" }, async () => {
+test("readDialogueFile falls back to plain rows for headerless sparse XLSX", async (t) => {
+  const original = globalThis.DOMParser
   globalThis.DOMParser = XmlDOMParser
+  t.after(() => {
+    if (original === undefined) delete globalThis.DOMParser
+    else globalThis.DOMParser = original
+  })
   const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
 <row r="1"><c r="A1" t="inlineStr"><is><t>Một</t></is></c><c r="C1" t="inlineStr"><is><t>ba</t></is></c></row>
