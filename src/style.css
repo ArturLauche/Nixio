@@ -1087,6 +1087,8 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .notif-item.is-read { opacity: .78; }
 .notif-item.notif-warning { border-left-color: var(--warn); }
 .notif-item.notif-error { border-left-color: var(--danger); }
+.notif-item.notif-warning .notif-item-icon { background: var(--warn-bg); color: var(--warn); }
+.notif-item.notif-error .notif-item-icon { background: var(--danger-bg); color: var(--danger); }
 .notif-item-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
 .notif-item-icon, .toast-icon {
   width: 18px; height: 18px; border-radius: 4px; display: inline-grid; place-items: center;
