@@ -118,8 +118,10 @@ export function setupProjects({
             name + projectExtension,
             state.projectId,
           ))
-        )
+        ) {
+          status("Đã hủy lưu dự án.", true)
           return false
+        }
         status("Đã lưu dự án vào máy.")
         diskRevision = snapshotRevision
         lastSaveReminderRev = snapshotRevision
@@ -272,7 +274,7 @@ export function setupProjects({
   }
 
   async function openNativeProject(mode) {
-    if (projectBusy()) return
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
     state.openingProject = true
     renderPages()
     let file
@@ -310,8 +312,14 @@ export function setupProjects({
   }
 
   async function showLibrary() {
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
     try {
       const projects = await desktop.projectList()
+      const busy = projectBusy()
+      const busyReason = "Đang có tác vụ chạy; hãy chờ hoàn tất trước khi mở hoặc khôi phục."
+      const busyNote = byId("project-library-busy")
+      busyNote.textContent = busy ? busyReason : ""
+      busyNote.hidden = !busy
       const destination = byId("recent-projects")
       destination.replaceChildren()
       for (const project of projects) {
@@ -323,6 +331,8 @@ export function setupProjects({
           const open = document.createElement("button")
           open.className = "button"
           open.textContent = "Mở tệp đã lưu"
+          open.disabled = busy
+          if (busy) open.title = busyReason
           open.onclick = () => {
             byId("project-library").close()
             openNativeProject({ projectId: project.id })
@@ -332,6 +342,8 @@ export function setupProjects({
         for (const snapshot of project.snapshots) {
           const restore = document.createElement("button")
           restore.className = "button"
+          restore.disabled = busy
+          if (busy) restore.title = busyReason
           restore.textContent =
             "Khôi phục " + new Date(snapshot.updatedAt).toLocaleString("vi-VN")
           restore.onclick = () => {
@@ -346,7 +358,10 @@ export function setupProjects({
         destination.append(section)
       }
       const legacy = await desktop.projectStatus()
-      byId("legacy-recovery").hidden = !legacy.recovery
+      const legacyButton = byId("legacy-recovery")
+      legacyButton.hidden = !legacy.recovery
+      legacyButton.disabled = busy
+      legacyButton.title = busy ? busyReason : ""
       byId("project-library-empty").hidden =
         Boolean(projects.length) || legacy.recovery
       byId("project-library").showModal()

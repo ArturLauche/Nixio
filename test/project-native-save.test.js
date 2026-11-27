@@ -109,6 +109,59 @@ test("a manual native save keeps the session durable so closing needs no prompt"
   assert.equal(harness.calls.commits.filter((mode) => mode === "project").length, 1)
 })
 
+test("cancelling the native save dialog reports that nothing was saved", async () => {
+  const api = await boot()
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  harness.flags.nativeFails = true
+
+  harness.byId("save-project").onclick()
+  await waitFor(() => harness.lastStatus()?.text === "Đã hủy lưu dự án.")
+  assert.equal(harness.lastStatus().isError, true)
+  assert.equal(harness.calls.commits.includes("project"), false)
+})
+
+test("the recent projects dialog explains busy tasks and refuses to open", async () => {
+  const api = await boot()
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  harness.flags.busy = true
+
+  harness.byId("recent-projects-button").onclick()
+  await harness.drive(() => harness.pending() === 0)
+  assert.equal(harness.lastStatus().text, "Hãy chờ tác vụ hiện tại hoàn tất.")
+  assert.equal(harness.lastStatus().isError, true)
+
+  harness.flags.busy = false
+  harness.statuses.length = 0
+  harness.desktop.projectList = async () => {
+    harness.flags.busy = true
+    return [
+      {
+        id: "p1",
+        title: "Dự án A",
+        path: "/tmp/a.json",
+        snapshots: [{ id: "s1", updatedAt: 0 }],
+      },
+    ]
+  }
+  harness.byId("recent-projects-button").onclick()
+  await harness.drive(() => harness.pending() === 0)
+
+  const section = harness.byId("recent-projects").children[0]
+  const open = section.children.find((child) => child.textContent === "Mở tệp đã lưu")
+  const restore = section.children.find((child) => child.textContent.startsWith("Khôi phục"))
+  assert.equal(open.disabled, true)
+  assert.equal(restore.disabled, true)
+  assert.match(open.title, /tác vụ/)
+  assert.equal(harness.byId("project-library-busy").hidden, false)
+  assert.match(harness.byId("project-library-busy").textContent, /tác vụ/)
+
+  harness.statuses.length = 0
+  open.click()
+  assert.equal(harness.lastStatus().text, "Hãy chờ tác vụ hiện tại hoàn tất.")
+})
+
 test("a manual native save leaves another tab's browser recovery record intact", async () => {
   const otherTab = await import("../src/web-storage.js?tab=native-other")
   const api = await boot()
