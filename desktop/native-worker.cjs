@@ -5,6 +5,7 @@ const { TextureWorker } = require("./worker.cjs")
 
 const maximumData = 512 * 1024 * 1024
 const maximumMetadata = 4 * 1024 * 1024
+const frameMagic = Buffer.from("KTR1", "ascii")
 
 class NativeWorker extends TextureWorker {
   constructor(executable, { isolated = false } = {}) {
@@ -92,7 +93,8 @@ class NativeWorker extends TextureWorker {
       if (pending.offset < 12) return
       const metadataLength = pending.header.readUInt32LE(4)
       const size = pending.header.readUInt32LE(8)
-      if (pending.header.toString("ascii", 0, 4) !== "KTR1" ||
+      // Byte-for-byte: an "ascii" comparison would mask the high bit and accept 0xCB as "K".
+      if (!pending.header.subarray(0, 4).equals(frameMagic) ||
           metadataLength < 2 || metadataLength > maximumMetadata || size > maximumData) {
         return this.stop(new Error("Invalid native response frame."))
       }
