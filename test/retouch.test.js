@@ -8,9 +8,10 @@ test("validateRetouchStroke validates paint and clone strokes and rejects malfor
     { mode: "paint", size: .05, color: "#12ab34", points: [{ x: .1, y: .2 }] },
   )
   assert.deepEqual(
-    validateRetouchStroke({ mode: "clone", size: .08, offsetX: -.1, offsetY: .2, opacity: .6, points: [{ x: .5, y: .5 }] }),
-    { mode: "clone", size: .08, offsetX: -.1, offsetY: .2, opacity: .6, points: [{ x: .5, y: .5 }] },
+    validateRetouchStroke({ mode: "clone", size: .08, offsetX: -.1, offsetY: .2, opacity: .6, seamless: true, points: [{ x: .5, y: .5 }] }),
+    { mode: "clone", size: .08, offsetX: -.1, offsetY: .2, seamless: true, opacity: .6, points: [{ x: .5, y: .5 }] },
   )
+  assert.equal(validateRetouchStroke({ mode: "clone", size: .08, offsetX: 0, offsetY: 0, seamless: "yes", points: [{ x: .5, y: .5 }] }), null)
   assert.equal(validateRetouchStroke({ mode: "paint", size: .05, color: "red", points: [{ x: .1, y: .2 }] }), null)
   assert.equal(validateRetouchStroke({ mode: "clone", size: .05, offsetX: 2, offsetY: 0, points: [{ x: .1, y: .2 }] }), null)
   assert.equal(validateRetouchStroke({ mode: "paint", size: .05, color: "#ffffff", points: [] }), null)

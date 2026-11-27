@@ -142,8 +142,45 @@ export function cleanRawPixels(rgba, width, height, { strength = 0.7, denoise = 
   return { data: out, blackPoint: low, whitePoint: high, grayscale: isMostlyGrayscale }
 }
 
+let webWorker = null
+let workerSeq = 0
+const workerPending = new Map()
+
+function runCleanRawInWebWorker(rgba, width, height, options) {
+  if (typeof Worker === "undefined") return Promise.resolve(null)
+  return new Promise((resolve) => {
+    try {
+      if (!webWorker) {
+        webWorker = new Worker(new URL("./image-worker.js", import.meta.url), { type: "module" })
+        webWorker.addEventListener("message", (event) => {
+          const { id, ok, data, meta } = event.data ?? {}
+          const cb = workerPending.get(id)
+          if (!cb) return
+          workerPending.delete(id)
+          cb(ok && data ? { data: new Uint8ClampedArray(data), ...meta } : null)
+        })
+        webWorker.addEventListener("error", () => {
+          for (const cb of workerPending.values()) cb(null)
+          workerPending.clear()
+          webWorker?.terminate()
+          webWorker = null
+        })
+      }
+      const id = ++workerSeq
+      const copy = new Uint8ClampedArray(rgba)
+      workerPending.set(id, resolve)
+      webWorker.postMessage(
+        { id, operation: "clean_raw", width, height, options, rgba: copy.buffer },
+        [copy.buffer],
+      )
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
 /**
- * Clean a page's raw image using the C# native worker when available, else JS fallback.
+ * Clean a page's raw image using the C# native worker when available, else JS Web Worker / sync fallback.
  * Returns a new PNG File ready to replace `page.file` (fully Undoable via checkpoint()).
  */
 export async function cleanRawPageImage(page, { strength = 0.7, denoise = true, sharpen = true } = {}) {
@@ -174,6 +211,15 @@ export async function cleanRawPageImage(page, { strength = 0.7, denoise = true, 
       }
     } catch {
       // Fall back to JS implementation if native worker is unavailable.
+    }
+  }
+
+  if (!cleanedRgba) {
+    const workerRes = await runCleanRawInWebWorker(imageData.data, width, height, { strength, denoise, sharpen })
+    if (workerRes?.data?.length === imageData.data.length) {
+      cleanedRgba = workerRes.data
+      meta = workerRes
+      engine = "js-worker"
     }
   }
 

@@ -312,6 +312,7 @@ function syncToolControls() {
   const hasRetouch = Boolean(page?.retouchStrokes?.length)
   byId("paint-color-field").hidden = tool !== "paint"
   byId("paint-opacity-field").hidden = !["paint", "clone", "inpaint", "retouch-erase"].includes(tool)
+  if (byId("clone-seamless-field")) byId("clone-seamless-field").hidden = tool !== "clone"
   byId("clean-raw").disabled = projectBusy() || !page
   const cleanAllBtn = byId("clean-raw-all")
   if (cleanAllBtn) {
