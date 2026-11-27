@@ -10,6 +10,7 @@ import {
   termSummary,
 } from "./terminology-graph.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
+import { createToolRegistry } from "./tool-registry.js"
 import { translationSignature } from "./translation.js"
 import {
   EXTERNAL_WEB_CONTENT_NOTICE,
@@ -131,6 +132,9 @@ export function createAgentTools({
   autoFitBoxFn = defaultAutoFitBox,
   textOverflowsFn = defaultTextOverflows,
   capturePageImageFn = defaultCapturePageImage,
+  // Extra descriptors (a project catalogue, a future desktop-bridged tool) join the built-in ones
+  // before registration, so they are validated and dispatched on the same terms.
+  extraTools = [],
 }) {
   let currentTodos = []
   let currentPlan = null
@@ -138,6 +142,7 @@ export function createAgentTools({
     {
       name: "web_search",
       category: "web",
+      sandbox: { network: true },
       isConcurrencySafe: true,
       timeoutMs: 18000,
       description:
@@ -195,6 +200,7 @@ export function createAgentTools({
     {
       name: "fetch_url",
       category: "web",
+      sandbox: { network: true },
       isConcurrencySafe: true,
       timeoutMs: 18000,
       description:
@@ -260,6 +266,7 @@ export function createAgentTools({
     {
       name: "list_boxes",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 8000,
       description: "Liệt kê tất cả khung thoại trên trang hiện tại (hoặc trang chỉ định theo số thứ tự 1-based), kèm cờ tràn khung (overflow).",
@@ -332,6 +339,7 @@ export function createAgentTools({
     {
       name: "update_box",
       category: "write",
+      sandbox: { dom: true },
       description: "Cập nhật nội dung hoặc kiểu chữ của một khung thoại cụ thể theo boxId (tự động tạo mốc Hoàn tác).",
       parameters: {
         type: "object",
@@ -407,6 +415,7 @@ export function createAgentTools({
     {
       name: "create_box",
       category: "write",
+      sandbox: { dom: true },
       description: "Tạo một khung thoại mới trên trang hiện tại (tọa độ chuẩn hóa 0..1).",
       parameters: {
         type: "object",
@@ -450,6 +459,7 @@ export function createAgentTools({
     {
       name: "delete_box",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: () => true,
       description: "Xóa một khung thoại theo boxId.",
       parameters: {
@@ -478,6 +488,7 @@ export function createAgentTools({
     {
       name: "replace_chapter_text",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: () => true,
       description: "Tìm và thay thế hàng loạt lời thoại trên toàn chương (ví dụ sửa tên nhân vật hoặc cách xưng hô).",
       parameters: {
@@ -569,6 +580,7 @@ export function createAgentTools({
     {
       name: "update_glossary",
       category: "write",
+      sandbox: { dom: true },
       description:
         "Thêm hoặc cập nhật thuật ngữ / tên nhân vật trong Bảng thuật ngữ của dự án. Mỗi mục là dòng 'nguồn = dịch', có thể kèm chỉ thị thuộc đồ thị: @alias, @variant, @pos, @keep, @prefer, @forbid, @broader, @narrower, @related, @conflict.",
       parameters: {
@@ -612,6 +624,7 @@ export function createAgentTools({
     {
       name: "autofit_page",
       category: "write",
+      sandbox: { dom: true },
       description: "Tự động chọn cỡ chữ lớn nhất không bị tràn khung cho tất cả các khung trên trang hiện tại (hoặc pageIndex).",
       parameters: {
         type: "object",
@@ -720,6 +733,7 @@ export function createAgentTools({
     {
       name: "check_export_preflight",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 10000,
       description:
@@ -836,6 +850,7 @@ export function createAgentTools({
     {
       name: "inspect_page_image",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 12000,
       description:
@@ -876,6 +891,7 @@ export function createAgentTools({
     {
       name: "navigate_page",
       category: "read",
+      sandbox: { dom: true },
       timeoutMs: 5000,
       description: "Chuyển trình biên tập sang trang chỉ định (1-based) để người dùng theo dõi trực tiếp.",
       parameters: {
@@ -904,6 +920,7 @@ export function createAgentTools({
     {
       name: "align_boxes",
       category: "write",
+      sandbox: { dom: true },
       description: "Căn thẳng hàng từ 2 khung thoại trở lên theo mép hoặc trục giữa.",
       parameters: {
         type: "object",
@@ -938,6 +955,7 @@ export function createAgentTools({
     {
       name: "distribute_boxes",
       category: "write",
+      sandbox: { dom: true },
       description: "Chia đều khoảng cách ngang hoặc dọc cho từ 3 khung thoại trở lên.",
       parameters: {
         type: "object",
@@ -968,6 +986,7 @@ export function createAgentTools({
     {
       name: "apply_style_preset",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: (args) => args?.scope === "chapter",
       description: "Áp dụng một Mẫu dàn chữ (Style Preset) đã lưu trong dự án lên khung, cả trang hoặc cả chương.",
       parameters: {
@@ -1018,6 +1037,7 @@ export function createAgentTools({
     {
       name: "ask_user",
       category: "interaction",
+      sandbox: { host: ["askUser"] },
       timeoutMs: 0,
       description:
         "Đặt một câu hỏi trắc nghiệm ngắn cho người dùng ngay trong khung chat khi cần xác nhận cách dịch tên riêng, xưng hô hoặc phương án biên tập trước khi tiếp tục.",
@@ -1077,15 +1097,12 @@ export function createAgentTools({
     },
   ]
 
-  const byName = new Map(catalog.map((tool) => [tool.name, tool]))
-
-  function isEnabled(tool, { allowEdits = true, allowWebSearch = true, planMode = false } = {}) {
-    if (tool.category === "web" && !allowWebSearch) return false
-    if (tool.category === "write" && (!allowEdits || planMode)) return false
-    if (tool.category === "plan" && !planMode) return false
-    if (tool.category === "interaction" && !onAskUser) return false
-    return true
-  }
+  // The catalog above is the whole of what this module knows about a tool; permissions, timeouts and
+  // dispatch belong to the registry, which validates every entry as it is registered.
+  const registry = createToolRegistry(
+    [...catalog, ...(Array.isArray(extraTools) ? extraTools : [])],
+    { host: { askUser: Boolean(onAskUser) } },
+  )
 
   function getRuntimeSnapshot() {
     const settings = readTranslationSettings?.() ?? {}
@@ -1122,25 +1139,28 @@ export function createAgentTools({
 
   return {
     definitions(flags = {}) {
-      return catalog
-        .filter((tool) => isEnabled(tool, flags))
-        .map(({ name, description, parameters }) => ({ name, description, parameters }))
+      return registry.definitions(flags)
+    },
+    names() {
+      return registry.names()
     },
     isConcurrencySafe(name) {
-      return byName.get(name)?.isConcurrencySafe === true
+      return registry.isConcurrencySafe(name)
     },
     categoryOf(name) {
-      return byName.get(name)?.category ?? "read"
+      return registry.categoryOf(name)
     },
     timeoutMs(name) {
-      const val = byName.get(name)?.timeoutMs
-      return val !== undefined ? val : 12000
+      return registry.timeoutMs(name)
     },
     requiresApproval(name, args) {
-      return byName.get(name)?.requiresApproval?.(args) === true
+      return registry.requiresApproval(name, args)
+    },
+    sandboxOf(name) {
+      return registry.sandboxOf(name)
     },
     needsApproval(name, args, { confirmBulkEdits = false, forceWriteApproval = false } = {}) {
-      const tool = byName.get(name)
+      const tool = registry.get(name)
       if (!tool) return false
       // Once the model has read untrusted web content in this turn, every mutation needs a
       // human decision (prompt-injection containment), not just the bulk/destructive ones.
@@ -1163,17 +1183,10 @@ export function createAgentTools({
       currentPlan = null
     },
     async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal } = {}) {
-      const tool = byName.get(name)
+      const flags = { allowEdits, allowWebSearch, planMode }
+      const tool = registry.get(name)
       if (!tool) return { ok: false, error: `Công cụ không tồn tại: ${name}` }
-      if (!isEnabled(tool, { allowEdits, allowWebSearch, planMode })) {
-        return {
-          ok: false,
-          category: tool.category,
-          error: planMode && tool.category === "write"
-            ? `Công cụ "${name}" đang bị khóa trong Chế độ Kế hoạch (Plan Mode). Hãy dùng submit_plan trước.`
-            : `Công cụ "${name}" đang bị tắt bởi thiết lập quyền của người dùng.`,
-        }
-      }
+      if (!registry.isAvailable(tool, flags)) return registry.denial(tool, flags)
       const approvalRequired = (forceWriteApproval && tool.category === "write")
         || Boolean(confirmBulkEdits && tool.requiresApproval?.(args) === true)
       if (approvalRequired) {
@@ -1196,12 +1209,7 @@ export function createAgentTools({
           }
         }
       }
-      try {
-        const result = await tool.run(args ?? {}, { signal })
-        return { ok: true, category: tool.category, ...result }
-      } catch (error) {
-        return { ok: false, category: tool.category, error: error?.message || String(error) }
-      }
+      return registry.dispatch(name, args, { flags, signal })
     },
   }
 }
