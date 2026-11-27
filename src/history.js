@@ -16,6 +16,9 @@ export function copyEditor(editor) {
 // supplies real labels; this fallback covers the checkpoints that do not name themselves yet.
 export const DEFAULT_ACTION_LABEL = "Chỉnh sửa"
 
+// Jump target for the newest boundary: the state after every recorded action.
+export const HISTORY_HEAD = "head"
+
 function actionLabel(token) {
   return token?.label ? `"${token.label}"` : "thao tác này"
 }
@@ -55,7 +58,7 @@ function fold(text) {
 // Moving an action between the stacks rewrites that boundary, which is why the id, label, kind,
 // timestamp and group travel with the entry while the snapshot is recomputed. A label therefore
 // names the action, and the timeline position it addresses is the state just before that action
-// runs.
+// runs: jump() restores "everything up to, but not including, the named action".
 let historyInstances = 0
 
 export class EditHistory {
@@ -125,6 +128,40 @@ export class EditHistory {
     return entry.snapshot
   }
 
+  // Moves the playhead to the boundary just before `id`, or to HISTORY_HEAD for the newest state.
+  // Unknown, cleared and evicted ids leave the timeline untouched, and the jump itself is atomic:
+  // the live state is copied before either stack moves, so a failed clone changes nothing.
+  jump(id, editor) {
+    const target = id === HISTORY_HEAD ? this.size : this.indexOf(id)
+    if (target < 0) return { ok: false, reason: "unknown", entry: null, snapshot: null }
+    if (target === this.past.length) {
+      return { ok: false, reason: "current", entry: this.descriptor(target), snapshot: null }
+    }
+    const live = copyEditor(editor)
+    if (target < this.past.length) {
+      const moving = this.past.slice(target)
+      const restored = moving[0].snapshot
+      const rebuilt = moving.map((entry, offset) => ({
+        ...entry,
+        snapshot: offset + 1 < moving.length ? moving[offset + 1].snapshot : live,
+      }))
+      this.past = this.past.slice(0, target)
+      this.future = [...this.future, ...rebuilt.reverse()]
+      this.openGroup = ""
+      this.revision++
+      return { ok: true, reason: "", entry: this.descriptor(target), snapshot: restored }
+    }
+    const moving = this.future.splice(this.future.length - (target - this.past.length)).reverse()
+    const restored = moving.at(-1).snapshot
+    this.past = [
+      ...this.past,
+      ...moving.map((entry, offset) => ({ ...entry, snapshot: offset ? moving[offset - 1].snapshot : live })),
+    ]
+    this.openGroup = ""
+    this.revision++
+    return { ok: true, reason: "", entry: this.descriptor(target), snapshot: restored }
+  }
+
   clear() {
     this.past = []
     this.future = []
@@ -152,6 +189,14 @@ export class EditHistory {
     if (!Number.isInteger(index) || index < 0) return null
     if (index < this.past.length) return this.past[index]
     return this.future[this.future.length - 1 - (index - this.past.length)] ?? null
+  }
+
+  indexOf(id) {
+    if (typeof id !== "string" || !id) return -1
+    for (let index = 0; index < this.size; index++) {
+      if (this.action(index)?.id === id) return index
+    }
+    return -1
   }
 
   // Lightweight row for the timeline panel: no snapshot, so listing cannot keep assets alive.
