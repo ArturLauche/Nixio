@@ -246,3 +246,128 @@ test("runAgentTurn integrates LLM retry, RepeatToolGuard reminder injection, and
   assert.equal(summarized.llmSummarized, true)
   assert.ok(summarized.history[0].text.includes(SUMMARY_OPEN_TAG))
 })
+
+test("Harness v3: SSE streaming (OpenAI & Gemini), real usage contextBudget, and turn box diffs", async (t) => {
+  const { captureBoxSnapshot, computeBoxDiffs, computeContextBudget } = await import("../src/agent-context.js")
+
+  // 1. Context budget thresholds & estimation
+  const okBudget = computeContextBudget({ promptTokens: 12000, provider: "gemini", model: "auto" })
+  assert.equal(okBudget.level, "ok")
+  assert.equal(okBudget.estimated, false)
+  const warnBudget = computeContextBudget({ promptTokens: 90000, provider: "gemini", model: "auto" })
+  assert.equal(warnBudget.level, "warn")
+  const highBudget = computeContextBudget({ promptTokens: 30000, provider: "openai", model: "my-local-7b" })
+  assert.equal(highBudget.level, "high")
+  assert.equal(highBudget.limitTokens, 32768)
+
+  // 2. Box diff tracking
+  const pages = [
+    { id: "p1", name: "01.png", boxes: [{ id: "b1", text: "Cũ", size: 24, font: "Arial", color: "#000000" }, { id: "b2", text: "Xóa đi", size: 24, font: "Arial", color: "#000000" }] },
+  ]
+  const before = captureBoxSnapshot(pages)
+  pages[0].boxes[0].text = "Mới"
+  pages[0].boxes.splice(1, 1)
+  pages[0].boxes.push({ id: "b3", text: "Thêm mới", size: 28, font: "Arial", color: "#000000" })
+  const diffs = computeBoxDiffs(before, pages)
+  assert.equal(diffs.total, 3)
+  assert.ok(diffs.items.some((d) => d.kind === "modified" && d.beforeText === "Cũ" && d.afterText === "Mới"))
+  assert.ok(diffs.items.some((d) => d.kind === "removed" && d.beforeText === "Xóa đi"))
+  assert.ok(diffs.items.some((d) => d.kind === "added" && d.afterText === "Thêm mới"))
+
+  // 3. OpenAI SSE streaming with reasoning_content, chunked tool_calls, and usage
+  const encoder = new TextEncoder()
+  const makeSseStream = (chunks) => new ReadableStream({
+    start(controller) {
+      for (const line of chunks) controller.enqueue(encoder.encode(line))
+      controller.close()
+    },
+  })
+
+  const originalFetch = globalThis.fetch
+  let callIndex = 0
+  globalThis.fetch = async (url) => {
+    callIndex++
+    if (callIndex === 1) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: makeSseStream([
+          'data: {"choices":[{"delta":{"reasoning_content":"Kiểm tra "}}]}\n\n',
+          'data: {"choices":[{"delta":{"reasoning_content":"khung thoại"}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_s1","function":{"name":"list_","arguments":"{"}}]}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"boxes","arguments":"}"}}]}}]}\n\n',
+          'data: {"choices":[],"usage":{"prompt_tokens":1500,"completion_tokens":40,"total_tokens":1540}}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      }
+    }
+    if (url.includes("streamGenerateContent")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: makeSseStream([
+          'data: {"candidates":[{"content":{"parts":[{"text":"Suy nghĩ Gemini","thought":true}]}}]}\n\n',
+          'data: {"candidates":[{"content":{"parts":[{"text":"Chào "}]}}]}\n\n',
+          'data: {"candidates":[{"content":{"parts":[{"text":"bạn!"}]}}],"usageMetadata":{"promptTokenCount":2400,"candidatesTokenCount":12,"totalTokenCount":2412}}\n\n',
+        ]),
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body: makeSseStream([
+        'data: {"choices":[{"delta":{"content":"Đã xem "}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"xong!"}}]}\n\n',
+        'data: {"choices":[],"usage":{"prompt_tokens":2100,"completion_tokens":20,"total_tokens":2120}}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    }
+  }
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const state = { pages: [{ id: "p1", name: "01.png", image: { naturalWidth: 800, naturalHeight: 1200 }, boxes: [], unplaced: [] }], queue: [], presets: [] }
+  const tools = createAgentTools({
+    state,
+    byId: () => ({ value: "", dispatchEvent() {} }),
+    selectedPage: () => state.pages[0],
+    selectedIndex: () => 0,
+    selectPage: () => {},
+    checkpoint: () => {},
+    render: () => {},
+    readTranslationSettings: () => ({ source: "Japanese", target: "Vietnamese", direction: "rtl" }),
+  })
+
+  const deltas = []
+  const openAiRes = await runAgentTurn({
+    userMessage: "Kiểm tra trang",
+    settings: { provider: "openai", baseUrl: "http://localhost:11434/v1", llmModel: "deepseek-r1:8b", source: "Japanese", target: "Vietnamese" },
+    tools,
+    stream: true,
+    onEvent: (e) => { if (e.type === "delta") deltas.push(e) },
+  })
+  assert.equal(openAiRes.answer, "Đã xem xong!")
+  assert.equal(openAiRes.thought, "Kiểm tra khung thoại")
+  assert.equal(openAiRes.toolTrace.length, 1)
+  assert.equal(openAiRes.toolTrace[0].name, "list_boxes")
+  assert.equal(openAiRes.usage.promptTokens, 2100)
+  assert.equal(openAiRes.contextBudget.estimated, false)
+  assert.ok(deltas.some((d) => d.thought === "Kiểm tra "))
+  assert.ok(deltas.some((d) => d.text === "Đã xem "))
+
+  // 4. Gemini SSE streaming
+  const geminiDeltas = []
+  const geminiRes = await runAgentTurn({
+    userMessage: "Xin chào",
+    settings: { provider: "gemini", key: "k", model: "gemini-3.1-flash-lite", source: "Japanese", target: "Vietnamese" },
+    tools,
+    stream: true,
+    onEvent: (e) => { if (e.type === "delta") geminiDeltas.push(e) },
+  })
+  assert.equal(geminiRes.answer, "Chào bạn!")
+  assert.equal(geminiRes.thought, "Suy nghĩ Gemini")
+  assert.equal(geminiRes.usage.promptTokens, 2400)
+  assert.ok(geminiDeltas.some((d) => d.text === "Chào "))
+})

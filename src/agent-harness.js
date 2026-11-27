@@ -5,12 +5,49 @@ import {
   buildLayeredSystemPrompt,
   buildRuntimeContextReminder,
   compactChatHistory,
+  computeContextBudget,
   pruneOldToolResults,
   retainHeadTailText,
 } from "./agent-context.js"
 import { RepeatToolGuard } from "./agent-guards.js"
 import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
 import { validateEndpointUrl } from "./openai-compat.js"
+
+export async function readSseEvents(body, onData) {
+  const reader = body.getReader()
+  const decoder = new TextDecoder("utf-8")
+  let buffer = ""
+  let dataLines = []
+  const flush = () => {
+    if (!dataLines.length) return
+    const payload = dataLines.join("\n").trim()
+    dataLines = []
+    if (payload && payload !== "[DONE]") onData(payload)
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.trim()) {
+          flush()
+          continue
+        }
+        if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart())
+        }
+      }
+    }
+    buffer += decoder.decode()
+    if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).trimStart())
+    flush()
+  } finally {
+    reader.releaseLock?.()
+  }
+}
 
 const geminiModelOptions = {
   auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
@@ -71,7 +108,7 @@ export function parseTextToolCalls(text) {
   return calls
 }
 
-async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, signal }) {
+async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, signal, stream = false, onDelta }) {
   const key = String(settings.key || "").trim()
   if (!key) throw new Error("Hãy nhập khóa API Gemini ở mục Dịch ảnh & LLM.")
   const models = geminiModelOptions[settings.model] ?? geminiModelOptions.auto
@@ -84,37 +121,77 @@ async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, sign
   for (let i = 0; i < models.length; i++) {
     const model = models[i]
     const timeoutSignal = AbortSignal.timeout(90000)
-    response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-        credentials: "omit",
-        redirect: "error",
-        signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-        body,
-      },
-    )
+    const endpoint = stream
+      ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`
+      : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      credentials: "omit",
+      redirect: "error",
+      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
+      body,
+    })
     if (response.ok) {
-      const payload = await response.json()
-      const parts = payload.candidates?.[0]?.content?.parts ?? []
+      const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
+      const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
+      const parts = []
       const textParts = []
+      const thoughtParts = []
       const toolCalls = []
-      for (const part of parts) {
-        if (part.thought) continue
-        if (typeof part.text === "string" && part.text) textParts.push(part.text)
-        if (part.functionCall?.name) {
-          toolCalls.push({
-            id: "gem_" + (toolCalls.length + 1) + "_" + Date.now(),
-            name: part.functionCall.name,
-            args: part.functionCall.args ?? {},
-          })
+      let usage = null
+
+      const ingestPayload = (payload) => {
+        const meta = payload?.usageMetadata
+        if (meta && (meta.promptTokenCount || meta.totalTokenCount)) {
+          usage = {
+            promptTokens: Number(meta.promptTokenCount || 0),
+            outputTokens: Number(meta.candidatesTokenCount || 0),
+            totalTokens: Number(meta.totalTokenCount || 0),
+          }
+        }
+        const chunkParts = payload?.candidates?.[0]?.content?.parts ?? []
+        for (const part of chunkParts) {
+          parts.push(part)
+          if (part.thought) {
+            if (typeof part.text === "string" && part.text) {
+              thoughtParts.push(part.text)
+              onDelta?.({ text: "", thought: part.text })
+            }
+            continue
+          }
+          if (typeof part.text === "string" && part.text) {
+            textParts.push(part.text)
+            onDelta?.({ text: part.text, thought: "" })
+          }
+          if (part.functionCall?.name) {
+            toolCalls.push({
+              id: "gem_" + (toolCalls.length + 1) + "_" + Date.now(),
+              name: part.functionCall.name,
+              args: part.functionCall.args ?? {},
+            })
+          }
         }
       }
+
+      if (isSse) {
+        await readSseEvents(response.body, (raw) => {
+          try {
+            ingestPayload(JSON.parse(raw))
+          } catch {
+            // Ignore partial or non-JSON SSE keepalive frames.
+          }
+        })
+      } else {
+        ingestPayload(await response.json())
+      }
+
       return {
         rawModelContent: { role: "model", parts },
-        text: textParts.join("\n").trim(),
+        text: textParts.join(isSse ? "" : "\n").trim(),
+        thought: thoughtParts.join("").trim(),
         toolCalls,
+        usage,
       }
     }
     const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && i + 1 < models.length
@@ -126,7 +203,7 @@ async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, sign
   throw err
 }
 
-async function callOpenAiStep({ settings, messages, toolDefs, signal }) {
+async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = false, onDelta }) {
   const endpoint = validateEndpointUrl(settings.baseUrl) + "/chat/completions"
   const model = String(settings.llmModel || "").trim()
   if (!model) throw new Error("Hãy nhập tên Model LLM ở mục Dịch ảnh & LLM.")
@@ -137,6 +214,7 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal }) {
     model,
     temperature: 0.3,
     messages,
+    ...(stream && { stream: true, stream_options: { include_usage: true } }),
     ...(toolDefs.length && {
       tools: toolDefs.map((def) => ({
         type: "function",
@@ -161,11 +239,87 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal }) {
     err.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
     throw err
   }
+
+  const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
+  const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
+
+  if (isSse) {
+    let rawText = ""
+    let rawReasoning = ""
+    let usage = null
+    const toolMap = new Map()
+    await readSseEvents(response.body, (raw) => {
+      let chunk
+      try {
+        chunk = JSON.parse(raw)
+      } catch {
+        return
+      }
+      if (chunk?.usage && (chunk.usage.prompt_tokens || chunk.usage.total_tokens)) {
+        usage = {
+          promptTokens: Number(chunk.usage.prompt_tokens || 0),
+          outputTokens: Number(chunk.usage.completion_tokens || 0),
+          totalTokens: Number(chunk.usage.total_tokens || 0),
+        }
+      }
+      const delta = chunk?.choices?.[0]?.delta
+      if (!delta) return
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        rawReasoning += delta.reasoning_content
+        onDelta?.({ text: "", thought: delta.reasoning_content })
+      }
+      if (typeof delta.content === "string" && delta.content) {
+        rawText += delta.content
+        onDelta?.({ text: delta.content, thought: "" })
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const item of delta.tool_calls) {
+          const idx = Number.isInteger(item.index) ? item.index : toolMap.size
+          const prev = toolMap.get(idx) ?? { id: "", name: "", argumentsText: "" }
+          if (item.id) prev.id = item.id
+          if (item.function?.name) prev.name += item.function.name
+          if (typeof item.function?.arguments === "string") prev.argumentsText += item.function.arguments
+          toolMap.set(idx, prev)
+        }
+      }
+    })
+    let toolCalls = [...toolMap.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, item], index) => {
+        let args = {}
+        try {
+          args = JSON.parse(item.argumentsText || "{}")
+        } catch {
+          args = {}
+        }
+        return { id: item.id || "call_" + (index + 1), name: item.name, args }
+      })
+      .filter((tc) => tc.name)
+    if (!toolCalls.length && rawText.includes("<tool_call>")) {
+      toolCalls = parseTextToolCalls(rawText)
+    }
+    return {
+      rawMessage: { role: "assistant", content: rawText },
+      text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
+      thought: rawReasoning.trim(),
+      toolCalls,
+      usage,
+    }
+  }
+
   const payload = await response.json()
+  const usage = payload?.usage && (payload.usage.prompt_tokens || payload.usage.total_tokens)
+    ? {
+      promptTokens: Number(payload.usage.prompt_tokens || 0),
+      outputTokens: Number(payload.usage.completion_tokens || 0),
+      totalTokens: Number(payload.usage.total_tokens || 0),
+    }
+    : null
   const message = payload.choices?.[0]?.message ?? {}
   const rawText = Array.isArray(message.content)
     ? message.content.filter((p) => p?.type === "text" && p.text).map((p) => p.text).join("\n")
     : String(message.content ?? "")
+  const rawReasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : ""
 
   let toolCalls = []
   if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
@@ -191,7 +345,9 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal }) {
   return {
     rawMessage: message,
     text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
+    thought: rawReasoning,
     toolCalls,
+    usage,
   }
 }
 
@@ -267,6 +423,7 @@ export async function runAgentTurn({
   skillPrompt = "",
   maxSteps = 10,
   maxRetries = 2,
+  stream = false,
   signal,
   onEvent = () => {},
 }) {
@@ -334,6 +491,8 @@ export async function runAgentTurn({
 
   let finalAnswer = ""
   let stepsUsed = 0
+  let latestUsage = null
+  let contextBudget = null
 
   for (let step = 1; step <= maxSteps; step++) {
     signal?.throwIfAborted()
@@ -352,10 +511,13 @@ export async function runAgentTurn({
 
     onEvent({ type: "step", step, maxSteps })
 
+    const onDelta = stream
+      ? (delta) => onEvent({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
+      : undefined
     const reply = await withLlmRetry(
       () => (isOpenAi
-        ? callOpenAiStep({ settings, messages: openAiMessages, toolDefs, signal })
-        : callGeminiStep({ settings, systemPrompt, contents: geminiContents, toolDefs, signal })),
+        ? callOpenAiStep({ settings, messages: openAiMessages, toolDefs, signal, stream, onDelta })
+        : callGeminiStep({ settings, systemPrompt, contents: geminiContents, toolDefs, signal, stream, onDelta })),
       {
         maxRetries,
         signal,
@@ -367,7 +529,18 @@ export async function runAgentTurn({
     )
 
     signal?.throwIfAborted()
+    if (reply.usage) latestUsage = reply.usage
+    const fallbackChars = systemPrompt.length + JSON.stringify(isOpenAi ? openAiMessages : geminiContents).length
+    contextBudget = computeContextBudget({
+      promptTokens: latestUsage?.promptTokens || 0,
+      fallbackChars,
+      provider: isOpenAi ? "openai" : "gemini",
+      model: isOpenAi ? settings.llmModel : settings.model,
+    })
+    onEvent({ type: "usage", usage: latestUsage, budget: contextBudget })
+
     const { thought, answer } = stripReasoning(reply.text)
+    if (reply.thought) thoughts.push(reply.thought)
     if (thought) thoughts.push(thought)
 
     if (!reply.toolCalls.length) {
@@ -474,6 +647,8 @@ export async function runAgentTurn({
     retriesUsed,
     prunedChars: totalPrunedChars,
     elapsedMs: Math.round(performance.now() - turnStart),
+    usage: latestUsage,
+    contextBudget,
     todos: tools.getTodos?.() ?? [],
     plan: tools.getPlan?.() ?? null,
   }
