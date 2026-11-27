@@ -4,6 +4,9 @@ import { prepareNativeClone, prepareNativeInpaint, samplePixelColor } from "../r
 import { resizeBox, rotateBox, snapBox } from "../tools.js"
 
 const zoomSteps = [.25, .5, .75, 1, 1.25, 1.5, 2, 3, 4]
+const MIN_ZOOM = .1
+const MAX_ZOOM = 4
+const ZOOM_FACTOR = 1.15
 
 export function setupGestures({
   state,
@@ -77,7 +80,7 @@ export function setupGestures({
   }
 
   function updateZoomDisplay() {
-    byId("zoom-level").textContent = state.zoom ? Math.round(state.zoom * 100) + "%" : (state.fit ? "Vừa trang" : "100%")
+    byId("zoom-level").textContent = Math.round((state.zoom ?? currentScale()) * 100) + "%"
   }
 
   function currentScale() {
@@ -88,32 +91,50 @@ export function setupGestures({
     return rendered > 0 ? rendered / page.image.naturalWidth : 1
   }
 
-  function setZoom(nextZoom) {
-    const page = selectedPage()
-    if (!page) return
-    state.zoom = clamp(Math.round(nextZoom * 100) / 100, .25, 4)
-    state.fit = false
-    byId("fit-page").textContent = "Kích thước gốc"
-    updateZoomDisplay()
-    renderCanvas()
+  // Steps follow the scale the page really renders at, so leaving a small Fit zooms out instead of
+  // jumping up to the first preset step.
+  function nextZoomStep(direction) {
+    const cur = currentScale()
+    const step = direction > 0
+      ? zoomSteps.find((value) => value > cur + .02)
+      : [...zoomSteps].reverse().find((value) => value < cur - .02)
+    return clamp(step ?? cur * (direction > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR), MIN_ZOOM, MAX_ZOOM)
   }
 
-  byId("zoom-in").onclick = () => {
-    const cur = currentScale()
-    const next = zoomSteps.find((step) => step > cur + .02) ?? 4
-    setZoom(next)
+  function viewportCenter() {
+    const area = viewport.getBoundingClientRect()
+    return { clientX: area.left + area.width / 2, clientY: area.top + area.height / 2 }
   }
-  byId("zoom-out").onclick = () => {
-    const cur = currentScale()
-    const next = [...zoomSteps].reverse().find((step) => step < cur - .02) ?? .25
-    setZoom(next)
+
+  // Re-scroll so the image point that sat under the anchor stays there after the stage is resized.
+  function restoreAnchor(focus, anchor) {
+    const area = pageCanvas.getBoundingClientRect()
+    if (!area.width || !area.height) return
+    viewport.scrollLeft += area.left + focus.x * area.width - anchor.clientX
+    viewport.scrollTop += area.top + focus.y * area.height - anchor.clientY
   }
+
+  function setZoom(nextZoom, anchorAt) {
+    const page = selectedPage()
+    if (!page) return
+    const next = clamp(Math.round(nextZoom * 100) / 100, MIN_ZOOM, MAX_ZOOM)
+    if (next === state.zoom) return
+    const anchor = anchorAt ?? viewportCenter()
+    const focus = point(anchor)
+    state.zoom = next
+    state.fit = false
+    byId("fit-page").textContent = "Kích thước gốc"
+    renderCanvas()
+    restoreAnchor(focus, anchor)
+  }
+
+  byId("zoom-in").onclick = () => setZoom(nextZoomStep(1))
+  byId("zoom-out").onclick = () => setZoom(nextZoomStep(-1))
   viewport.addEventListener("wheel", (event) => {
     if (!(event.ctrlKey || event.metaKey) || !selectedPage()) return
     event.preventDefault()
-    const cur = currentScale()
-    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15
-    setZoom(cur * factor)
+    const factor = event.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR
+    setZoom(currentScale() * factor, event)
   }, { passive: false })
 
   function drawInpaintPreview(stroke) {

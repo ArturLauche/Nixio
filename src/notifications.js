@@ -58,6 +58,7 @@ export class NotificationStore {
         existing.actions = cleanActions
         existing.durationMs = resolvedDuration
         existing.createdAt = Date.now()
+        existing.revision = (existing.revision ?? 0) + 1
         existing.read = false
         this.items = [existing, ...this.items.filter((i) => i.id !== existing.id)]
         if (!silentToast) {
@@ -77,6 +78,7 @@ export class NotificationStore {
       actions: cleanActions,
       durationMs: resolvedDuration,
       createdAt: Date.now(),
+      revision: 0,
       read: false,
     }
     this.items.unshift(item)
@@ -169,6 +171,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
 
   const timers = new Map()
   const paused = new Set()
+  const scheduledRevision = new Map()
 
   function clearTimer(id) {
     const handle = timers.get(id)
@@ -176,13 +179,16 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
       clearTimeout(handle)
       timers.delete(id)
     }
+    scheduledRevision.delete(id)
   }
 
   function scheduleDismiss(item) {
     clearTimer(item.id)
+    scheduledRevision.set(item.id, item.revision ?? 0)
     if (!item.durationMs || paused.has(item.id)) return
     const handle = setTimeout(() => {
       timers.delete(item.id)
+      scheduledRevision.delete(item.id)
       store.dismissToast(item.id)
     }, item.durationMs)
     timers.set(item.id, handle)
@@ -217,6 +223,10 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
     for (const id of [...timers.keys()]) {
       if (!activeIds.has(id)) clearTimer(id)
     }
+    for (const id of [...paused]) {
+      if (!activeIds.has(id)) paused.delete(id)
+    }
+    const cards = []
     toastContainer.replaceChildren(
       ...visible.map((item) => {
         const card = document.createElement("div")
@@ -264,10 +274,22 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         }
 
         card.append(icon, body, close)
-        if (!timers.has(item.id) && !paused.has(item.id)) scheduleDismiss(item)
+        cards.push(card)
         return card
       }),
     )
+    // The render replaces every card, so a toast under the pointer never sees a mouseleave. The
+    // mounted cards are the only hover truth, and a keyed update restarts its timer through the
+    // revision bump, so a reused key cannot inherit the previous lifetime.
+    visible.forEach((item, index) => {
+      if (cards[index].matches?.(":hover")) {
+        paused.add(item.id)
+        clearTimer(item.id)
+        return
+      }
+      paused.delete(item.id)
+      if (scheduledRevision.get(item.id) !== (item.revision ?? 0)) scheduleDismiss(item)
+    })
   }
 
   function renderHistory(items, unread) {
