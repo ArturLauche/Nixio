@@ -169,6 +169,7 @@ test("Gemini destination is a fixed origin with a validated model and operation"
   const started = await instance2.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
   assert.equal(started.ok, true)
   assert.equal(started.contentType, "sse")
+  assert.deepEqual(await instance2.activate("w1", started.ticket), { ok: true, active: true })
   await streaming.sink.settled()
   assert.equal(
     streaming.transport.calls[0].url,
@@ -219,11 +220,16 @@ test("the OpenAI-compatible destination is derived from the canonical credential
   assertNoSecret(result, OPENAI_KEY, "result")
   assertNoSecret(sink.events, OPENAI_KEY, "events")
 
-  // One character of endpoint difference is a different scope, and no key exists for it.
+  // One character of endpoint difference is a different scope, so the key stored for v1 is never
+  // attached to v2. The call itself still happens keyless, as any endpoint without a stored key does.
   const mismatch = await instance.execute("w1", openAiRequest({ endpoint: "https://api.example.com/v2" }))
-  assert.equal(mismatch.ok, false)
-  assert.equal(mismatch.code, PROVIDER_CODES.CREDENTIAL)
-  assert.equal(transport.calls.length, 1, "a request was sent for an endpoint with no stored key")
+  assert.equal(mismatch.ok, true)
+  assert.equal(store.reads.length, 2)
+  assert.equal(store.reads[1], credentialHandle("openai:https://api.example.com/v2"))
+  assert.notEqual(store.reads[1], openAiHandle)
+  assert.equal(transport.calls.length, 2)
+  assert.equal("Authorization" in transport.calls[1].headers, false, "a key was reused for another endpoint")
+  assertNoSecret(mismatch, OPENAI_KEY, "scope mismatch")
 })
 
 test("the renderer cannot supply a destination, a method or a header", async () => {
@@ -310,11 +316,18 @@ test("keyless local inference keeps working at the configured loopback address",
   assert.equal(loopbackAddress("api.example.com"), null)
   assert.equal(loopbackAddress("127.0.0.2"), null)
 
-  // A public endpoint with no stored key is refused instead of being called unauthenticated.
+  // Compatibility decision: an OpenAI-compatible endpoint with no stored key is still called, and the
+  // call carries no Authorization header, which is exactly what the renderer did while its key field
+  // was empty. The destination stays user-configured, HTTPS-only and pinned by this module, so the
+  // call reaches nobody but the endpoint the user named and leaks no credential. Gemini keeps its key
+  // requirement because the key is the caller identity there.
   const { instance, transport } = provider()
-  const refused = await instance.execute("w1", openAiRequest())
-  assert.equal(refused.code, PROVIDER_CODES.CREDENTIAL)
-  assert.equal(transport.calls.length, 0)
+  const keyless = await instance.execute("w1", openAiRequest())
+  assert.equal(keyless.ok, true)
+  assert.equal("Authorization" in transport.calls[0].headers, false)
+  const gemini = await instance.execute("w1", geminiRequest())
+  assert.equal(gemini.code, PROVIDER_CODES.CREDENTIAL)
+  assert.equal(transport.calls.length, 1, "a keyless Gemini request reached the network")
 })
 
 test("redirects are never followed and never retried", async () => {
@@ -416,6 +429,7 @@ test("streaming preserves SSE frames, ordering and multi-byte text", async () =>
   const started = await instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
   assert.equal(started.ok, true)
   assert.equal(typeof started.ticket, "string")
+  assert.deepEqual(await instance.activate("w1", started.ticket), { ok: true, active: true })
   assert.equal(started.contentType, "sse")
   assert.match(transport.calls[0].headers.Accept, /text\/event-stream/)
 
@@ -439,7 +453,9 @@ test("streaming preserves SSE frames, ordering and multi-byte text", async () =>
       chunks: [split.subarray(0, cut), split.subarray(cut)],
     }),
   })
-  await splitProvider.instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  const splitStarted = await splitProvider.instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  assert.equal(splitStarted.ok, true)
+  await splitProvider.instance.activate("w1", splitStarted.ticket)
   await splitProvider.sink.settled()
   assert.equal(splitProvider.sink.chunks().join(""), split.toString("utf8"))
 })
@@ -475,6 +491,7 @@ test("a reflected key is redacted, including across chunk boundaries", async () 
     openAiRequest({ payload: { model: "m", messages: [], stream: true } }),
   )
   assert.equal(started.ok, true)
+  await streaming.instance.activate("w1", started.ticket)
   const terminal = await streaming.sink.settled()
   assert.equal(terminal.type, "end")
   const joined = streaming.sink.chunks().join("")
@@ -512,6 +529,9 @@ test("cancellation only reaches the exchange its own sender opened", async () =>
   const started = await gated.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
   assert.equal(started.ok, true)
   assert.equal(gated.entries.size, 1)
+  // The acknowledgement is what lets a live exchange push frames; every cancel assertion below is
+  // about a stream the renderer is actually listening to.
+  assert.deepEqual(gated.activate("w1", started.ticket), { ok: true, active: true })
 
   // Another document cannot stop it.
   assert.deepEqual(gated.cancel("w2", started.ticket), { ok: true, cancelled: false })
@@ -625,9 +645,10 @@ test("the channel derives sender ownership from the validated frame only", async
   // Channels are distinct and namespaced, so a renderer cannot reach a credential channel by proxy.
   assert.equal(PROVIDER_CHANNELS.request, "khung-thoai:provider-request")
   assert.equal(PROVIDER_CHANNELS.stream, "khung-thoai:provider-stream")
+  assert.equal(PROVIDER_CHANNELS.activate, "khung-thoai:provider-activate")
   assert.equal(PROVIDER_CHANNELS.cancel, "khung-thoai:provider-cancel")
   assert.equal(PROVIDER_CHANNELS.event, "khung-thoai:provider-event")
-  assert.equal(new Set(Object.values(PROVIDER_CHANNELS)).size, 4)
+  assert.equal(new Set(Object.values(PROVIDER_CHANNELS)).size, 5)
 })
 
 test("headers are built in main and a keyless destination carries none", () => {
@@ -648,4 +669,221 @@ test("headers are built in main and a keyless destination carries none", () => {
   assert.equal("Authorization" in keyless, false)
   assert.equal("x-goog-api-key" in keyless, false)
   assert.match(keyless.Accept, /text\/event-stream/)
+})
+
+// A request seam that never answers headers: it only settles when its own signal aborts, which is what
+// a connection stuck before the status line looks like to main.
+function pendingHeaders() {
+  return (options) => new Promise((resolve, reject) => {
+    const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+    if (options.signal.aborted) abort()
+    else options.signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+test("an exchange is registered before its first await, so a pre-header cancel stops pending work", async () => {
+  const transport = fakeTransport()
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [geminiHandle]: GEMINI_KEY }),
+    emit: eventSink().emit,
+    // The resolver never answers: without an early registration this exchange would own nothing a
+    // cancel could reach until a header block existed.
+    lookup: () => new Promise(() => {}),
+    request: transport.request,
+  })
+  const inFlight = instance.stream("w1", geminiRequest({ operation: "streamGenerateContent", requestId: "q-dns-pending" }))
+  assert.equal(instance.entries.size, 1, "the entry did not exist before the resolver was awaited")
+  assert.equal(instance.requests.size, 1, "the request token was not registered")
+  assert.deepEqual(instance.cancel("w1", { requestId: "q-dns-pending" }), { ok: true, cancelled: true })
+  const result = await inFlight
+  assert.equal(result.ok, false)
+  assert.equal(result.code, PROVIDER_CODES.CANCELLED)
+  assert.equal(transport.calls.length, 0, "a cancelled exchange still dispatched a request")
+  assert.equal(instance.entries.size, 0)
+  assert.equal(instance.requests.size, 0)
+})
+
+test("a DNS answer that arrives after cancellation never dispatches a socket", async () => {
+  let release
+  const transport = fakeTransport()
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [openAiHandle]: OPENAI_KEY }),
+    emit: eventSink().emit,
+    lookup: () => new Promise((resolve) => { release = resolve }),
+    request: transport.request,
+  })
+  const inFlight = instance.execute("w1", openAiRequest({ requestId: "q-late-dns" }))
+  await settle()
+  assert.equal(instance.cancel("w1", { requestId: "q-late-dns" }).cancelled, true)
+  // The resolver answers only after the cancel, and the late answer is discarded rather than used.
+  release([{ address: PUBLIC_ADDRESS, family: 4 }])
+  const result = await inFlight
+  assert.equal(result.code, PROVIDER_CODES.CANCELLED)
+  await settle()
+  assert.equal(transport.calls.length, 0, "a late DNS answer turned into a dispatch after cancellation")
+})
+
+test("a request stuck before headers is cancelled through its own token", async () => {
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [geminiHandle]: GEMINI_KEY }),
+    emit: eventSink().emit,
+    lookup: publicLookup,
+    request: pendingHeaders(),
+  })
+  const inFlight = instance.stream("w1", geminiRequest({ operation: "streamGenerateContent", requestId: "q-header-wait" }))
+  await settle()
+  assert.equal(instance.entries.size, 1)
+  assert.deepEqual(instance.cancel("w1", { requestId: "q-header-wait" }), { ok: true, cancelled: true })
+  const result = await inFlight
+  assert.equal(result.ok, false)
+  assert.equal(result.code, PROVIDER_CODES.CANCELLED)
+  assert.equal(instance.entries.size, 0)
+})
+
+test("a request token is validated, and only its own sender can cancel it", async () => {
+  const { instance } = provider({ keys: { [openAiHandle]: OPENAI_KEY } })
+  for (const requestId of ["short", "has space", "x".repeat(97), 42, {}, "../evil", "line\nbreak"]) {
+    const refused = await instance.execute("w1", openAiRequest({ requestId }))
+    assert.equal(refused.ok, false, String(requestId) + " was accepted as a token")
+    assert.equal(refused.code, PROVIDER_CODES.REQUEST)
+  }
+  assert.equal(instance.entries.size, 0, "an invalid token registered an exchange")
+  assert.equal(instance.requests.size, 0)
+
+  const gated = new ProviderTransport({
+    credentials: fakeStore({ [openAiHandle]: OPENAI_KEY }),
+    emit: eventSink().emit,
+    lookup: publicLookup,
+    request: pendingHeaders(),
+  })
+  const inFlight = gated.execute("w1", openAiRequest({ requestId: "q-same-token" }))
+  await settle()
+  // The same token from another document resolves to nothing, because the table is keyed by sender.
+  assert.deepEqual(gated.cancel("w2", { requestId: "q-same-token" }), { ok: true, cancelled: false })
+  assert.deepEqual(gated.cancel("w2", "q-same-token"), { ok: true, cancelled: false })
+  assert.equal(gated.entries.size, 1)
+  assert.deepEqual(gated.cancel("w1", { requestId: "q-same-token" }), { ok: true, cancelled: true })
+  assert.equal((await inFlight).code, PROVIDER_CODES.CANCELLED)
+})
+
+test("stream frames wait for the sender's acknowledgement and then arrive in order", async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const response = Readable.from((async function* () {
+    for (const chunk of ["data: a\n\n", "data: b\n\n"]) {
+      await gate
+      yield Buffer.from(chunk)
+    }
+  })())
+  response.on("error", () => {})
+  const sink = eventSink()
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [geminiHandle]: GEMINI_KEY }),
+    emit: sink.emit,
+    lookup: publicLookup,
+    request: async () => ({ status: 200, headers: { "content-type": "text/event-stream" }, response }),
+  })
+  const started = await instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  assert.equal(started.ok, true)
+  await settle()
+  // No push may precede the acknowledgement, so the reply that carries the ticket cannot race a frame.
+  assert.deepEqual(sink.events, [])
+  // Another document cannot acknowledge, or steal, this ticket.
+  assert.deepEqual(instance.activate("w2", started.ticket), { ok: true, active: false })
+  assert.deepEqual(sink.events, [])
+  assert.deepEqual(instance.activate("w1", started.ticket), { ok: true, active: true })
+  release()
+  const terminal = await sink.settled()
+  assert.equal(terminal.type, "end")
+  assert.equal(terminal.ticket, started.ticket)
+  assert.deepEqual(sink.chunks(), ["data: a\n\n", "data: b\n\n"])
+  // A second acknowledgement is harmless and cannot replay the frames.
+  assert.deepEqual(instance.activate("w1", started.ticket), { ok: true, active: false })
+  assert.deepEqual(sink.chunks(), ["data: a\n\n", "data: b\n\n"])
+})
+
+test("a stream that ends before its acknowledgement replays every buffered frame", async () => {
+  const { instance, sink } = provider({
+    keys: { [geminiHandle]: GEMINI_KEY },
+    handler: () => ({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      chunks: ["data: a\n\n", "data: b\n\n"],
+    }),
+  })
+  const started = await instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  assert.equal(started.ok, true)
+  for (let attempt = 0; attempt < 50 && instance.entries.size > 0; attempt++) await settle()
+  assert.equal(instance.entries.size, 0)
+  assert.deepEqual(sink.events, [], "a completed stream pushed a frame before its acknowledgement")
+  assert.deepEqual(instance.activate("w1", started.ticket), { ok: true, active: false, finished: true })
+  assert.deepEqual(sink.chunks(), ["data: a\n\n", "data: b\n\n"])
+  assert.equal(sink.events.at(-1).type, "end")
+  assert.equal(sink.events.at(-1).ticket, started.ticket)
+})
+
+test("an unacknowledged stream is bounded and ends with a limit error", async () => {
+  const sink = eventSink()
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [geminiHandle]: GEMINI_KEY }),
+    emit: sink.emit,
+    lookup: publicLookup,
+    request: fakeTransport(() => ({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      chunks: Array.from({ length: 40 }, (_, index) => "data: " + index + "\n\n"),
+    })).request,
+    earlyFrames: 4,
+  })
+  const started = await instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  assert.equal(started.ok, true)
+  for (let attempt = 0; attempt < 50 && instance.entries.size > 0; attempt++) await settle()
+  assert.equal(instance.entries.size, 0, "the unacknowledged exchange was never closed")
+  assert.deepEqual(sink.events, [], "an unacknowledged stream pushed a frame")
+  // The one terminal frame is still available to a renderer that acknowledges late.
+  assert.deepEqual(instance.activate("w1", started.ticket), { ok: true, active: false, finished: true })
+  const terminal = await sink.settled()
+  assert.equal(terminal.type, "error")
+  assert.equal(terminal.code, PROVIDER_CODES.LIMIT)
+})
+
+test("an exchange that never answers is ended by its own lifetime", async () => {
+  const instance = new ProviderTransport({
+    credentials: fakeStore({ [geminiHandle]: GEMINI_KEY }),
+    emit: eventSink().emit,
+    lookup: () => new Promise(() => {}),
+    request: fakeTransport().request,
+    lifetimeMs: 20,
+    streamLifetimeMs: 20,
+  })
+  const buffered = await instance.execute("w1", openAiRequest())
+  assert.equal(buffered.code, PROVIDER_CODES.TIMEOUT)
+  const streamed = await instance.stream("w1", geminiRequest({ operation: "streamGenerateContent" }))
+  assert.equal(streamed.code, PROVIDER_CODES.TIMEOUT)
+  assert.equal(instance.entries.size, 0)
+})
+
+test("redaction is literal: an encoded reflection is a disclosed limitation", async () => {
+  const encoded = Buffer.from(OPENAI_KEY, "utf8").toString("base64")
+  const { instance } = provider({
+    keys: { [openAiHandle]: OPENAI_KEY },
+    handler: () => ({
+      status: 200,
+      headers: { "content-type": "application/json", "x-echo": OPENAI_KEY },
+      chunks: [JSON.stringify({ encoded, literal: OPENAI_KEY })],
+    }),
+  })
+  const result = await instance.execute("w1", openAiRequest())
+  assert.equal(result.ok, true)
+  // The literal secret is removed wherever it appears.
+  assert.equal(result.body.includes(OPENAI_KEY), false)
+  assert.equal(result.body.includes("[redacted]"), true)
+  // An arbitrary encoding is not recognizable by a literal scan. That limit is deliberate and stated
+  // here instead of being overclaimed: what keeps a reflected value from travelling is the closed
+  // response shape (status, content-type, body), the never-forwarded headers, and the absence of any
+  // request, response or credential logging in this module.
+  assert.equal(result.body.includes(encoded), true)
+  assert.equal(JSON.stringify(result).includes("x-echo"), false, "a response header reached the renderer")
 })

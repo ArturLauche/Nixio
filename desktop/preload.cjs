@@ -34,6 +34,15 @@ contextBridge.exposeInMainWorld("khungThoaiDesktop", {
   // URL, a method or a header, and the key is attached in main.
   providerRequest: (request) => invoke("provider-request", request),
   providerStream: (request) => invoke("provider-stream", request),
-  providerCancel: (ticket) => invoke("provider-cancel", ticket),
-  onProviderEvent: (callback) => ipcRenderer.on("khung-thoai:provider-event", (_event, payload) => callback(payload)),
+  // Acknowledgement that the renderer is listening for this ticket's frames, plus a cancel that also
+  // accepts the request token so work without a ticket yet (vault, DNS, headers) can be stopped.
+  providerActivate: (ticket) => invoke("provider-activate", ticket),
+  providerCancel: (target) => invoke("provider-cancel", target),
+  // Returns a detached unsubscribe function, never the ipcRenderer object the listener was added to.
+  onProviderEvent: (callback) => {
+    if (typeof callback !== "function") return () => {}
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on("khung-thoai:provider-event", listener)
+    return () => { ipcRenderer.removeListener("khung-thoai:provider-event", listener) }
+  },
 })

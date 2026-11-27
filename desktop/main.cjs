@@ -117,7 +117,8 @@ app.whenReady().then(() => {
   const provider = (channel, action) => ipcMain.handle(channel, providerChannel(trusted, action, sanitizeProviderError))
   provider(PROVIDER_CHANNELS.request, (senderKey, request) => providerTransport.execute(senderKey, request))
   provider(PROVIDER_CHANNELS.stream, (senderKey, request) => providerTransport.stream(senderKey, request))
-  provider(PROVIDER_CHANNELS.cancel, (senderKey, ticket) => providerTransport.cancel(senderKey, ticket))
+  provider(PROVIDER_CHANNELS.activate, (senderKey, ticket) => providerTransport.activate(senderKey, ticket))
+  provider(PROVIDER_CHANNELS.cancel, (senderKey, target) => providerTransport.cancel(senderKey, target))
   handle("khung-thoai:redraw-texture", (input) => imageWorker.available ? imageWorker.redraw(input) : undefined)
   handle("khung-thoai:native", (operation, options, data, taskId) => {
     if (!["capabilities", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
