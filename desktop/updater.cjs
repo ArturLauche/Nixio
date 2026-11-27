@@ -1,9 +1,15 @@
-const { isSafePublicHttpsUrl } = require("./web-search.cjs")
+const { isSafePublicHttpsUrl, requestOnce, resolvePublicAddress } = require("./web-search.cjs")
 
 const REPO_SLUG = "wiothemilo-lang/Nixio"
 const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`
 const RELEASES_PAGE_URL = `https://github.com/${REPO_SLUG}/releases`
 const TIMEOUT_MS = 10000
+const MAX_REDIRECTS = 5
+const MAX_PAYLOAD_BYTES = 512 * 1024
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+// The updater only ever needs the release API host. A redirect or an injected apiUrl that
+// leaves this set is refused instead of followed.
+const TRUSTED_RELEASE_HOSTS = new Set(["api.github.com"])
 
 function parseSemver(raw) {
   const cleaned = String(raw || "").trim().replace(/^v/i, "")
@@ -47,13 +53,86 @@ function compareSemver(a, b) {
 }
 
 function safeGitHubUrl(rawUrl, fallback = RELEASES_PAGE_URL) {
-  const safe = isSafePublicHttpsUrl(rawUrl)
-  if (!safe) return fallback
-  const host = safe.hostname.toLowerCase()
+  // isSafePublicHttpsUrl returns an href string, so the host has to be re-read from a URL.
+  const safeHref = isSafePublicHttpsUrl(rawUrl)
+  if (!safeHref) return fallback
+  let host
+  try {
+    host = new URL(safeHref).hostname.toLowerCase()
+  } catch {
+    return fallback
+  }
   if (host === "github.com" || host.endsWith(".github.com") || host.endsWith(".githubusercontent.com")) {
-    return safe.toString()
+    return safeHref
   }
   return fallback
+}
+
+function trustedReleaseUrl(rawUrl) {
+  const safeHref = isSafePublicHttpsUrl(rawUrl)
+  if (!safeHref) return null
+  try {
+    return TRUSTED_RELEASE_HOSTS.has(new URL(safeHref).hostname.toLowerCase()) ? safeHref : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Single-hop adapter for an explicitly injected fetch. Redirects are requested manually so
+ * the caller's loop — not the fetch implementation — decides whether a hop is allowed.
+ */
+function requestFromFetch(fetchImpl) {
+  return async (url, { headers, signal }) => {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers,
+      redirect: "manual",
+      signal,
+    })
+    let location = null
+    try {
+      const rawLocation = response.headers?.get?.("location")
+      if (rawLocation) location = new URL(rawLocation, url).href
+    } catch {
+      location = null
+    }
+    const ok = response.status >= 200 && response.status < 300
+    const text = ok && typeof response.text === "function" ? await response.text() : ""
+    return { status: Number(response.status) || 0, location, text }
+  }
+}
+
+/**
+ * Fetch the release payload hop by hop. Each hop is checked against the same HTTPS +
+ * trusted-host policy and its DNS answer is pinned again, so a redirect cannot move the
+ * request to an internal or off-policy destination. Headers and the per-hop timeout stay
+ * identical across hops, and the redirect count is bounded.
+ */
+async function fetchReleasePayload(rawUrl, { version, timeoutMs, request, lookup }) {
+  let current = trustedReleaseUrl(rawUrl)
+  if (!current) throw new Error("URL kiểm tra cập nhật không hợp lệ.")
+  let redirects = 0
+  for (;;) {
+    const address = await resolvePublicAddress(new URL(current).hostname, { lookup })
+    const response = await request(current, {
+      address,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": `KhungThoai/${version}`,
+      },
+      maxBytes: MAX_PAYLOAD_BYTES,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (REDIRECT_STATUSES.has(response.status) || response.location) {
+      const next = response.location ? trustedReleaseUrl(response.location) : null
+      if (!next) throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
+      if (++redirects > MAX_REDIRECTS) throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
+      current = next
+      continue
+    }
+    return { status: response.status, text: String(response.text ?? "") }
+  }
 }
 
 function normalizeReleasePayload(payload, currentVersion) {
@@ -94,22 +173,22 @@ function normalizeReleasePayload(payload, currentVersion) {
   }
 }
 
-async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = RELEASES_API_URL, timeoutMs = TIMEOUT_MS } = {}) {
+async function checkForUpdates(currentVersion, {
+  fetchImpl,
+  request,
+  lookup,
+  apiUrl = RELEASES_API_URL,
+  timeoutMs = TIMEOUT_MS,
+} = {}) {
   const checkedAt = new Date().toISOString()
   const version = String(currentVersion || "1.0.0")
+  const send = request ?? (fetchImpl ? requestFromFetch(fetchImpl) : requestOnce)
   try {
-    const safeApi = isSafePublicHttpsUrl(apiUrl)
-    if (!safeApi) {
-      return { ok: false, currentVersion: version, error: "URL kiểm tra cập nhật không hợp lệ.", checkedAt }
-    }
-    const response = await fetchImpl(safeApi.toString(), {
-      method: "GET",
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": `KhungThoai/${version}`,
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(timeoutMs),
+    const response = await fetchReleasePayload(apiUrl, {
+      version,
+      timeoutMs,
+      request: send,
+      lookup,
     })
     if (response.status === 404) {
       return {
@@ -128,7 +207,7 @@ async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = REL
         checkedAt,
       }
     }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       return {
         ok: false,
         currentVersion: version,
@@ -139,13 +218,18 @@ async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = REL
         checkedAt,
       }
     }
-    const payload = await response.json()
+    let payload
+    try {
+      payload = JSON.parse(response.text)
+    } catch {
+      return { ok: false, currentVersion: version, error: "Phản hồi cập nhật không hợp lệ.", checkedAt }
+    }
     return normalizeReleasePayload(payload, version)
   } catch (error) {
     return {
       ok: false,
       currentVersion: version,
-      error: error?.name === "TimeoutError"
+      error: error?.name === "TimeoutError" || error?.name === "AbortError"
         ? "Hết thời gian kết nối tới máy chủ cập nhật."
         : (error?.message || "Không thể kết nối máy chủ cập nhật."),
       checkedAt,

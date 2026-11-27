@@ -49,9 +49,34 @@ function truncateSafe(text, maxChars) {
   return s.slice(0, end)
 }
 
-function isPrivateIp(host) {
-  const clean = String(host || "").replace(/^\[|\]$/g, "").toLowerCase()
+/**
+ * Canonicalize an address so a range check cannot be dodged by an alternate spelling.
+ * IPv6 goes through the WHATWG URL parser (lowercase, leading zeros dropped, longest zero
+ * run compressed); anything it refuses — zone ids included — is reported as unusable.
+ */
+function normalizeIp(host) {
+  const clean = String(host || "").replace(/^\[|\]$/g, "").toLowerCase().trim()
   const version = net.isIP(clean)
+  if (version !== 6) return { version, clean }
+  try {
+    return { version, clean: new URL(`https://[${clean}]/`).hostname.slice(1, -1) }
+  } catch {
+    return { version, clean: null }
+  }
+}
+
+function ipv6Hextets(normalized) {
+  const [head, tail = ""] = normalized.split("::")
+  const left = head ? head.split(":") : []
+  const right = tail ? tail.split(":") : []
+  const zeros = normalized.includes("::") ? 8 - left.length - right.length : 0
+  const groups = [...left, ...Array(Math.max(0, zeros)).fill("0"), ...right]
+  if (groups.length !== 8) return null
+  return groups.map((group) => parseInt(group, 16))
+}
+
+function isPrivateIp(host) {
+  const { version, clean } = normalizeIp(host)
   if (version === 4) {
     const parts = clean.split(".").map(Number)
     const [a, b, c] = parts
@@ -70,13 +95,22 @@ function isPrivateIp(host) {
     return false
   }
   if (version === 6) {
-    // Global unicast only lives in 2000::/3. Everything below is loopback, IPv4-mapped /
-    // IPv4-compatible ("::"), ULA, link-local, site-local or multicast space.
-    if (clean.startsWith("::")) return true
-    if (/^(fe|fc|fd|ff)/.test(clean)) return true
-    if (clean.startsWith("2001:db8")) return true
-    // NAT64 well-known prefix can embed arbitrary IPv4 targets.
-    if (clean.startsWith("64:ff9b")) return true
+    if (!clean) return true
+    const hextets = ipv6Hextets(clean)
+    if (!hextets) return true
+    const [first, second] = hextets
+    // Global unicast only lives in 2000::/3. ::/16 covers unspecified, loopback and the
+    // IPv4-mapped / IPv4-compatible forms.
+    if (first === 0) return true
+    if ((first & 0xfe00) === 0xfc00) return true // fc00::/7 unique-local
+    if (first >= 0xfe00) return true // fe00::/9 reserved, fe80::/10 link-local, ff00::/8 multicast
+    if (first === 0x2001 && second === 0x0db8) return true // 2001:db8::/32 documentation
+    // IPv6 transition networks embed an arbitrary IPv4 destination, so the whole class is
+    // denied instead of decoded: 6to4 (2002::/16), Teredo (2001::/32) and NAT64
+    // (64:ff9b::/32, covering the well-known and local-use prefixes).
+    if (first === 0x2002) return true
+    if (first === 0x2001 && second === 0x0000) return true
+    if (first === 0x0064 && second === 0xff9b) return true
     return false
   }
   return false
@@ -436,6 +470,7 @@ async function fetchUrl(rawUrl, options = {}) {
 module.exports = {
   isSafePublicHttpsUrl,
   resolvePublicAddress,
+  requestOnce,
   fetchTextLimited,
   decodeBody,
   stripHtmlToText,

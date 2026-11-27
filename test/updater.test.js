@@ -141,9 +141,224 @@ test("checkAppUpdate respects cooldown, dismissed version, force override, and o
 test("desktop checkForUpdates handles 404 (no public releases yet) cleanly", async () => {
   const res = await desktopUpdater.checkForUpdates("1.0.0", {
     fetchImpl: async () => ({ ok: false, status: 404 }),
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
   })
   assert.equal(res.ok, true)
   assert.equal(res.hasUpdate, false)
   assert.equal(res.latestVersion, "1.0.0")
   assert.equal(formatBytes(2048), "2.0 KB")
+})
+
+test("desktop normalization keeps trusted GitHub asset links and falls back for disallowed URLs", () => {
+  const trustedHtmlUrl = "https://github.com/wiothemilo-lang/Nixio/releases/tag/v1.3.1"
+  const trustedAsset = "https://github.com/wiothemilo-lang/Nixio/releases/download/v1.3.1/Khung-Thoai-1.3.1-win-x64.zip"
+  const signedAsset = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/123?X-Amz-Signature=abc"
+  const result = desktopUpdater.normalizeReleasePayload({
+    tag_name: "v1.3.1",
+    name: "Khung Thoại 1.3.1",
+    html_url: trustedHtmlUrl,
+    published_at: "2026-11-27T00:00:00Z",
+    body: "Bản phát hành mới",
+    assets: [
+      { name: "Khung-Thoai-1.3.1-win-x64.zip", size: 4096, browser_download_url: trustedAsset },
+      { name: "Khung-Thoai-1.3.1-mac-arm64.zip", size: 8192, browser_download_url: signedAsset },
+      { name: "Khung-Thoai-1.3.1-linux-x64.zip", size: 2048, browser_download_url: "https://mirror.example.net/Khung-Thoai-1.3.1-linux-x64.zip" },
+      { name: "Khung-Thoai-1.3.1-insecure.zip", size: 1024, browser_download_url: "http://github.com/wiothemilo-lang/Nixio/releases/download/v1.3.1/insecure.zip" },
+    ],
+  }, "1.3.0")
+
+  assert.equal(result.ok, true)
+  assert.equal(result.hasUpdate, true)
+  assert.equal(result.latestVersion, "1.3.1")
+  assert.equal(result.release.url, trustedHtmlUrl)
+  assert.deepEqual(result.release.assets.map((asset) => asset.downloadUrl), [
+    trustedAsset,
+    signedAsset,
+    desktopUpdater.RELEASES_PAGE_URL,
+    desktopUpdater.RELEASES_PAGE_URL,
+  ])
+
+  // A host that merely contains "github.com" is never trusted.
+  const impostor = desktopUpdater.normalizeReleasePayload({
+    tag_name: "v1.3.1",
+    html_url: "https://github.com.example/releases/tag/v1.3.1",
+    assets: [{ name: "app.zip", size: 1, browser_download_url: "https://github.com.example/app.zip" }],
+  }, "1.3.0")
+  assert.equal(impostor.release.url, desktopUpdater.RELEASES_PAGE_URL)
+  assert.equal(impostor.release.assets[0].downloadUrl, desktopUpdater.RELEASES_PAGE_URL)
+})
+
+test("desktop checkForUpdates pins the release API and validates every redirect hop", async () => {
+  const apiUrl = desktopUpdater.RELEASES_API_URL
+  const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }]
+  const payload = JSON.stringify({
+    tag_name: "v1.3.1",
+    name: "Khung Thoại 1.3.1",
+    html_url: "https://github.com/wiothemilo-lang/Nixio/releases/tag/v1.3.1",
+    body: "Ghi chú phát hành",
+    assets: [{
+      name: "Khung-Thoai-1.3.1-win-x64.zip",
+      size: 4096,
+      browser_download_url: "https://github.com/wiothemilo-lang/Nixio/releases/download/v1.3.1/Khung-Thoai-1.3.1-win-x64.zip",
+    }],
+  })
+  const requests = []
+  const request = async (url, options) => {
+    requests.push({ url, ...options })
+    if (url === apiUrl) return { status: 200, location: null, text: payload }
+    if (url === "https://api.github.com/releases/redirected") {
+      return { status: 302, location: "https://api.github.com/releases/redirected/final" }
+    }
+    if (url === "https://api.github.com/releases/redirected/final") return { status: 200, location: null, text: payload }
+    if (url === "https://api.github.com/off-policy") {
+      return { status: 302, location: "https://mirror.example.net/releases/latest" }
+    }
+    if (url === "https://api.github.com/downgrade") {
+      return { status: 307, location: "http://api.github.com/repos/wiothemilo-lang/Nixio/releases/latest" }
+    }
+    if (url === "https://api.github.com/internal-hop") {
+      return { status: 301, location: "https://10.0.0.1/latest" }
+    }
+    if (url === "https://api.github.com/loop") return { status: 302, location: "https://api.github.com/loop" }
+    if (url === "https://api.github.com/missing") return { status: 404, location: null, text: "" }
+    if (url === "https://api.github.com/limited") return { status: 403, location: null, text: "" }
+    if (url === "https://api.github.com/not-json") return { status: 200, location: null, text: "<html>oops</html>" }
+    return { status: 200, location: null, text: payload }
+  }
+
+  const accepted = await desktopUpdater.checkForUpdates("1.3.0", { request, lookup: publicLookup })
+  assert.equal(accepted.ok, true)
+  assert.equal(accepted.hasUpdate, true)
+  assert.deepEqual(accepted.release.assets.map((asset) => asset.downloadUrl), [
+    "https://github.com/wiothemilo-lang/Nixio/releases/download/v1.3.1/Khung-Thoai-1.3.1-win-x64.zip",
+  ])
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].url, apiUrl)
+  assert.equal(requests[0].address, "93.184.216.34")
+  assert.equal(requests[0].headers.Accept, "application/vnd.github+json")
+  assert.equal(requests[0].headers["User-Agent"], "KhungThoai/1.3.0")
+  assert.ok(requests[0].signal instanceof AbortSignal)
+
+  // A same-host redirect is followed, re-resolved and re-pinned with the same headers.
+  requests.length = 0
+  const redirected = await desktopUpdater.checkForUpdates("1.3.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://api.github.com/releases/redirected",
+  })
+  assert.equal(redirected.ok, true)
+  assert.deepEqual(requests.map((entry) => [entry.url, entry.address]), [
+    ["https://api.github.com/releases/redirected", "93.184.216.34"],
+    ["https://api.github.com/releases/redirected/final", "93.184.216.34"],
+  ])
+  assert.equal(requests[1].headers["User-Agent"], "KhungThoai/1.3.0")
+
+  // Off-policy, downgraded and internal hops are refused before any request is sent.
+  for (const [url, apiPath] of [
+    ["https://api.github.com/off-policy", "https://mirror.example.net/releases/latest"],
+    ["https://api.github.com/downgrade", "http://api.github.com/repos/wiothemilo-lang/Nixio/releases/latest"],
+    ["https://api.github.com/internal-hop", "https://10.0.0.1/latest"],
+  ]) {
+    requests.length = 0
+    const blocked = await desktopUpdater.checkForUpdates("1.3.0", { request, lookup: publicLookup, apiUrl: url })
+    assert.equal(blocked.ok, false)
+    assert.match(blocked.error, /chuyển hướng không hợp lệ/)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, url)
+    assert.ok(!requests.some((entry) => entry.url === apiPath))
+  }
+
+  // The redirect chain is bounded.
+  requests.length = 0
+  const looped = await desktopUpdater.checkForUpdates("1.3.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://api.github.com/loop",
+  })
+  assert.equal(looped.ok, false)
+  assert.match(looped.error, /số lần chuyển hướng/)
+  assert.equal(requests.length, 6)
+
+  // Not-found, rate-limit and malformed-payload results keep their existing shapes.
+  const missing = await desktopUpdater.checkForUpdates("1.0.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://api.github.com/missing",
+  })
+  assert.equal(missing.ok, true)
+  assert.equal(missing.hasUpdate, false)
+  assert.equal(missing.release.name, "Chưa có bản phát hành công khai")
+  assert.equal(missing.release.url, desktopUpdater.RELEASES_PAGE_URL)
+
+  const limited = await desktopUpdater.checkForUpdates("1.0.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://api.github.com/limited",
+  })
+  assert.equal(limited.ok, false)
+  assert.equal(limited.status, 403)
+  assert.match(limited.error, /giới hạn tốc độ/)
+
+  const notJson = await desktopUpdater.checkForUpdates("1.0.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://api.github.com/not-json",
+  })
+  assert.equal(notJson.ok, false)
+  assert.match(notJson.error, /không hợp lệ/)
+
+  // An injected apiUrl outside the release API host never leaves the process.
+  requests.length = 0
+  const offPolicy = await desktopUpdater.checkForUpdates("1.0.0", {
+    request,
+    lookup: publicLookup,
+    apiUrl: "https://mirror.example.net/releases/latest",
+  })
+  assert.equal(offPolicy.ok, false)
+  assert.match(offPolicy.error, /URL kiểm tra cập nhật không hợp lệ/)
+  assert.equal(requests.length, 0)
+
+  // The default transport is the pinned https one, never global fetch, and a DNS answer in
+  // a private range is refused before the socket is opened.
+  const originalFetch = globalThis.fetch
+  let fetchCalls = 0
+  globalThis.fetch = async () => {
+    fetchCalls += 1
+    throw new Error("global fetch must not be used by the desktop updater")
+  }
+  try {
+    const internalDns = await desktopUpdater.checkForUpdates("1.0.0", {
+      lookup: async () => [{ address: "10.0.0.5", family: 4 }],
+    })
+    assert.equal(internalDns.ok, false)
+    assert.match(internalDns.error, /IP nội bộ/)
+    assert.equal(fetchCalls, 0)
+    assert.equal(requests.length, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  // Timeouts stay readable instead of surfacing a raw abort.
+  const timedOut = await desktopUpdater.checkForUpdates("1.0.0", {
+    request: async () => {
+      const error = new Error("The operation was aborted")
+      error.name = "AbortError"
+      throw error
+    },
+    lookup: publicLookup,
+  })
+  assert.equal(timedOut.ok, false)
+  assert.match(timedOut.error, /Hết thời gian/)
+
+  // An explicitly injected fetch stays a single hop: the loop owns redirect handling.
+  const seenFetch = []
+  const viaFetch = await desktopUpdater.checkForUpdates("1.3.0", {
+    fetchImpl: async (url, options) => {
+      seenFetch.push({ url, redirect: options.redirect })
+      return { status: 200, headers: { get: () => null }, text: async () => payload }
+    },
+    lookup: publicLookup,
+  })
+  assert.equal(viaFetch.ok, true)
+  assert.deepEqual(seenFetch, [{ url: desktopUpdater.RELEASES_API_URL, redirect: "manual" }])
 })

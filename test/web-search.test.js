@@ -118,6 +118,59 @@ test("desktop fetch pins resolved IPs, rejects internal DNS answers and re-check
   await assert.rejects(desktopSearch.resolvePublicAddress("nip.example.com", { lookup }), /IP nội bộ/)
 })
 
+test("desktop egress policy denies IPv6 transition networks for literals and DNS answers", async () => {
+  const guard = desktopSearch.isSafePublicHttpsUrl
+  // 6to4 (2002::/16) and Teredo (2001::/32) encapsulate an arbitrary IPv4 destination, so
+  // the whole class is refused. Alternate spellings must not slip past the prefix check.
+  for (const url of [
+    "https://[2002::1]/",
+    "https://[2002:0000:0000:0000:0000:0000:0000:0001]/",
+    "https://[2001::1]/",
+    "https://[2001:0:0:0:0:0:0:1]/",
+    "https://[64:ff9b:1::1]/",
+    "https://[fe00::1]/",
+  ]) {
+    assert.equal(guard(url), null, url)
+  }
+  // Legitimate global IPv6 literals stay usable.
+  assert.equal(guard("https://[2606:4700:4700::1111]/"), "https://[2606:4700:4700::1111]/")
+  assert.equal(guard("https://[2a02:26f0:1::1]/"), "https://[2a02:26f0:1::1]/")
+
+  const lookup = async (hostname) => {
+    if (hostname === "six-to-four.example.com") return [{ address: "2002:0000:0:0:0:0:0:1", family: 6 }]
+    if (hostname === "teredo.example.com") return [{ address: "2001:0:0:0:0:0:0:1", family: 6 }]
+    if (hostname === "global.example.com") return [{ address: "2606:4700:4700::1111", family: 6 }]
+    if (hostname === "mixed.example.com") {
+      return [{ address: "2606:4700:4700::1111", family: 6 }, { address: "2002:0:0:0:0:0:0:1", family: 6 }]
+    }
+    return [{ address: "93.184.216.34", family: 4 }]
+  }
+  const requests = []
+  const request = async (url, { address }) => {
+    requests.push({ url, address })
+    return { status: 200, location: null, text: "Nội dung công khai" }
+  }
+
+  await assert.rejects(desktopSearch.resolvePublicAddress("six-to-four.example.com", { lookup }), /IP nội bộ/)
+  await assert.rejects(desktopSearch.resolvePublicAddress("teredo.example.com", { lookup }), /IP nội bộ/)
+  // A mixed answer set still fails closed when any record is a transition address.
+  await assert.rejects(desktopSearch.resolvePublicAddress("mixed.example.com", { lookup }), /IP nội bộ/)
+  assert.equal(await desktopSearch.resolvePublicAddress("global.example.com", { lookup }), "2606:4700:4700::1111")
+
+  // No request is sent when the resolved answer lands in a transition range.
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://six-to-four.example.com/page", { lookup, request }),
+    /IP nội bộ/,
+  )
+  assert.equal(requests.length, 0)
+
+  assert.deepEqual(
+    await desktopSearch.fetchTextLimited("https://global.example.com/page", { lookup, request }),
+    { url: "https://global.example.com/page", text: "Nội dung công khai" },
+  )
+  assert.deepEqual(requests, [{ url: "https://global.example.com/page", address: "2606:4700:4700::1111" }])
+})
+
 test("decodeBody handles gzip/deflate/brotli bodies and refuses decompression bombs", () => {
   const text = "Nội dung tiếng Việt ".repeat(60)
   assert.equal(desktopSearch.decodeBody(zlib.gzipSync(text), "gzip").toString("utf8"), text)
