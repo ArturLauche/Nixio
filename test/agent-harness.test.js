@@ -371,6 +371,7 @@ test("tools.execute fails closed when a write needs approval but no approver is 
   assert.equal(tools.needsApproval("update_box", {}, { confirmBulkEdits: false, forceWriteApproval: false }), false)
   assert.equal(tools.needsApproval("delete_box", {}, { confirmBulkEdits: true }), true)
 })
+
 test("parseTextToolCalls decodes JSON-string arguments from text-form tool calls", () => {
   const [call] = parseTextToolCalls('<tool_call>{"name":"update_box","arguments":"{\\"boxId\\":\\"b1\\",\\"text\\":\\"hi\\"}"}</tool_call>')
   assert.equal(call.name, "update_box")
@@ -432,4 +433,52 @@ test("runAgentTurn keeps streamed OpenAI tool_call arguments when deltas omit in
   assert.equal(result.toolTrace[0].data.matches.length, 1)
 })
 
+test("runAgentTurn context budget counts the system prompt once per provider message shape", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const baseSettings = {
+    provider: "openai",
+    baseUrl: "http://localhost:11434/v1",
+    llmModel: "qwen2.5:7b",
+    source: "Japanese",
+    target: "Vietnamese",
+  }
 
+  let openAiBody = null
+  globalThis.fetch = async (_url, init) => {
+    openAiBody = JSON.parse(init.body)
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ choices: [{ message: { content: "Chào bạn." } }] }),
+    }
+  }
+  const { tools } = makeHarnessContext()
+  const openAiResult = await runAgentTurn({ userMessage: "hello", settings: baseSettings, tools })
+  // The system prompt already travels as messages[0]; the fallback estimate must not add it twice.
+  assert.equal(openAiResult.contextBudget.estimated, true)
+  assert.equal(openAiResult.contextBudget.usedTokens, Math.ceil(JSON.stringify(openAiBody.messages).length / 3.6))
+
+  let geminiBody = null
+  globalThis.fetch = async (_url, init) => {
+    geminiBody = JSON.parse(init.body)
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "Chào bạn." }] } }] }),
+    }
+  }
+  const geminiResult = await runAgentTurn({
+    userMessage: "hello",
+    settings: { ...baseSettings, provider: "gemini", key: "test-key", model: "auto" },
+    tools,
+  })
+  // Gemini keeps systemInstruction outside contents, so its system prompt is still counted.
+  assert.equal(geminiResult.contextBudget.estimated, true)
+  assert.equal(
+    geminiResult.contextBudget.usedTokens,
+    Math.ceil((geminiBody.systemInstruction.parts[0].text.length + JSON.stringify(geminiBody.contents).length) / 3.6),
+  )
+})

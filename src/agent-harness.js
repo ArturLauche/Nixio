@@ -566,7 +566,10 @@ export async function runAgentTurn({
 
     signal?.throwIfAborted()
     if (reply.usage) latestUsage = reply.usage
-    const fallbackChars = systemPrompt.length + JSON.stringify(isOpenAi ? openAiMessages : geminiContents).length
+    // openAiMessages already carries the system prompt as its first message; Gemini keeps it in
+    // systemInstruction, outside contents. Count it once in either shape.
+    const fallbackChars = JSON.stringify(isOpenAi ? openAiMessages : geminiContents).length
+      + (isOpenAi ? 0 : systemPrompt.length)
     contextBudget = computeContextBudget({
       promptTokens: latestUsage?.promptTokens || 0,
       fallbackChars,
