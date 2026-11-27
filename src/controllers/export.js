@@ -59,6 +59,8 @@ export function setupExports({
   let pendingExport
   function exportIssues(pages) {
     const issues = []
+    const signature = translationSignature(readTranslationSettings())
+    const context = document.createElement("canvas").getContext("2d")
     if (state.queue.length)
       issues.push({ text: `${state.queue.length} câu chưa đặt trong chương.` })
     for (const page of pages) {
@@ -77,8 +79,7 @@ export function setupExports({
         issues.push({ page, text: prefix + "Chưa xử lý xong lượt dịch." })
       if (
         page.translationJob?.state === "done" &&
-        page.translationJob.signature !==
-          translationSignature(readTranslationSettings())
+        page.translationJob.signature !== signature
       ) {
         issues.push({
           page,
@@ -86,7 +87,7 @@ export function setupExports({
         })
       }
       for (const box of page.boxes) {
-        if (textOverflows(page, box))
+        if (textOverflows(page, box, context))
           issues.push({
             page,
             box,
