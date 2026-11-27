@@ -82,6 +82,7 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
       planMode,
       confirmBulkEdits,
       forceWriteApproval,
+      callId: call.id,
       signal: execSignal,
     })
   } catch (error) {
