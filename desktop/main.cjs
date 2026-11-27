@@ -69,7 +69,11 @@ function createWindow() {
   })
 
   const { webContents } = mainWindow
-  webContents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { tasks?.close(); projects?.cancelAll().catch(() => {}) } })
+  // Hash navigation between #editor and #library is an in-place navigation: it must not tear
+  // down queued native work or an open project session. Real navigations are blocked below.
+  webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace && url !== entry) { tasks?.close(); projects?.cancelAll().catch(() => {}) }
+  })
   webContents.setWindowOpenHandler(() => ({ action: "deny" }))
   webContents.on("will-navigate", (event) => event.preventDefault())
   webContents.on("will-attach-webview", (event) => event.preventDefault())
