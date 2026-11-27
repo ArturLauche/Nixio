@@ -176,6 +176,15 @@ function conflictingTerm(term, text, termsById, renderingsById) {
   return null
 }
 
+// A finding keeps one identity across linter runs: the page and box it sits in, the check that
+// fired and the thing that check objected to. The project format stores no box ids (they are
+// regenerated when a file opens), so the anchor is positional, and the snippet is deliberately
+// excluded so editing a line does not detach the review decision from its row.
+export function findingId({ pageIndex = 0, boxIndex = 0, type = "", subject = "" } = {}) {
+  const base = `${pageIndex}:${boxIndex}:${type}`
+  return subject ? `${base}:${subject}` : base
+}
+
 export function autoFixPunctuation(text) {
   return String(text || "")
     .replace(/[ \t]{2,}/g, " ")
@@ -205,13 +214,13 @@ export function lintChapter(
 
   const pushIssue = (issue) => {
     byType[issue.type] = (byType[issue.type] ?? 0) + 1
-    if (issues.length < maxIssues) issues.push(issue)
+    if (issues.length < maxIssues) issues.push({ ...issue, id: findingId(issue) })
   }
 
   for (let p = 0; p < pages.length; p++) {
     const page = pages[p]
     const pageIndex = p + 1
-    for (const box of page.boxes ?? []) {
+    for (const [boxIndex, box] of (page.boxes ?? []).entries()) {
       const raw = String(box.text ?? "")
       const trimmed = raw.trim()
 
@@ -220,6 +229,7 @@ export function lintChapter(
           type: "empty_or_placeholder",
           severity: "warning",
           pageIndex,
+          boxIndex,
           pageName: page.name,
           boxId: box.id,
           snippet: clipText(trimmed || "(trống)"),
@@ -233,6 +243,7 @@ export function lintChapter(
           type: "untranslated_source",
           severity: "warning",
           pageIndex,
+          boxIndex,
           pageName: page.name,
           boxId: box.id,
           snippet: clipText(trimmed),
@@ -252,8 +263,10 @@ export function lintChapter(
             type: "glossary_violation",
             severity: "warning",
             pageIndex,
+            boxIndex,
             pageName: page.name,
             boxId: box.id,
+            subject: term.id,
             snippet: clipText(trimmed),
             message: `"${banned}" là dạng bị cấm của "${term.source}"; phải dùng "${term.target}".`,
             suggestion: term.target,
@@ -268,8 +281,10 @@ export function lintChapter(
             type: "glossary_violation",
             severity: "warning",
             pageIndex,
+            boxIndex,
             pageName: page.name,
             boxId: box.id,
+            subject: term.id,
             snippet: clipText(trimmed),
             message: `Thuật ngữ "${sourceForm}" chưa đổi sang "${term.target}".`,
             suggestion: term.target,
@@ -284,8 +299,10 @@ export function lintChapter(
             type: "glossary_violation",
             severity: "warning",
             pageIndex,
+            boxIndex,
             pageName: page.name,
             boxId: box.id,
+            subject: term.id,
             snippet: clipText(trimmed),
             message: `Xung đột xưng hô: "${term.target}" và "${conflict.target}" không dùng cùng một câu.`,
             suggestion: term.target,
@@ -303,8 +320,10 @@ export function lintChapter(
               type: "glossary_violation",
               severity: "warning",
               pageIndex,
+              boxIndex,
               pageName: page.name,
               boxId: box.id,
+              subject: term.id,
               snippet: clipText(trimmed),
               message: `Thuật ngữ "${term.target}" bị mất dấu trong "${clipText(trimmed)}".`,
               suggestion: term.target,
@@ -320,8 +339,10 @@ export function lintChapter(
               type: "glossary_violation",
               severity: "warning",
               pageIndex,
+              boxIndex,
               pageName: page.name,
               boxId: box.id,
+              subject: term.id,
               snippet: clipText(trimmed),
               message: `Tên/thuật ngữ lệch chuẩn chữ hoa hoặc dấu so với "${term.target}".`,
               suggestion: term.target,
@@ -336,6 +357,7 @@ export function lintChapter(
           type: "punctuation_spacing",
           severity: "info",
           pageIndex,
+          boxIndex,
           pageName: page.name,
           boxId: box.id,
           snippet: clipText(trimmed),
