@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url"
 import native from "../desktop/native-worker.cjs"
 import { executable } from "./native-worker.mjs"
 
+export { executable }
+
 const root = fileURLToPath(new URL("..", import.meta.url))
 const fixtures = path.join(root, "test/fixtures/comic")
 
