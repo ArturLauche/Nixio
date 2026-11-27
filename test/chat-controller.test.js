@@ -318,6 +318,17 @@ test("cancelled plan execution releases the badge and allows another attempt", a
   assert.equal(harness.byId("chat-stop").hidden, true)
 })
 
+test("a rejected plan command keeps the draft and current plan mode", async () => {
+  const harness = await createHarness()
+  const planMode = harness.byId("chat-plan-mode")
+  planMode.checked = false
+  harness.setBusy(true)
+  harness.submit("/plan Rà soát chương")
+  assert.equal(harness.byId("chat-input").value, "/plan Rà soát chương")
+  assert.equal(planMode.checked, false)
+  assert.equal(harness.fetchCalls.length, 0)
+})
+
 test("busy submission keeps the draft and disables every chat control", async () => {
   const harness = await createHarness()
   harness.setBusy(true)

@@ -755,12 +755,12 @@ export function setupChat({
         return true
       }
       if (cmd.kind === "plan") {
+        if (cmd.prompt && !sendPrompt(cmd.prompt, { planMode: cmd.enabled })) return false
         if (planModeInput) planModeInput.checked = cmd.enabled
         if (!cmd.prompt) {
           renderSystemNotice(cmd.enabled ? "Đã bật Chế độ Kế hoạch (Plan Mode)." : "Đã tắt Chế độ Kế hoạch.")
-          return true
         }
-        return sendPrompt(cmd.prompt)
+        return true
       }
       if (cmd.kind === "prompt") {
         return sendPrompt(cmd.prompt)
