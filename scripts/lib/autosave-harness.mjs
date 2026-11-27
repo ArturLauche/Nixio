@@ -233,7 +233,7 @@ export function createHarness({ capabilities = null, native = true } = {}) {
     desktop.closeHandler = null
   }
 
-  function start(setupProjects) {
+  function start(setupProjects, overrides = {}) {
     const projectSettings = settingIds.map((id) => ({ id, value: "" }))
     projectSettings.find((field) => field.id === "direction").value = "ltr"
     projectSettings.find((field) => field.id === "gemini-model").value = "auto"
@@ -268,7 +268,9 @@ export function createHarness({ capabilities = null, native = true } = {}) {
       renderFontOptions() {},
       notify: (notification) => notifications.push(notification),
       onProjectSwitch() {},
+      ...overrides,
     })
+    api.projectSettings = projectSettings
     return api
   }
 

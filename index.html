@@ -43,6 +43,7 @@
           <button type="button" class="button" id="new-project">Dự án mới</button>
           <button type="button" class="button" id="open-project">Mở dự án</button>
           <button type="button" class="button" id="save-project">Lưu dự án</button>
+          <button type="button" class="button" id="open-templates" title="Mẫu dự án: ngôn ngữ, hướng đọc, ghi chú dịch, bảng thuật ngữ, mẫu dàn chữ, phông và định dạng xuất">Mẫu dự án…</button>
           <input type="file" id="project-file" accept=".khungthoai" hidden>
         </div>
         <p id="project-dirty" class="muted" role="status"></p>
@@ -576,6 +577,28 @@
       <button type="button" id="close-preflight" class="button" data-i18n="dialog.close">Đóng</button>
       <button type="button" id="continue-export" class="button primary" data-i18n="preflight.continue">Vẫn xuất</button>
     </div>
+  </dialog>
+  <dialog id="template-dialog">
+    <h2>Mẫu dự án</h2>
+    <p class="muted">Mẫu gom sẵn ngôn ngữ, hướng đọc, ghi chú dịch, bảng thuật ngữ, mẫu dàn chữ, phông mặc định và định dạng xuất. Áp dụng trước khi nhập trang để bắt đầu nhanh; trang ảnh đang mở không bị ảnh hưởng.</p>
+    <label class="field" for="template-select">Mẫu<select id="template-select"></select></label>
+    <label class="field" for="template-name">Tên mẫu<input id="template-name" maxlength="80"></label>
+    <div class="form-actions">
+      <button type="button" id="apply-template" class="button primary">Áp dụng cho dự án này</button>
+      <button type="button" id="new-project-template" class="button">Dự án mới với mẫu</button>
+    </div>
+    <div class="form-actions">
+      <button type="button" id="save-template" class="button">Lưu thiết lập hiện tại làm mẫu</button>
+      <button type="button" id="rename-template" class="button">Đổi tên</button>
+      <button type="button" id="overwrite-template" class="button">Ghi đè</button>
+      <button type="button" id="delete-template" class="button danger">Xóa mẫu</button>
+    </div>
+    <div class="form-actions preset-io-actions">
+      <button type="button" id="export-templates" class="button" title="Xuất danh sách mẫu dự án ra tệp JSON để dùng chung">Xuất JSON</button>
+      <button type="button" id="import-templates" class="button" title="Nhập mẫu dự án từ tệp JSON">Nhập JSON</button>
+      <input type="file" id="templates-file" accept=".json,application/json" hidden>
+    </div>
+    <form method="dialog"><button class="button">Đóng</button></form>
   </dialog>
   <dialog id="style-guide-dialog">
     <h2 data-i18n="styleGuide.title">Hướng dẫn phong cách dự án</h2>

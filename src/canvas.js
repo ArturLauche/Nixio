@@ -7,13 +7,13 @@ import { fitBoxFontSize } from "./tools.js"
 
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
-export function makeBox(page, rectangle, text = "Lời thoại mới") {
+export function makeBox(page, rectangle, text = "Lời thoại mới", font = "Arial") {
   return {
     id: crypto.randomUUID(),
     ...rectangle,
     text,
     size: clamp(Math.round(page.image.naturalWidth * 0.033), 12, 400),
-    font: "Arial",
+    font,
     color: "#171717",
     align: "center",
     rotation: 0,

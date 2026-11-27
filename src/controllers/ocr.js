@@ -153,7 +153,7 @@ export function setupOcr({
         )
           review.page.unplaced.push(line)
       } else {
-        const box = makeBox(review.page, toRectangle(line.box), line.text)
+        const box = makeBox(review.page, toRectangle(line.box), line.text, state.defaultFont)
         box.fill = false
         review.page.boxes.push(box)
       }

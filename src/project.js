@@ -222,8 +222,9 @@ function projectStyleGuide(raw) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory, styleGuide, qaReview }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, templateId, translationMemory, styleGuide, qaReview }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
+  if (templateId !== undefined && (typeof templateId !== "string" || !templateId.trim() || templateId.length > 100)) throw invalidProject()
   settings = { "translation-glossary": "", "export-profile": DEFAULT_EXPORT_PROFILE_ID, ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
@@ -237,6 +238,7 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
   const review = projectQaReview(qaReview)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
+    ...(templateId && { templateId }),
     ...(memory && { translationMemory: memory }),
     ...(guide && { styleGuide: guide }),
     ...(review && { qaReview: review }),
@@ -262,7 +264,7 @@ export function writeProject(project) {
   // remembered pairs claim 3, and a project that used neither stays readable by builds predating both.
   const manifest = encoder.encode(JSON.stringify({
     version: data.qaReview?.entries.length || written.some((page) => page.layers?.length) ? 4
-      : data.translationMemory?.entries.length ? 3 : 2,
+      : data.translationMemory?.entries.length || data.templateId ? 3 : 2,
     ...data,
     pages: written,
   }))

@@ -88,7 +88,7 @@ const state = {
   compareRestore: "edit", splitPos: 50, cloneSource: null, layerId: null, stroke: null,
   exporting: false, importing: false, translating: false, importingScript: false,
   openingProject: false, processingNative: false, savingProject: false,
-  styleGuide: null,
+  styleGuide: null, defaultFont: "Arial", templateId: null,
 }
 const projectSettings = projectSettingIds.map(byId)
 // The export profile select lists the shipped platform profiles, and a new project starts from the
@@ -154,7 +154,7 @@ const ROTATE_META = { label: "Xoay khung bằng phím", kind: "gesture" }
 // bare kind next to its own specific name.
 const historyKindLabels = {
   form: "Khung", box: "Khung", gesture: "Bàn vẽ", nudge: "Phím", page: "Trang", "raw-cleanup": "Raw",
-  preset: "Mẫu", settings: "Cài đặt", translate: "Dịch", ocr: "OCR", ai: "AI",
+  preset: "Mẫu", template: "Mẫu", settings: "Cài đặt", translate: "Dịch", ocr: "OCR", ai: "AI",
   find: "Tìm", retouch: "Cọ", cleanup: "Nền", layout: "Canh", script: "Kịch bản", text: "Chữ", layer: "Lớp",
   qa: "QA",
 }
@@ -178,7 +178,8 @@ function editorSnapshot() {
   return copyEditor({
     pages: state.pages, queue: state.queue, presets: state.presets,
     pageId: state.pageId, boxId: state.boxId,
-    styleGuide: state.styleGuide,
+    styleGuide: state.styleGuide, fit: state.fit,
+    defaultFont: state.defaultFont, templateId: state.templateId,
     settings: Object.fromEntries(projectSettings.map(({ id, value }) => [id, value])),
   })
 }
@@ -255,6 +256,7 @@ function applyHistorySnapshot(snapshot) {
   const { settings, ...editor } = snapshot
   projects.changed()
   Object.assign(state, editor, { placing: false })
+  updateFitLabel()
   syncSelectionAfterRestore()
   projectSettings.forEach((field) => { field.value = settings[field.id] })
   render()
@@ -624,6 +626,7 @@ function selectPage(page) {
   if (aborted) {
     const { settings, ...editor } = aborted
     Object.assign(state, editor)
+    updateFitLabel()
     page = state.pages.find((item) => item.id === page?.id)
   }
   state.pageId = page?.id ?? null
@@ -673,6 +676,7 @@ function syncProjectActions() {
   byId("open-project").disabled = projectBusy()
   byId("save-project").disabled = projectBusy()
   byId("new-project").disabled = projectBusy()
+  byId("open-templates").disabled = projectBusy()
   byId("open-find").disabled = projectBusy()
   byId("open-style-guide").disabled = projectBusy()
   byId("recent-projects-button").disabled = projectBusy()
@@ -1380,7 +1384,7 @@ byId("detect-bubbles")?.addEventListener("click", () => {
       : state.queue.length
         ? state.queue.shift()
         : `Thoại ${page.boxes.length + 1}`
-    const box = makeBox(page, chosen[i], queuedText)
+    const box = makeBox(page, chosen[i], queuedText, state.defaultFont)
     box.fill = false
     box.bubbleFit = true
     page.boxes.push(box)
@@ -1709,7 +1713,7 @@ function distribute(page, lines, direction) {
     const column = index % columns
     const x = columns === 1 ? .26 : direction === "rtl" ? .55 - column * .49 : .06 + column * .49
     const y = .07 + Math.floor(index / columns) * (.86 / rows)
-    const box = makeBox(page, { x, y, w: width, h: height }, line)
+    const box = makeBox(page, { x, y, w: width, h: height }, line, state.defaultFont)
     box.size = clamp(Math.round(Math.min(box.size, height * page.image.naturalHeight * .44)), 8, 400)
     return box
   })
@@ -1753,7 +1757,7 @@ function addBox(rectangle, line, record = true) {
   if (!page || projectBusy()) return
   commitLiveFormCheckpoint()
   if (record) checkpoint(undefined, { label: "Thêm khung thoại", kind: "box" })
-  const box = makeBox(page, rectangle, line)
+  const box = makeBox(page, rectangle, line, state.defaultFont)
   page.boxes.push(box)
   state.boxId = box.id
   state.selectedBoxIds.clear()
@@ -1994,7 +1998,7 @@ function applyTranslation(page, lines, onPlaced) {
     : lines.filter((line) => line.box).map((line) => ({ box: line.box }))
   const { placed, unplaced } = matchDialogue(lines, regions)
   for (const { line, region } of placed) {
-    const box = region.existing ?? makeBox(page, toRectangle(region.box), line.text)
+    const box = region.existing ?? makeBox(page, toRectangle(region.box), line.text, state.defaultFont)
     box.text = line.text
     box.originalBox = toRectangle(line.box)
     if (!region.existing) {
