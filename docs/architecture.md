@@ -121,7 +121,7 @@ API truyền file không trả về đường dẫn hay handle native. Renderer 
 stateDiagram-v2
     [*] --> wb: projectBegin → fileBegin/zipBegin (path từ dialog hoặc catalog.prepare)
     wb --> wa: projectWrite fileAppend / zipPage (zipPage qua encodePng → zipAppend)
-    wa --> wc: fileCommit → temp flush + Move/Replace atomic, .bak khi mode=project
+    wa --> wc: fileCommit → flush, đóng tệp tạm, thay thế tệp đích rồi cập nhật bản sao lưu
     wa --> wx: fileCancel / lỗi → xóa temp
     wc --> [*]
     wx --> [*]
@@ -138,7 +138,7 @@ stateDiagram-v2
 ```
 
 - `projectWrite` chỉ chấp nhận operation trong allowlist theo mode: zip → `zipPage|fileCommit|fileCancel`, còn lại → `fileAppend|fileCommit|fileCancel`; `fileCommit`/`fileCancel` đóng phiên và dọn map ([desktop/project-files.cjs:78-97](../desktop/project-files.cjs)).
-- `fileBegin`/`zipBegin` ghi vào `path.<guid>.tmp` cùng thư mục đích; `fileCommit` flush, (tùy chọn) copy `.bak`, rồi `File.Move`/`File.Replace` atomic — tệp đích cũ chỉ bị thay khi bản mới đã hoàn chỉnh ([native/ProjectStorage.cs:81-99](../native/ProjectStorage.cs)).
+- `fileBegin`/`zipBegin` ghi vào `path.<guid>.tmp` cùng thư mục đích; `fileCommit` flush và đóng tệp tạm, kiểm tra ZIP nếu có, chuẩn bị bản sao của tệp dự án cũ, rồi thay thế tệp đích bằng `File.Move` hoặc `File.Replace`. Bản sao `.bak` được công bố sau khi tệp chính đã thay thế thành công. Nếu cập nhật bản sao thất bại, worker giữ bản sao trước đó ([native/ProjectStorage.cs:81-99](../native/ProjectStorage.cs)).
 - ZIP giới hạn 50 trang, tên phải là `*.png` an toàn; `zipPage` được main chuyển thành `zipAppend` sau khi `encodePng` (tác vụ `png` qua TaskQueue) ([native/ProjectStorage.cs:65-80](../native/ProjectStorage.cs), [desktop/project-files.cjs:83-87](../desktop/project-files.cjs)).
 
 ### 4.3 Vòng đời snapshot phục hồi
