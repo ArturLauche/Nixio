@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { chromium } from "playwright"
@@ -115,7 +115,19 @@ const entries = []
 let failures = 0
 let browser
 try {
-  browser = await chromium.launch({ executablePath: process.env.VISUAL_CHROMIUM_PATH || undefined })
+  browser = await chromium.launch({
+    headless: true,
+    // Keep scrollbar geometry identical in headless and desktop captures.
+    ignoreDefaultArgs: ["--hide-scrollbars"],
+    executablePath: process.env.VISUAL_CHROMIUM_PATH || undefined,
+  })
+  await mkdir(artifactDirectory, { recursive: true })
+  await rm(path.join(artifactDirectory, "report.json"), { force: true })
+  for (const view of config.views) {
+    for (const kind of ["actual", "diff"]) {
+      await rm(path.join(artifactDirectory, `${view.name}.${kind}.png`), { force: true })
+    }
+  }
   for (const view of config.views) {
     const screenshot = await capture(browser, view)
     const actual = decodePng(screenshot)
@@ -134,7 +146,6 @@ try {
       throw new Error("Missing or unreadable baseline " + path.relative(root, baselinePath) + ". An operator must run `npm run test:visual:update` with " + BASELINE_APPROVAL_ENV + "=1, review the committed PNG diff, and commit it.")
     }
     const result = compareImages(baseline, actual, tolerance)
-    await mkdir(artifactDirectory, { recursive: true })
     await writeFile(path.join(artifactDirectory, view.name + ".actual.png"), screenshot)
     if (!result.pass) {
       failures++
@@ -145,7 +156,6 @@ try {
     }
     entries.push({ view: view.name, ...result, baseline: path.relative(root, baselinePath) })
   }
-  await mkdir(artifactDirectory, { recursive: true })
   await writeFile(path.join(artifactDirectory, "report.json"), JSON.stringify({
     platform,
     browser: browser.version(),

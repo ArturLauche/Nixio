@@ -10,7 +10,7 @@ These screenshots catch layout, theme and library regressions that unit tests ca
 | `editor-dark` | Same page, dark theme |
 | `library` | Library with the committed catalog fixture, one series selected |
 
-`npm run build` output is served by `vite preview` on `127.0.0.1:4173`, then Playwright Chromium renders each view at 1280x800, device scale 1, locale `vi-VN`, reduced motion. Each view uses a fresh browser context, blocks every non-local request, disables CSS animations and transitions, disables IndexedDB so autosave and recovery state cannot appear, waits for `document.fonts.ready`, blurs the focused element and screenshots after two animation frames. The editor page is the committed `test/fixtures/comic/screentone.lettered.png` fixture; the library catalog points at the same committed file copied into the preview output. No network, clock, random, storage or canvas-text dependency is part of a baseline.
+`npm run build` output is served by `vite preview` on `127.0.0.1:4173`, then headless Playwright Chromium renders each view with normal scrollbar geometry at 1280x800, device scale 1, locale `vi-VN`, reduced motion. Each view uses a fresh browser context, blocks every non-local request, disables CSS animations and transitions, disables IndexedDB so autosave and recovery state cannot appear, waits for `document.fonts.ready`, blurs the focused element and screenshots after two animation frames. The editor page is the committed `test/fixtures/comic/screentone.lettered.png` fixture; the library catalog points at the same committed file copied into the preview output. No network, clock, random, storage or canvas-text dependency is part of a baseline.
 
 ## Canonical environment
 
