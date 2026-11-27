@@ -1,3 +1,4 @@
+import { TOOL_APPROVAL_REJECTED, TOOL_APPROVAL_UNAVAILABLE } from "./agent-pipeline.js"
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
 import { lintChapter } from "./linter.js"
 import {
@@ -1182,6 +1183,7 @@ export function createAgentTools({
           return {
             ok: false,
             category: tool.category,
+            code: TOOL_APPROVAL_UNAVAILABLE,
             error: `Cần người dùng phê duyệt thao tác "${name}" nhưng giao diện hiện không hỗ trợ hộp thoại duyệt.`,
           }
         }
@@ -1190,6 +1192,7 @@ export function createAgentTools({
           return {
             ok: false,
             category: tool.category,
+            code: TOOL_APPROVAL_REJECTED,
             error: decision?.reason
               ? `Người dùng từ chối thao tác "${name}": ${decision.reason}`
               : `Người dùng đã từ chối thực thi thao tác "${name}".`,
