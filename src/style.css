@@ -346,6 +346,9 @@ label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
   text-underline-offset: .18em;
 }
 .field, .choice { margin-top: 7px; margin-bottom: 7px; }
+.field-error { color: var(--danger); font-size: .78rem; }
+.field-error:empty { display: none; }
+#box-text[aria-invalid="true"] { border-color: var(--danger); }
 textarea, select, input:not([type="file"],[type="checkbox"],[type="range"]) {
   width: 100%;
   min-width: 0;
@@ -766,7 +769,10 @@ details[open] > summary::after { transform: rotate(90deg); }
   overflow: visible;
 }
 .outline[aria-current] { border: 1.5px solid var(--accent); background: rgba(15, 157, 118, .12); }
-.outline.multi-selected { border: 1.5px solid #0284c7; background: rgba(2, 132, 199, .12); }
+/* The primary keeps its accent border inside a group, and an inner ring marks it as the box the
+   inspector edits, so the group highlight never paints over it. */
+.outline.multi-selected:not([aria-current]) { border: 1.5px solid #0284c7; background: rgba(2, 132, 199, .12); }
+.outline[aria-current].multi-selected { box-shadow: inset 0 0 0 2px rgba(2, 132, 199, .55); }
 .outline.draft { pointer-events: none; }
 .outline.cleanup-region { border: 1.5px dashed #d97706; background: transparent; pointer-events: none; }
 #cleanup-overlay { position: absolute; inset: 0; pointer-events: none; opacity: .38; }
