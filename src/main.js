@@ -308,9 +308,17 @@ function syncTranslationActions() {
 }
 
 function syncToolControls() {
-  const tool = byId("cleanup-tool").value
+  const select = byId("cleanup-tool")
+  const tool = select.value
   const page = selectedPage()
   const hasRetouch = Boolean(page?.retouchStrokes?.length)
+  const isBrushTool = ["erase", "restore", "paint", "clone", "inpaint", "retouch-erase"].includes(tool)
+  const activeLabel = byId("active-tool-label")
+  if (activeLabel) activeLabel.textContent = select.selectedOptions?.[0]?.textContent || tool
+  document.querySelectorAll("#tool-rail .rail-btn").forEach((btn) => {
+    btn.setAttribute("aria-pressed", String(btn.dataset.tool === tool))
+  })
+  if (byId("brush-size-field")) byId("brush-size-field").hidden = !isBrushTool
   byId("paint-color-field").hidden = tool !== "paint"
   byId("paint-opacity-field").hidden = !["paint", "clone", "inpaint", "retouch-erase"].includes(tool)
   if (byId("clone-seamless-field")) byId("clone-seamless-field").hidden = tool !== "clone"
@@ -955,6 +963,14 @@ byId("cleanup-tool").onchange = () => {
   else if (tool === "retouch-erase") status("Tô lên vùng đã vẽ/tẩy để xóa cục bộ nét redraw và lộ lại ảnh gốc.")
   else if (tool !== "text") status("Chọn khung thoại rồi khoanh vùng hoặc vẽ cọ trên ảnh.")
 }
+document.querySelectorAll("#tool-rail .rail-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const select = byId("cleanup-tool")
+    if (!select || select.value === btn.dataset.tool) return
+    select.value = btn.dataset.tool
+    select.onchange?.()
+  })
+})
 byId("show-cleanup").onchange = renderCanvas
 byId("show-text").onchange = renderCanvas
 

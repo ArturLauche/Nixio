@@ -88,9 +88,9 @@ test("theme helpers normalize, persist, and apply dark/light mode to DOM", () =>
   }
   applyTheme("dark", fakeDoc)
   assert.equal(fakeDoc.documentElement.dataset.theme, "dark")
-  assert.equal(metaContent, "#0f1916")
+  assert.equal(metaContent, "#0e1013")
 
   applyTheme("light", fakeDoc)
   assert.equal(fakeDoc.documentElement.dataset.theme, "light")
-  assert.equal(metaContent, "#123e32")
+  assert.equal(metaContent, "#111418")
 })

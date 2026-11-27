@@ -32,6 +32,6 @@ export function applyTheme(theme, doc = globalThis.document) {
   if (!doc?.documentElement) return normalized
   doc.documentElement.dataset.theme = normalized
   const meta = doc.querySelector?.('meta[name="theme-color"]')
-  if (meta) meta.setAttribute("content", normalized === "dark" ? "#0f1916" : "#123e32")
+  if (meta) meta.setAttribute("content", normalized === "dark" ? "#0e1013" : "#111418")
   return normalized
 }
