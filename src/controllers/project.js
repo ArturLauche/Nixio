@@ -1,5 +1,6 @@
 import { readProject, writeProject, projectExtension } from "../project.js"
 import { filenameStem, saveFile } from "../io.js"
+import { loadGlobalPresets, mergePresets } from "../presets.js"
 import {
   desktop,
   nativeCapabilities,
@@ -157,7 +158,7 @@ export function setupProjects({
       renderFontOptions?.()
       const hasContent =
         state.pages.length ||
-        state.presets.length ||
+        revision !== diskRevision ||
         state.queue.length ||
         projectSettings.some(
           ({ value }, index) => value !== defaultProjectSettings[index],
@@ -183,7 +184,7 @@ export function setupProjects({
       savedRevision = -1
       state.pages = loaded
       state.queue = project.queue
-      state.presets = project.presets
+      state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
       state.zoom = null
       state.selectedBoxIds?.clear()
@@ -299,7 +300,7 @@ export function setupProjects({
     history.clear()
     state.pages = []
     state.queue = []
-    state.presets = []
+    state.presets = loadGlobalPresets()
     state.zoom = null
     state.selectedBoxIds?.clear()
     state.projectId = crypto.randomUUID()
