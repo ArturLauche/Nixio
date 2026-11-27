@@ -6,6 +6,17 @@ import { createAgentTools } from "../agent-tools.js"
 import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
 
 const searchStorageKey = "khung-thoai-search-config"
+const planExecutionPrompt =
+  "Kế hoạch đã được duyệt. Hãy chuyển sang thực thi từng bước theo kế hoạch trên, cập nhật tiến độ bằng todo_write và báo kết quả sau khi hoàn tất."
+const planReadOnlyMessage =
+  "Kế hoạch cần quyền sửa để thi hành. Hãy bật \"Cho phép sửa khung & thuật ngữ\" rồi bấm lại, hoặc nhờ AI điều chỉnh kế hoạch ở chế độ chỉ đọc."
+const planStateLabels = {
+  pending: "Chờ duyệt",
+  running: "Đang thực thi",
+  done: "Hoàn tất",
+  cancelled: "Đã dừng",
+  error: "Thất bại",
+}
 
 function appendSafeTextWithLinks(container, text) {
   const lines = String(text || "").split("\n")
@@ -76,10 +87,31 @@ export function setupChat({
   const providerSelect = byId("chat-search-provider")
   const searchUrlInput = byId("chat-search-url")
   const searchKeyInput = byId("chat-search-key")
+  const clearBtn = byId("chat-clear")
+  const chipButtons = [...panel.querySelectorAll("[data-chat-prompt]")]
 
   let chatHistory = []
   let activeController = null
   let activeTurnEl = null
+
+  function syncBusyControls() {
+    const busy = Boolean(activeController)
+    panel.setAttribute("aria-busy", busy ? "true" : "false")
+    input.disabled = busy
+    sendBtn.disabled = busy
+    if (clearBtn) clearBtn.disabled = busy
+    if (compactBtn) compactBtn.disabled = busy
+    for (const chip of chipButtons) chip.disabled = busy
+    stopBtn.disabled = false
+    stopBtn.hidden = !busy
+    stopBtn.setAttribute("aria-label", busy ? "Dừng tác vụ AI đang chạy" : "Dừng tác vụ AI")
+  }
+
+  function reportBusy() {
+    statusEl.textContent = activeController
+      ? "AI đang xử lý — hãy chờ hoặc bấm Dừng trước khi gửi yêu cầu mới."
+      : "Hãy chờ tác vụ hiện tại hoàn tất."
+  }
 
   function loadSearchConfig() {
     try {
@@ -217,7 +249,6 @@ export function setupChat({
     title.textContent = `Kế hoạch: ${plan.title}`
     const badge = document.createElement("span")
     badge.className = "chat-badge"
-    badge.textContent = "Chờ duyệt"
     head.append(title, badge)
 
     const pre = document.createElement("pre")
@@ -229,14 +260,43 @@ export function setupChat({
     const execBtn = document.createElement("button")
     execBtn.type = "button"
     execBtn.className = "button primary"
-    execBtn.textContent = "Thực thi kế hoạch"
+
+    const setExecutionState = (state) => {
+      badge.dataset.state = state
+      badge.textContent = planStateLabels[state]
+      execBtn.disabled = state === "running" || state === "done"
+      execBtn.textContent = state === "error" || state === "cancelled"
+        ? "Thử lại thực thi"
+        : "Thực thi kế hoạch"
+    }
+    setExecutionState("pending")
+
     execBtn.onclick = () => {
-      if (activeController) return
+      if (activeController) {
+        reportBusy()
+        return
+      }
+      if (projectBusy()) {
+        statusEl.textContent = "Hãy chờ tác vụ hiện tại hoàn tất rồi thực thi kế hoạch."
+        return
+      }
+      if (!allowEditsInput?.checked) {
+        statusEl.textContent = planReadOnlyMessage
+        return
+      }
+      const accepted = sendPrompt(planExecutionPrompt, {
+        planMode: false,
+        onTurnStart: () => setExecutionState("running"),
+        onTurnEnd: ({ ok, cancelled }) => {
+          setExecutionState(ok ? "done" : cancelled ? "cancelled" : "error")
+        },
+      })
+      if (!accepted) {
+        setExecutionState("pending")
+        statusEl.textContent = "Chưa thể thực thi kế hoạch lúc này. Hãy thử lại sau khi tác vụ hiện tại xong."
+        return
+      }
       if (planModeInput) planModeInput.checked = false
-      if (allowEditsInput) allowEditsInput.checked = true
-      badge.textContent = "Đang thực thi"
-      execBtn.disabled = true
-      sendPrompt("Kế hoạch đã được duyệt. Hãy chuyển sang thực thi từng bước theo kế hoạch trên, cập nhật tiến độ bằng todo_write và báo kết quả sau khi hoàn tất.")
     }
     actions.append(execBtn)
 
@@ -555,28 +615,26 @@ export function setupChat({
   byId("chat-close").onclick = () => setOpen(false)
 
   function clearSession() {
-    if (activeController) return
+    if (activeController) {
+      reportBusy()
+      return
+    }
     chatHistory = []
     tools.resetTurnState?.()
     if (state.projectId) clearProjectChatSession(state.projectId)
     statusEl.textContent = ""
     renderWelcome()
   }
-  byId("chat-clear").onclick = clearSession
+  clearBtn.onclick = clearSession
 
   async function runCompact({ useLlm = false } = {}) {
-    if (activeController) return
-    if (useLlm) {
-      statusEl.textContent = "Đang dùng AI tóm tắt ngữ cảnh…"
-      activeController = new AbortController()
-      sendBtn.disabled = true
-      stopBtn.hidden = false
+    if (activeController) {
+      reportBusy()
+      return
+    }
+    if (!useLlm) {
       try {
-        const res = await summarizeHistoryWithLlm({
-          history: chatHistory,
-          settings: readAgentSettings(),
-          signal: activeController.signal,
-        })
+        const res = compactChatHistory(chatHistory, { force: true })
         if (!res.compacted) {
           statusEl.textContent = "Lịch sử chat còn ngắn, chưa cần nén."
           return
@@ -584,37 +642,49 @@ export function setupChat({
         chatHistory = res.history
         if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
         renderPersistedSession()
-        statusEl.textContent = `Đã tóm tắt ${res.foldedMessages} tin nhắn cũ bằng AI (-${res.charsSaved} ký tự).`
+        statusEl.textContent = `Đã nén ${res.foldedMessages} tin nhắn cũ (tiết kiệm ~${res.charsSaved} ký tự).`
         notify?.({
           kind: "info",
-          title: "Đã tóm tắt ngữ cảnh bằng AI",
-          message: `Đã gộp ${res.foldedMessages} tin nhắn cũ, tiết kiệm ~${res.charsSaved} ký tự.`,
+          title: "Đã nén ngữ cảnh Trợ lý AI",
+          message: `Đã gộp ${res.foldedMessages} tin nhắn cũ vào mốc tóm tắt, tiết kiệm ~${res.charsSaved} ký tự.`,
           key: "chat-compact",
         })
       } catch (error) {
-        statusEl.textContent = "Không tóm tắt được bằng AI: " + (error?.message || String(error))
-      } finally {
-        activeController = null
-        sendBtn.disabled = false
-        stopBtn.hidden = true
+        statusEl.textContent = "Không nén được lịch sử chat: " + (error?.message || String(error))
       }
       return
     }
-    const res = compactChatHistory(chatHistory, { force: true })
-    if (!res.compacted) {
-      statusEl.textContent = "Lịch sử chat còn ngắn, chưa cần nén."
-      return
+    activeController = new AbortController()
+    syncBusyControls()
+    statusEl.textContent = "Đang dùng AI tóm tắt ngữ cảnh…"
+    try {
+      const res = await summarizeHistoryWithLlm({
+        history: chatHistory,
+        settings: readAgentSettings(),
+        signal: activeController.signal,
+      })
+      if (!res.compacted) {
+        statusEl.textContent = "Lịch sử chat còn ngắn, chưa cần nén."
+        return
+      }
+      chatHistory = res.history
+      if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
+      renderPersistedSession()
+      statusEl.textContent = `Đã tóm tắt ${res.foldedMessages} tin nhắn cũ bằng AI (-${res.charsSaved} ký tự).`
+      notify?.({
+        kind: "info",
+        title: "Đã tóm tắt ngữ cảnh bằng AI",
+        message: `Đã gộp ${res.foldedMessages} tin nhắn cũ, tiết kiệm ~${res.charsSaved} ký tự.`,
+        key: "chat-compact",
+      })
+    } catch (error) {
+      statusEl.textContent = activeController.signal.aborted
+        ? "Đã dừng tóm tắt ngữ cảnh."
+        : "Không tóm tắt được bằng AI: " + (error?.message || String(error))
+    } finally {
+      activeController = null
+      syncBusyControls()
     }
-    chatHistory = res.history
-    if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
-    renderPersistedSession()
-    statusEl.textContent = `Đã nén ${res.foldedMessages} tin nhắn cũ (tiết kiệm ~${res.charsSaved} ký tự).`
-    notify?.({
-      kind: "info",
-      title: "Đã nén ngữ cảnh Trợ lý AI",
-      message: `Đã gộp ${res.foldedMessages} tin nhắn cũ vào mốc tóm tắt, tiết kiệm ~${res.charsSaved} ký tự.`,
-      key: "chat-compact",
-    })
   }
 
   if (compactBtn) {
@@ -649,42 +719,46 @@ export function setupChat({
     return { card, icon, label, duration, outPre, body }
   }
 
-  async function sendPrompt(text) {
+  function sendPrompt(text, options = {}) {
     const trimmed = String(text || "").trim()
-    if (!trimmed || activeController) return
+    if (!trimmed) return false
+    if (activeController) {
+      reportBusy()
+      return false
+    }
 
     const cmd = parseSlashCommand(trimmed)
     if (cmd) {
       if (cmd.kind === "help") {
         renderSystemNotice(cmd.text)
-        return
+        return true
       }
       if (cmd.kind === "clear") {
         clearSession()
-        return
+        return true
       }
       if (cmd.kind === "compact") {
-        await runCompact({ useLlm: cmd.useLlm })
-        return
+        runCompact({ useLlm: cmd.useLlm })
+        return true
       }
       if (cmd.kind === "skill") {
         const target = BUILTIN_SKILLS.find((s) => s.id === cmd.skillId)
         if (!target) {
           renderSystemNotice(`Không có skill "${cmd.skillId}". Các skill sẵn có: ${BUILTIN_SKILLS.map((s) => s.id).join(", ")}.`)
-          return
+          return true
         }
         if (skillSelect) {
           skillSelect.value = target.id
           persistSkill()
         }
         renderSystemNotice(`Đã chuyển hồ sơ biên tập sang: ${target.name} — ${target.description}`)
-        return
+        return true
       }
       if (cmd.kind === "plan") {
         if (planModeInput) planModeInput.checked = cmd.enabled
         if (!cmd.prompt) {
           renderSystemNotice(cmd.enabled ? "Đã bật Chế độ Kế hoạch (Plan Mode)." : "Đã tắt Chế độ Kế hoạch.")
-          return
+          return true
         }
         return sendPrompt(cmd.prompt)
       }
@@ -692,17 +766,28 @@ export function setupChat({
         return sendPrompt(cmd.prompt)
       }
       renderSystemNotice(`Lệnh không hợp lệ: /${cmd.name}. Gõ /help để xem danh sách lệnh.`)
-      return
+      return true
     }
 
     if (projectBusy()) {
       statusEl.textContent = "Hãy chờ tác vụ hiện tại hoàn tất."
-      return
+      return false
     }
+
+    runTurn(trimmed, {
+      planMode: options.planMode ?? Boolean(planModeInput?.checked),
+      onTurnStart: options.onTurnStart,
+      onTurnEnd: options.onTurnEnd,
+    })
+    return true
+  }
+
+  async function runTurn(promptText, { planMode = false, onTurnStart, onTurnEnd } = {}) {
+    let settled = { ok: false, cancelled: false }
 
     const userBubble = document.createElement("div")
     userBubble.className = "chat-msg user"
-    userBubble.textContent = trimmed
+    userBubble.textContent = promptText
     messagesEl.append(userBubble)
 
     const turnEl = document.createElement("div")
@@ -710,19 +795,6 @@ export function setupChat({
     messagesEl.append(turnEl)
     activeTurnEl = turnEl
     scrollToBottom()
-
-    const traceCards = new Map()
-    const planMode = Boolean(planModeInput?.checked)
-    const confirmBulkEdits = Boolean(confirmBulkInput?.checked)
-    const beforeBoxes = captureBoxSnapshot(state.pages)
-    commitLiveForm?.()
-    turnBeforeSnapshot = editorSnapshot?.() ?? null
-    turnCheckpointRecorded = false
-    activeController = new AbortController()
-    sendBtn.disabled = true
-    input.disabled = true
-    stopBtn.hidden = false
-    statusEl.textContent = planMode ? "Đang khảo sát & lập kế hoạch…" : "Đang suy nghĩ…"
 
     let streamBubble = null
     let streamText = ""
@@ -741,9 +813,20 @@ export function setupChat({
     }
 
     try {
+      const traceCards = new Map()
+      const confirmBulkEdits = Boolean(confirmBulkInput?.checked)
+      const beforeBoxes = captureBoxSnapshot(state.pages)
+      commitLiveForm?.()
+      turnBeforeSnapshot = editorSnapshot?.() ?? null
+      turnCheckpointRecorded = false
+      activeController = new AbortController()
+      syncBusyControls()
+      statusEl.textContent = planMode ? "Đang khảo sát & lập kế hoạch…" : "Đang suy nghĩ…"
+      onTurnStart?.()
+
       const result = await runAgentTurn({
         history: chatHistory,
-        userMessage: trimmed,
+        userMessage: promptText,
         settings: readAgentSettings(),
         tools,
         allowEdits: allowEditsInput.checked,
@@ -883,6 +966,7 @@ export function setupChat({
             : [],
         })
       }
+      settled = { ok: true, cancelled: false }
     } catch (error) {
       clearStreamPreview()
       const stopped = activeController?.signal.aborted
@@ -891,25 +975,29 @@ export function setupChat({
       errEl.textContent = stopped ? "Đã dừng lượt xử lý của AI." : "Lỗi: " + (error?.message || String(error))
       turnEl.append(errEl)
       statusEl.textContent = stopped ? "Đã dừng." : "Gặp lỗi."
+      settled = { ok: false, cancelled: Boolean(stopped) }
     } finally {
       turnBeforeSnapshot = null
       turnCheckpointRecorded = false
       activeController = null
       activeTurnEl = null
-      sendBtn.disabled = false
-      input.disabled = false
-      stopBtn.hidden = true
+      syncBusyControls()
       scrollToBottom()
       input.focus()
+      onTurnEnd?.(settled)
     }
   }
 
   form.onsubmit = (event) => {
     event.preventDefault()
-    const text = input.value.trim()
+    const submitted = input.value
+    const text = submitted.trim()
     if (!text) return
-    input.value = ""
-    sendPrompt(text)
+    if (!sendPrompt(text)) {
+      input.focus()
+      return
+    }
+    if (input.value === submitted) input.value = ""
   }
 
   input.addEventListener("keydown", (event) => {
@@ -919,14 +1007,23 @@ export function setupChat({
     }
   })
 
-  stopBtn.onclick = () => activeController?.abort()
+  stopBtn.onclick = () => {
+    if (!activeController) return
+    statusEl.textContent = "Đang dừng…"
+    activeController.abort()
+  }
 
-  panel.querySelectorAll("[data-chat-prompt]").forEach((button) => {
+  for (const button of chipButtons) {
     button.onclick = () => {
-      if (activeController) return
+      if (activeController) {
+        reportBusy()
+        return
+      }
       sendPrompt(button.dataset.chatPrompt)
     }
-  })
+  }
+
+  syncBusyControls()
 
   return {
     open: () => setOpen(true),

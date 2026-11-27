@@ -1,0 +1,416 @@
+import assert from "node:assert/strict"
+import test from "node:test"
+
+function fakeElement(tag = "div") {
+  const listeners = new Map()
+  const element = {
+    tagName: String(tag).toUpperCase(),
+    nodeType: 1,
+    children: [],
+    dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
+    value: "",
+    checked: false,
+    disabled: false,
+    hidden: false,
+    open: false,
+    textContent: "",
+    title: "",
+    href: "",
+    target: "",
+    rel: "",
+    type: "",
+    scrollTop: 0,
+    scrollHeight: 0,
+    focused: false,
+    onclick: null,
+    append(...nodes) { element.children.push(...nodes) },
+    replaceChildren(...nodes) { element.children = nodes },
+    appendChild(node) { element.children.push(node); return node },
+    addEventListener(type, handler) { listeners.set(type, handler) },
+    removeEventListener(type) { listeners.delete(type) },
+    dispatch(type, event) { return listeners.get(type)?.(event) },
+    setAttribute(name, value) { element[name] = String(value) },
+    getAttribute(name) { return element[name] },
+    removeAttribute(name) { delete element[name] },
+    querySelectorAll() { return [] },
+    querySelector() { return null },
+    focus() { element.focused = true },
+    remove() { element.removed = true },
+    click() { if (!element.disabled) element.onclick?.() },
+    requestSubmit() { element.submitted = true },
+  }
+  return element
+}
+
+function findAll(root, predicate, found = []) {
+  for (const child of root.children || []) {
+    if (predicate(child)) found.push(child)
+    findAll(child, predicate, found)
+  }
+  return found
+}
+
+const byClass = (root, className) => findAll(root, (node) => node.className === className)
+const byButtonLabel = (root, label) =>
+  findAll(root, (node) => node.tagName === "BUTTON" && String(node.textContent || "").trim() === label)
+
+function textOf(node) {
+  if (!node) return ""
+  if (node.nodeType === 3) return String(node.textContent || "")
+  return (node.children || []).map(textOf).join("")
+}
+
+function installBrowserGlobals() {
+  const store = new Map()
+  globalThis.document = {
+    createElement: (tag) => fakeElement(tag),
+    createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    addEventListener() {},
+  }
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  }
+  globalThis.Option = class {
+    constructor(text, value) { this.text = text; this.value = value }
+  }
+  return store
+}
+
+function geminiPayload(parts) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    headers: { get: () => "application/json" },
+    json: async () => ({ candidates: [{ content: { role: "model", parts } }] }),
+  })
+}
+
+const geminiText = (text) => geminiPayload([{ text }])
+const geminiPlan = (plan) => geminiPayload([{ functionCall: { name: "submit_plan", args: { plan } } }])
+const geminiStatus = (status) => Promise.resolve({ ok: false, status, headers: { get: () => null } })
+
+function hangingFetch(init) {
+  return new Promise((resolve, reject) => {
+    const signal = init?.signal
+    if (!signal) return
+    const abort = () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" }))
+    if (signal.aborted) abort()
+    else signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+async function drain() {
+  for (let i = 0; i < 12; i++) await tick()
+}
+
+const planMarkdown = "# Kế hoạch rà soát toàn chương\n- Bước 1: đọc lời thoại.\n- Bước 2: sửa thuật ngữ."
+
+function sessionHistory() {
+  return [
+    { role: "user", text: "Nhân vật chính tên gì?" },
+    { role: "assistant", text: "Nhân vật chính là Wiothemilo." },
+    { role: "user", text: "Dịch trang 1 giúp mình." },
+    { role: "assistant", text: "Đã dịch trang 1." },
+    { role: "user", text: "Xưng hô cậu/tớ nhé." },
+    { role: "assistant", text: "Đã chốt xưng hô cậu/tớ." },
+  ]
+}
+
+async function createHarness({ prepareStorage } = {}) {
+  installBrowserGlobals()
+  prepareStorage?.()
+  const elements = new Map()
+  const byId = (id) => {
+    if (!elements.has(id)) elements.set(id, fakeElement(id))
+    return elements.get(id)
+  }
+  const chips = ["Tra thuật ngữ", "/autofit", "/qc", "Rà xưng hô", "Lập kế hoạch"].map((prompt) => {
+    const chip = fakeElement("button")
+    chip.dataset.chatPrompt = prompt
+    return chip
+  })
+  const panel = byId("chat-panel")
+  panel.querySelectorAll = (selector) => (selector === "[data-chat-prompt]" ? chips : [])
+  byId("gemini-key").value = "test-key"
+  byId("chat-allow-edits").checked = true
+  byId("chat-allow-web").checked = false
+  byId("chat-confirm-bulk").checked = true
+
+  let busy = false
+  const fetchCalls = []
+  let fetchHandler = (index) => geminiText(`Phản hồi ${index}`)
+  globalThis.fetch = (url, init) => {
+    fetchCalls.push({ url, init })
+    return fetchHandler(fetchCalls.length - 1, init)
+  }
+
+  const state = { pages: [], projectId: "project-1" }
+  const { setupChat } = await import("../src/controllers/chat.js")
+  setupChat({
+    state,
+    byId,
+    checkpoint() {},
+    editorSnapshot: () => ({}),
+    render() {},
+    selectedPage: () => null,
+    selectedIndex: () => 0,
+    selectPage() {},
+    projectBusy: () => busy,
+    commitLiveForm() {},
+    readTranslationSettings: () => ({
+      provider: "gemini",
+      model: "gemini-2.5-flash",
+      source: "Japanese",
+      target: "Vietnamese",
+      direction: "ltr",
+      notes: "",
+      glossary: "",
+    }),
+    onSkillChange() {},
+    registerFontName() {},
+    renderFontOptions() {},
+    notify() {},
+    restoreHistory() {},
+  })
+
+  return {
+    byId,
+    chips,
+    fetchCalls,
+    panel,
+    state,
+    setBusy(value) { busy = value },
+    setFetch(handler) { fetchHandler = handler },
+    submit(text) {
+      const input = byId("chat-input")
+      if (text !== undefined) input.value = text
+      byId("chat-form").onsubmit({ preventDefault() {} })
+    },
+    status: () => byId("chat-status").textContent,
+    messages: () => byId("chat-messages").children,
+    planCard() {
+      return byClass(byId("chat-messages"), "chat-plan-card")[0]
+    },
+  }
+}
+
+function planCardControls(harness) {
+  const card = harness.planCard()
+  assert.ok(card, "plan card should be rendered")
+  const badge = byClass(card, "chat-badge")[0]
+  const execBtn = byButtonLabel(card, "Thực thi kế hoạch")[0]
+    || byButtonLabel(card, "Thử lại thực thi")[0]
+  assert.ok(badge && execBtn, "plan card should expose a badge and an execute button")
+  return { card, badge, execBtn }
+}
+
+test("plan execution refuses read-only projects without flipping the edit switch", async () => {
+  const harness = await createHarness()
+  harness.byId("chat-plan-mode").checked = true
+  harness.byId("chat-allow-edits").checked = false
+  harness.setFetch((index) => (index === 0 ? geminiPlan(planMarkdown) : geminiText("Đã gửi kế hoạch để bạn duyệt.")))
+
+  harness.submit("/plan Rà soát toàn bộ chương")
+  await drain()
+
+  const { badge, execBtn } = planCardControls(harness)
+  assert.equal(badge.textContent, "Chờ duyệt")
+  const fetchesBefore = harness.fetchCalls.length
+  execBtn.click()
+  assert.equal(harness.fetchCalls.length, fetchesBefore, "read-only refusal must not start a turn")
+  assert.equal(harness.byId("chat-allow-edits").checked, false, "edit permission stays untouched")
+  assert.equal(harness.byId("chat-plan-mode").checked, true, "plan mode survives the refusal")
+  assert.equal(badge.textContent, "Chờ duyệt")
+  assert.equal(execBtn.disabled, false, "the plan can be executed once edits are enabled")
+  assert.match(harness.status(), /quyền sửa/)
+})
+
+test("plan execution rejects busy projects without lying and retries after release", async () => {
+  const harness = await createHarness()
+  harness.byId("chat-plan-mode").checked = true
+  harness.setFetch((index) => (index === 0 ? geminiPlan(planMarkdown) : geminiText("Đã chạy xong các bước.")))
+
+  harness.submit("/plan Khảo sát và lập kế hoạch")
+  await drain()
+  const { badge, execBtn } = planCardControls(harness)
+
+  harness.setBusy(true)
+  const fetchesBefore = harness.fetchCalls.length
+  execBtn.click()
+  assert.equal(harness.fetchCalls.length, fetchesBefore)
+  assert.equal(badge.textContent, "Chờ duyệt", "rejected admission must not claim progress")
+  assert.equal(execBtn.disabled, false, "the button stays available for a retry")
+  assert.equal(harness.byId("chat-plan-mode").checked, true)
+  assert.match(harness.status(), /chờ tác vụ hiện tại/i)
+
+  harness.setBusy(false)
+  execBtn.click()
+  assert.equal(badge.textContent, "Đang thực thi")
+  assert.equal(execBtn.disabled, true)
+  assert.equal(harness.byId("chat-plan-mode").checked, false, "plan mode ends only after admission")
+  assert.equal(harness.byId("chat-allow-edits").checked, true)
+
+  await drain()
+  assert.equal(badge.textContent, "Hoàn tất")
+  assert.equal(execBtn.disabled, true)
+  assert.match(String(harness.fetchCalls[2].init.body), /Kế hoạch đã được duyệt/)
+})
+
+test("failed plan execution reports failure and offers a working retry", async () => {
+  const harness = await createHarness()
+  harness.byId("chat-plan-mode").checked = true
+  harness.setFetch((index) => {
+    if (index === 0) return geminiPlan(planMarkdown)
+    if (index === 1) return geminiText("Đã gửi kế hoạch để bạn duyệt.")
+    if (index === 2) return geminiStatus(400)
+    return geminiText("Đã chạy lại kế hoạch.")
+  })
+
+  harness.submit("/plan Lập kế hoạch")
+  await drain()
+  const { badge, execBtn } = planCardControls(harness)
+
+  execBtn.click()
+  await drain()
+  assert.equal(badge.textContent, "Thất bại")
+  assert.equal(execBtn.disabled, false)
+  assert.equal(execBtn.textContent, "Thử lại thực thi")
+  assert.equal(harness.byId("chat-allow-edits").checked, true)
+  assert.equal(harness.byId("chat-plan-mode").checked, false)
+
+  execBtn.click()
+  assert.equal(badge.textContent, "Đang thực thi")
+  await drain()
+  assert.equal(badge.textContent, "Hoàn tất")
+  assert.equal(execBtn.disabled, true)
+  assert.equal(execBtn.textContent, "Thực thi kế hoạch")
+})
+
+test("cancelled plan execution releases the badge and allows another attempt", async () => {
+  const harness = await createHarness()
+  harness.byId("chat-plan-mode").checked = true
+  harness.setFetch((index, init) => {
+    if (index === 0) return geminiPlan(planMarkdown)
+    if (index === 1) return geminiText("Đã gửi kế hoạch để bạn duyệt.")
+    return hangingFetch(init)
+  })
+
+  harness.submit("/plan Lập kế hoạch")
+  await drain()
+  const { badge, execBtn } = planCardControls(harness)
+
+  execBtn.click()
+  assert.equal(badge.textContent, "Đang thực thi")
+  await drain()
+  harness.byId("chat-stop").onclick()
+  await drain()
+  assert.equal(badge.textContent, "Đã dừng")
+  assert.equal(execBtn.disabled, false)
+  assert.equal(execBtn.textContent, "Thử lại thực thi")
+  assert.equal(harness.byId("chat-send").disabled, false)
+  assert.equal(harness.byId("chat-stop").hidden, true)
+})
+
+test("busy submission keeps the draft and disables every chat control", async () => {
+  const harness = await createHarness()
+  harness.setBusy(true)
+  const input = harness.byId("chat-input")
+  input.value = "Dịch lại khung 3"
+  harness.submit()
+  assert.equal(input.value, "Dịch lại khung 3", "rejected submissions keep the draft")
+  assert.equal(harness.fetchCalls.length, 0)
+  assert.match(harness.status(), /chờ tác vụ hiện tại/i)
+
+  harness.setBusy(false)
+  harness.setFetch((index, init) => hangingFetch(init))
+  harness.submit()
+  assert.equal(input.value, "")
+  assert.equal(input.disabled, true)
+  assert.equal(harness.byId("chat-send").disabled, true)
+  assert.equal(harness.byId("chat-compact").disabled, true)
+  assert.equal(harness.byId("chat-clear").disabled, true)
+  assert.equal(harness.chips.every((chip) => chip.disabled), true)
+  assert.equal(harness.byId("chat-stop").hidden, false, "stop stays reachable while work is cancellable")
+  assert.equal(harness.panel.getAttribute("aria-busy"), "true")
+
+  input.value = "Bản nháp mới"
+  harness.submit()
+  assert.equal(input.value, "Bản nháp mới", "a rejection never deletes newer text")
+
+  const messageCount = harness.messages().length
+  harness.chips[0].onclick()
+  assert.match(harness.status(), /AI đang xử lý/)
+  harness.byId("chat-clear").onclick()
+  harness.byId("chat-compact").onclick()
+  assert.equal(harness.messages().length, messageCount, "busy clear and compact leave the session alone")
+  assert.equal(harness.fetchCalls.length, 1)
+
+  harness.byId("chat-stop").onclick()
+  await drain()
+  assert.equal(harness.status(), "Đã dừng.")
+  assert.equal(input.disabled, false)
+  assert.equal(harness.byId("chat-send").disabled, false)
+  assert.equal(harness.byId("chat-compact").disabled, false)
+  assert.equal(harness.byId("chat-clear").disabled, false)
+  assert.equal(harness.chips.every((chip) => chip.disabled === false), true)
+  assert.equal(harness.byId("chat-stop").hidden, true)
+  assert.equal(harness.panel.getAttribute("aria-busy"), "false")
+  assert.equal(input.value, "Bản nháp mới")
+})
+
+test("AI compaction disables the composer, releases on cancel, and reports failures", async () => {
+  const harness = await createHarness({
+    prepareStorage: () => {
+      globalThis.localStorage.setItem(
+        "khung-thoai-chat-sessions",
+        JSON.stringify({ "project-1": { history: sessionHistory(), todos: [], updatedAt: 1 } }),
+      )
+    },
+  })
+  const input = harness.byId("chat-input")
+  harness.setFetch((index, init) => hangingFetch(init))
+
+  harness.submit("/compact ai")
+  assert.equal(input.value, "")
+  assert.equal(input.disabled, true, "AI compaction owns the composer")
+  assert.equal(harness.byId("chat-send").disabled, true)
+  assert.equal(harness.byId("chat-compact").disabled, true)
+  assert.equal(harness.byId("chat-clear").disabled, true)
+  assert.equal(harness.chips.every((chip) => chip.disabled), true)
+  assert.equal(harness.byId("chat-stop").hidden, false)
+  assert.equal(harness.panel.getAttribute("aria-busy"), "true")
+  assert.equal(harness.status(), "Đang dùng AI tóm tắt ngữ cảnh…")
+
+  harness.byId("chat-stop").onclick()
+  await drain()
+  assert.equal(harness.status(), "Đã dừng tóm tắt ngữ cảnh.")
+  assert.equal(input.disabled, false)
+  assert.equal(harness.byId("chat-send").disabled, false)
+  assert.equal(harness.byId("chat-compact").disabled, false)
+  assert.equal(harness.chips.every((chip) => chip.disabled === false), true)
+  assert.equal(harness.panel.getAttribute("aria-busy"), "false")
+
+  harness.setFetch(() => geminiStatus(400))
+  harness.submit("/compact ai")
+  await drain()
+  assert.match(harness.status(), /^Không tóm tắt được bằng AI:/)
+  assert.equal(input.disabled, false, "failures restore the composer")
+  assert.equal(harness.byId("chat-stop").hidden, true)
+  assert.equal(harness.chips.every((chip) => chip.disabled === false), true)
+
+  const fetchesBefore = harness.fetchCalls.length
+  harness.submit("/help")
+  await drain()
+  assert.equal(input.value, "")
+  assert.equal(harness.fetchCalls.length, fetchesBefore, "slash commands stay offline and keep working")
+  assert.match(textOf(harness.messages().at(-1)), /Các lệnh nhanh/)
+  assert.equal(harness.byId("chat-send").disabled, false)
+  assert.equal(input.disabled, false)
+})
