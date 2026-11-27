@@ -157,10 +157,10 @@ jobs:
             - **Poisson Seamless Blending C#** cho Multi-Scale PatchMatch Inpaint — hòa khớp ánh sáng/chuyển sắc biên tuyệt đối không lộ viền ghép.
             - **Làm sạch ảnh Raw tự động** (cân bằng trắng từng kênh R/G/B khử ố vàng giấy scan + khử nhiễu bilateral giữ screentone + tăng sắc nét nhẹ trên C# & JS).
             - **Cọ tẩy nét Redraw** xóa cục bộ nét vẽ/inpaint bị lem lên nét nhân vật.
-            - **Dàn chữ ôm bong bóng bầu dục (`Ôm bong bóng`)** tương thích auto-fit và **Uốn chữ SFX** (`arc`, `arcDown`, `wave`).
+            - **Dàn chữ ôm bong bóng bầu dục (\`Ôm bong bóng\`)** tương thích auto-fit và **Uốn chữ SFX** (\`arc\`, \`arcDown\`, \`wave\`).
           - **Trợ lý AI · Agent Harness v2.5 (DeepSeek Harness)**:
-            - Tự thử lại LLM (`withLlmRetry` exponential backoff) cho lỗi 429/5xx và chống lặp công cụ (`RepeatToolGuard`).
-            - **Thẻ hỏi trắc nghiệm `ask_user`**, **duyệt thao tác hàng loạt**, **5 Hồ sơ kỹ năng theo thể loại** áp dụng cho cả Chat và Dịch ảnh/khung chữ.
+            - Tự thử lại LLM (\`withLlmRetry\` exponential backoff) cho lỗi 429/5xx và chống lặp công cụ (\`RepeatToolGuard\`).
+            - **Thẻ hỏi trắc nghiệm \`ask_user\`**, **duyệt thao tác hàng loạt**, **5 Hồ sơ kỹ năng theo thể loại** áp dụng cho cả Chat và Dịch ảnh/khung chữ.
             - **Lệnh nhanh Slash Commands** (\`/qc\`, \`/plan\`, \`/autofit\`, \`/compact ai\`, \`/skill\`, \`/help\`), tóm tắt lịch sử bằng LLM và tự động lưu phiên chat/Todo theo từng dự án.
           - **Kiểm tra cập nhật & Trung tâm Thông báo**: Tự phát hiện bản mới qua GitHub Releases (\`wiothemilo-lang/Nixio\`), cảnh báo khung tràn chữ kèm nút 1 chạm **Khớp cỡ cả trang** và nhắc lưu dự án.
 
