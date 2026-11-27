@@ -110,9 +110,72 @@ jobs:
           path: release-dist/*
           if-no-files-found: error
 
+  build-macos:
+    name: Build macOS ${{ matrix.arch }} (.app, .dmg, .zip)
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Install macOS OCR
+        run: brew install tesseract tesseract-lang
+      - run: npm ci
+      - run: npm run desktop:native -- osx-${{ matrix.arch }}
+      - run: npm test
+      - run: npm run desktop:package -- osx-${{ matrix.arch }}
+      - name: Smoke test packaged macOS app
+        run: npm run test:desktop -- --packaged
+      - name: Build .app, .dmg, and .zip
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MAC_NOTARIZE: ${{ secrets.MACOS_CODESIGN_IDENTITY != '' && '1' || '0' }}
+        run: node scripts/package-release.mjs osx-${{ matrix.arch }} "${{ needs.meta.outputs.version }}"
+      - name: Verify macOS artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ needs.meta.outputs.version }}"
+          DMG="release-dist/Khung-Thoai-${VER}-mac-${{ matrix.arch }}.dmg"
+          ZIP="release-dist/Khung-Thoai-${VER}-mac-${{ matrix.arch }}.zip"
+          APP="desktop-dist/Khung-Thoai-darwin-${{ matrix.arch }}/Khung-Thoai.app"
+          ls -l release-dist
+          test -s "$DMG"
+          test -s "$ZIP"
+          hdiutil imageinfo "$DMG" > /dev/null
+          unzip -l "$ZIP" | grep -q "Khung-Thoai.app/Contents/Info.plist"
+          test -f "$APP/Contents/Resources/native-worker/KhungThoai.Redraw"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist" | grep -qx "com.khungthoai.editor"
+          if [ -n "${{ secrets.MACOS_CODESIGN_IDENTITY }}" ]; then
+            codesign --verify --deep --strict "$APP"
+            codesign -dv --verbose=4 "$APP" 2>&1 | grep -q "flags=0x10000(runtime)"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: release-dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
-    needs: [meta, build-linux, build-windows]
+    needs: [meta, build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -134,7 +197,7 @@ jobs:
           cat << EOF > release-notes.md
           # Nixio (Khung Thoại) ${TAG}
 
-          Bản phát hành chính thức **Nixio (Khung Thoại) ${TAG}** — ứng dụng biên tập, xóa chữ (redraw), OCR, dịch thuật và dàn thoại truyện tranh/manga với lõi xử lý ảnh **C#/.NET 10** tự chứa, hỗ trợ **Windows 10/11**, **Ubuntu / Debian-based Linux** và **Fedora Linux**.
+          Bản phát hành chính thức **Nixio (Khung Thoại) ${TAG}** — ứng dụng biên tập, xóa chữ (redraw), OCR, dịch thuật và dàn thoại truyện tranh/manga với lõi xử lý ảnh **C#/.NET 10** tự chứa, hỗ trợ **Windows 10/11**, **macOS 12+ (Apple Silicon & Intel)**, **Ubuntu / Debian-based Linux** và **Fedora Linux**.
 
           ## Tải về theo hệ điều hành
 
@@ -142,6 +205,9 @@ jobs:
           |---|---|---|
           | **Windows 10 / 11 (x64)** | \`Khung-Thoai-${VER}-win-x64-setup.exe\` | Chạy trình cài đặt (không cần quyền Admin, tự liên kết tệp \`.khungthoai\`) |
           | **Windows 10 / 11 (Portable)** | \`Khung-Thoai-${VER}-win-x64-portable.zip\` | Giải nén và chạy \`Khung-Thoai.exe\` |
+          | **macOS (Apple Silicon, arm64)** | \`Khung-Thoai-${VER}-mac-arm64.dmg\` | Mở tệp \`.dmg\` và kéo **Khung Thoại** vào \`Applications\` |
+          | **macOS (Intel, x64)** | \`Khung-Thoai-${VER}-mac-x64.dmg\` | Mở tệp \`.dmg\` và kéo **Khung Thoại** vào \`Applications\` |
+          | **macOS (Portable)** | \`Khung-Thoai-${VER}-mac-arm64.zip\` / \`Khung-Thoai-${VER}-mac-x64.zip\` | Giải nén và mở \`Khung-Thoai.app\` |
           | **Ubuntu / Debian / Mint / Pop!_OS (x64)** | \`khung-thoai_${VER}_amd64.deb\` | \`sudo apt install ./khung-thoai_${VER}_amd64.deb\` |
           | **Fedora Linux (x64)** | \`khung-thoai-${VER}-1.x86_64.rpm\` | \`sudo dnf install ./khung-thoai-${VER}-1.x86_64.rpm\` |
           | **Linux khác (Portable x64)** | \`khung-thoai-${VER}-linux-x64.tar.gz\` | Giải nén và chạy \`./Khung-Thoai\` |
@@ -164,6 +230,7 @@ jobs:
             - **C# Auto Content-Aware Cleanup (\`content_aware_cleanup\`)**: Chọn trực tiếp chế độ lấp nền thông minh PatchMatch C# ngay trên từng khung thoại.
             - **Xem trước Xử lý Raw 60fps**: Hộp thoại kéo ngưỡng làm sạch raw trực quan theo thời gian thực trước khi áp dụng cho trang hoặc cả chương.
           - **Hạ tầng CI/CD Node 24**: Nâng cấp toàn bộ GitHub Actions lên các bản major hỗ trợ Node 24 (\`checkout@v7\`, \`setup-node@v7\`, \`setup-dotnet@v6\`, \`upload-artifact@v7\`, \`download-artifact@v8\`).
+          - **Bản macOS chính thức (.app/.dmg)**: Ma trận \`macos-15\` (arm64) và \`macos-15-intel\` (x64) đóng gói \`.app\` + \`.dmg\` + \`.zip\`, ký Hardened Runtime bằng \`CODESIGN_IDENTITY\` và notarise bằng \`xcrun notarytool\` khi có \`APPLE_ID\`, \`APPLE_APP_SPECIFIC_PASSWORD\`, \`APPLE_TEAM_ID\`.
 
           Kiểm tra toàn vẹn tệp bằng \`SHA256SUMS.txt\`.
           EOF
