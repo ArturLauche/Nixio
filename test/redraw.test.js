@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { redrawLayout } from "../src/redraw.js"
 
-function installCanvasMocks(redrawTexture) {
+function installCanvasMocks(redrawTexture, { native, paperSpeckles = false } = {}) {
   const originalDocument = globalThis.document
   const originalImageData = globalThis.ImageData
   const originalDesktop = globalThis.khungThoaiDesktop
@@ -23,14 +23,31 @@ function installCanvasMocks(redrawTexture) {
         getContext() {
           return {
             drawImage() {},
-            getImageData: (_x, _y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(240) }),
+            getImageData: (_x, _y, w, h) => {
+              const data = new Uint8ClampedArray(w * h * 4)
+              for (let index = 0; index < data.length; index += 4) {
+                data[index] = data[index + 1] = data[index + 2] = 240
+                data[index + 3] = 255
+              }
+              if (paperSpeckles) {
+                const center = Math.floor(w / 2)
+                for (let y = center - 8; y <= center + 8; y++) {
+                  for (let x = center - 8; x <= center + 8; x++) {
+                    const offset = (y * w + x) * 4
+                    data[offset] = data[offset + 1] = data[offset + 2] = 40
+                  }
+                }
+              }
+              return { data }
+            },
+            createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
             putImageData() {},
           }
         },
       }
     },
   }
-  globalThis.khungThoaiDesktop = { redrawTexture }
+  globalThis.khungThoaiDesktop = { redrawTexture, native }
 
   return () => {
     globalThis.document = originalDocument
@@ -113,4 +130,102 @@ test("moving text keeps a separately selected cleanup region and its cached nati
   page.boxes[0].y = .7
   assert.equal(redrawLayout(page), first)
   assert.equal(samples.length, 1)
+})
+
+const cleanupPage = (image, cleanupMode = "content-aware") => ({
+  image,
+  boxes: [{ x: .1, y: .1, w: .2, h: .2, cleanup: true, cleanupMode }],
+})
+const freshImage = () => ({ naturalWidth: 200, naturalHeight: 200 })
+// Patch payload size follows the sampled inner box, like the real worker contract.
+const patchBytes = (inner) =>
+  new Uint8Array((inner.right - inner.left) * (inner.bottom - inner.top) * 4).fill(200)
+
+test("content-aware cleanup retries through redrawTexture when the native worker rejects", async (t) => {
+  const operations = []
+  const restore = installCanvasMocks(async ({ inner }) => {
+    const size = (inner.right - inner.left) * (inner.bottom - inner.top) * 4
+    return new Uint8Array(size).fill(255)
+  }, {
+    native: async (operation) => {
+      operations.push(operation)
+      throw new Error("Native worker crashed.")
+    },
+  })
+  t.after(restore)
+
+  const layout = redrawLayout(cleanupPage(freshImage()))
+  await layout.pending
+  assert.deepEqual(operations, ["content_aware_cleanup"])
+  assert.equal(layout.patches.length, 1)
+})
+
+test("content-aware cleanup falls back on null or malformed native responses", async (t) => {
+  const responses = [
+    () => null,
+    () => ({}),
+    () => ({ result: { filled: 3 }, data: null }),
+    () => ({ result: { filled: 3 }, data: new Uint8Array(4) }),
+    (inner) => ({
+      result: { filled: 3 },
+      data: new Uint8Array((inner.right - inner.left) * (inner.bottom - inner.top) * 4 + 4),
+    }),
+  ]
+  for (const [index, respond] of responses.entries()) {
+    const restore = installCanvasMocks(async ({ inner }) => patchBytes(inner), {
+      native: async (_operation, options) => respond(options.inner),
+    })
+    const layout = redrawLayout(cleanupPage(freshImage()))
+    await layout.pending
+    restore()
+    assert.equal(layout.patches.length, 1, `response ${index} should fall back to redrawTexture`)
+  }
+})
+
+test("content-aware cleanup keeps a valid native patch without fallback", async (t) => {
+  let redrawCalls = 0
+  const restore = installCanvasMocks(async ({ inner }) => { redrawCalls++; return patchBytes(inner) }, {
+    native: async (_operation, options) => ({ result: { filled: 12 }, data: patchBytes(options.inner) }),
+  })
+  t.after(restore)
+
+  const layout = redrawLayout(cleanupPage(freshImage()))
+  await layout.pending
+  assert.equal(layout.patches.length, 1)
+  assert.equal(redrawCalls, 0)
+})
+
+test("content-aware filled:0 stays an intentional no-op without touching fallbacks", async (t) => {
+  let redrawCalls = 0
+  const restore = installCanvasMocks(async ({ inner }) => { redrawCalls++; return patchBytes(inner) }, {
+    native: async () => ({ result: { filled: 0 }, data: new Uint8Array(0) }),
+  })
+  t.after(restore)
+
+  const layout = redrawLayout(cleanupPage(freshImage()))
+  await layout.pending
+  assert.equal(layout.patches.length, 0)
+  assert.equal(redrawCalls, 0)
+})
+
+test("redrawTexture null, undefined, rejection and bad bytes all reach the canvas paper fallback", async (t) => {
+  const replies = [null, undefined, new Uint8Array(4), Promise.reject(new Error("worker timeout"))]
+  for (const [index, reply] of replies.entries()) {
+    const restore = installCanvasMocks(async () => reply, { paperSpeckles: true })
+    const layout = redrawLayout(cleanupPage(freshImage(), "auto"))
+    await layout.pending
+    restore()
+    assert.equal(layout.patches.length, 1, `reply ${index} should produce a canvas fallback patch`)
+  }
+})
+
+test("preview and export layouts share the same canvas fallback when workers are unavailable", async (t) => {
+  const restore = installCanvasMocks(undefined, { paperSpeckles: true })
+  t.after(restore)
+
+  const preview = redrawLayout(cleanupPage(freshImage(), "auto"))
+  const exported = redrawLayout(cleanupPage(freshImage(), "auto"), { cancellable: false })
+  await Promise.all([preview.pending, exported.pending])
+  assert.equal(preview.patches.length, 1)
+  assert.equal(exported.patches.length, 1)
 })
