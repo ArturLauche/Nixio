@@ -363,3 +363,15 @@ test("main.js routes both raw cleanup notifications through the guarded undo", a
   assert.match(main, /byId\("redo"\)\.onclick = \(\) => restoreHistory\("redo"\)/)
   assert.match(main, /restoreHistory\(key === "y" \|\| event\.shiftKey \? "redo" : "undo"\)/)
 })
+
+
+test("undo and redo preserve history when the current snapshot cannot be copied", () => {
+  const history = new EditHistory()
+  const token = history.record({ pages: [], index: 0 })
+  const uncloneable = { pages: [], callback() {} }
+  assert.throws(() => history.undo(uncloneable), { name: "DataCloneError" })
+  assert.equal(checkUndoToken(history, token).ok, true)
+  assert.equal(history.undo({ pages: [], index: 1 }).index, 0)
+  assert.throws(() => history.redo(uncloneable), { name: "DataCloneError" })
+  assert.equal(history.redo({ pages: [], index: 0 }).index, 1)
+})

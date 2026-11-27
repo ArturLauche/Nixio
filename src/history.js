@@ -65,16 +65,18 @@ export class EditHistory {
 
   undo(editor) {
     if (!this.past.length) return null
-    const entry = this.past.pop()
-    this.future.push(this.makeEntry(editor, { label: entry.label, kind: entry.kind }, entry.id))
+    const entry = this.past.at(-1)
+    this.future.push(this.makeEntry(editor, entry, entry.id))
+    this.past.pop()
     this.revision++
     return entry.snapshot
   }
 
   redo(editor) {
     if (!this.future.length) return null
-    const entry = this.future.pop()
-    this.past.push(this.makeEntry(editor, { label: entry.label, kind: entry.kind }, entry.id))
+    const entry = this.future.at(-1)
+    this.past.push(this.makeEntry(editor, entry, entry.id))
+    this.future.pop()
     this.revision++
     return entry.snapshot
   }
