@@ -25,7 +25,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         shell: bash
         run: |
@@ -48,12 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - name: Install Linux OCR, desktop, and packaging tools
@@ -68,7 +68,7 @@ jobs:
         run: xvfb-run -a npm run test:desktop -- --packaged
       - name: Build .deb (Debian/Ubuntu), .rpm (Fedora), and .tar.gz
         run: node scripts/package-release.mjs linux-x64 "${{ needs.meta.outputs.version }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-linux-x64
           path: release-dist/*
@@ -80,12 +80,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - name: Install Windows OCR and Inno Setup
@@ -104,7 +104,7 @@ jobs:
         run: npm run test:desktop -- --packaged
       - name: Build Windows Setup (.exe) and Portable (.zip)
         run: node scripts/package-release.mjs win-x64 "${{ needs.meta.outputs.version }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-win-x64
           path: release-dist/*
@@ -115,8 +115,8 @@ jobs:
     needs: [meta, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
