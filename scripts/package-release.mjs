@@ -251,6 +251,32 @@ export function buildInnoSetupScript({ version, sourceDir, outputDir, outputBase
   ].join("\r\n")
 }
 
+// electron-updater reads latest.yml from the GitHub release to check, download
+// and sha512-verify the Windows installer it runs.
+export function buildLatestYaml({ version, file, size, sha512, releaseDate = new Date().toISOString() }) {
+  return [
+    `version: ${normalizeVersion(version)}`,
+    "files:",
+    `  - url: ${file}`,
+    `    sha512: ${sha512}`,
+    `    size: ${Number(size) || 0}`,
+    `path: ${file}`,
+    `sha512: ${sha512}`,
+    `releaseDate: '${releaseDate}'`,
+    "",
+  ].join("\n")
+}
+
+export async function sha512Base64(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha512")
+    const stream = createReadStream(filePath)
+    stream.on("data", (chunk) => hash.update(chunk))
+    stream.on("error", reject)
+    stream.on("end", () => resolve(hash.digest("base64")))
+  })
+}
+
 export async function sha256File(filePath) {
   return new Promise((resolve, reject) => {
     const hash = createHash("sha256")
@@ -361,7 +387,7 @@ function findInnoSetupCompiler() {
   return null
 }
 
-function packageWindows({ version, arch, sourceDir, outDir }) {
+async function packageWindows({ version, arch, sourceDir, outDir }) {
   const outputs = []
 
   // 1. Portable ZIP (Windows 10/11)
@@ -398,6 +424,16 @@ function packageWindows({ version, arch, sourceDir, outDir }) {
   if (!existsSync(exeFile)) throw new Error(`Expected installer missing: ${exeFile}`)
   outputs.push(exeFile)
   rmSync(stageRoot, { recursive: true, force: true })
+
+  // 3. latest.yml so electron-updater can find, download and verify that installer.
+  const latestPath = path.join(outDir, "latest.yml")
+  writeFileSync(latestPath, buildLatestYaml({
+    version,
+    file: path.basename(exeFile),
+    size: statSync(exeFile).size,
+    sha512: await sha512Base64(exeFile),
+  }), "utf8")
+  outputs.push(latestPath)
   return outputs
 }
 
@@ -418,7 +454,7 @@ async function main() {
 
   const artifacts = family === "linux"
     ? packageLinux({ version, arch, sourceDir, outDir })
-    : packageWindows({ version, arch, sourceDir, outDir })
+    : await packageWindows({ version, arch, sourceDir, outDir })
 
   for (const file of artifacts) {
     const sizeMb = (statSync(file).size / (1024 * 1024)).toFixed(1)

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "ag-psd": "^34.2.3",
+    "electron-updater": "^6.8.11",
     "jszip": "^3.10.2"
   },
   "devDependencies": {

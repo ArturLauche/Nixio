@@ -1646,6 +1646,64 @@ function notifyOverflowIfAny(page, sourceLabel = "") {
 
 const updateDialog = byId("update-dialog")
 let activeUpdateResult = null
+let autoUpdateSupported = false
+let autoUpdateState = null
+
+function updateStatusText(state) {
+  switch (state?.status) {
+    case "checking": return "Đang đọc thông tin bản phát hành…"
+    case "downloading": return `Đang tải v${state.version || ""}… ${Math.round(Number(state.percent) || 0)}% · ${formatBytes(state.transferred)} / ${formatBytes(state.total)}`
+    case "downloaded": return `Đã tải và xác minh v${state.version || ""}. Bấm “Khởi động lại & cài đặt” để hoàn tất.`
+    case "installing": return "Đang cài đặt, ứng dụng sẽ khởi động lại…"
+    case "error": return state.error || "Cập nhật thất bại."
+    case "none": return "Kênh phát hành không có bản mới hơn."
+    default: return ""
+  }
+}
+
+function renderUpdateState(state) {
+  const progress = byId("update-progress")
+  if (!progress) return
+  const status = state?.status || "idle"
+  const percent = Math.max(0, Math.min(100, Number(state?.percent) || 0))
+  const showProgress = ["checking", "downloading", "downloaded", "installing", "error", "none"].includes(status)
+  progress.hidden = !showProgress
+  const fill = byId("update-progress-fill")
+  if (fill) fill.style.width = `${status === "checking" ? 4 : percent}%`
+  const label = byId("update-progress-label")
+  if (label) label.textContent = updateStatusText(state)
+  const download = byId("update-download")
+  if (download) {
+    download.hidden = status === "downloaded" || status === "installing"
+    download.disabled = status === "checking" || status === "downloading"
+  }
+  const install = byId("update-install")
+  if (install) {
+    install.hidden = status !== "downloaded"
+    install.disabled = status === "installing"
+  }
+}
+
+function syncUpdateActions() {
+  const row = byId("update-install-row")
+  if (!row) return
+  const available = autoUpdateSupported && Boolean(activeUpdateResult?.hasUpdate)
+  row.hidden = !available
+  if (!available) return
+  renderUpdateState(autoUpdateState)
+}
+
+Promise.resolve(window.khungThoaiDesktop?.updateCapabilities?.())
+  .then((caps) => {
+    autoUpdateSupported = Boolean(caps?.supported)
+    syncUpdateActions()
+  })
+  .catch(() => {})
+window.khungThoaiDesktop?.onUpdateState?.((state) => {
+  autoUpdateState = state
+  renderUpdateState(state)
+})
+
 function showUpdateDialog(result) {
   if (!updateDialog || !result) return
   activeUpdateResult = result
@@ -1687,12 +1745,28 @@ function showUpdateDialog(result) {
     )
   }
   byId("update-dismiss-version").hidden = !result.hasUpdate
+  syncUpdateActions()
   updateDialog.showModal()
 }
 
 byId("update-open-release").onclick = () => {
   const url = activeUpdateResult?.release?.url || RELEASES_PAGE_URL
   openExternalUrl(url).catch(() => {})
+}
+byId("update-download").onclick = async () => {
+  try {
+    const state = await window.khungThoaiDesktop.downloadUpdate()
+    if (state?.status === "error") status(state.error || "Không tải được bản cập nhật.", true)
+  } catch (error) {
+    status(error?.message || "Không tải được bản cập nhật.", true)
+  }
+}
+byId("update-install").onclick = async () => {
+  try {
+    await window.khungThoaiDesktop.installUpdate()
+  } catch (error) {
+    status(error?.message || "Không chạy được bộ cài đặt.", true)
+  }
 }
 byId("update-dismiss-version").onclick = () => {
   if (activeUpdateResult?.latestVersion) {

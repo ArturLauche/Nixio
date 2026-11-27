@@ -681,8 +681,16 @@
     <p id="update-version-row" class="update-version-row muted"></p>
     <pre id="update-notes" class="update-notes"></pre>
     <div id="update-assets" class="update-assets" hidden></div>
+    <div id="update-install-row" class="update-install-row" hidden>
+      <button type="button" id="update-download" class="button primary">Tải &amp; cài trong app</button>
+      <button type="button" id="update-install" class="button primary" hidden>Khởi động lại &amp; cài đặt</button>
+      <div id="update-progress" class="update-progress" hidden>
+        <div class="update-progress-track"><span id="update-progress-fill"></span></div>
+        <p id="update-progress-label" class="muted" role="status"></p>
+      </div>
+    </div>
     <div class="form-actions">
-      <button type="button" id="update-open-release" class="button primary">Mở trang phát hành</button>
+      <button type="button" id="update-open-release" class="button">Mở trang phát hành</button>
       <button type="button" id="update-dismiss-version" class="button">Bỏ qua bản này</button>
       <button type="button" id="update-close" class="button">Đóng</button>
     </div>

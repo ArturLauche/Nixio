@@ -1049,6 +1049,33 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .update-version-row { font-size: .8rem; margin-bottom: 6px; }
 .update-assets { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 10px; }
 .update-assets .button { justify-content: space-between; font-size: .76rem; }
+.update-install-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.update-progress { flex: 1 1 100%; }
+.update-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.update-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width .2s ease;
+}
+.update-progress p { margin: 5px 0 0; font-size: .74rem; }
 
 /* Responsive Breakpoints */
 @media (max-width: 1020px) {

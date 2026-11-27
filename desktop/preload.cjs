@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld("khungThoaiDesktop", {
   fetchUrl: (url, options) => invoke("fetch-url", url, options),
   appInfo: () => invoke("app-info"),
   checkUpdate: () => invoke("check-update"),
+  updateCapabilities: () => invoke("update-capabilities"),
+  downloadUpdate: () => invoke("update-download"),
+  installUpdate: () => invoke("update-install"),
+  onUpdateState: (callback) => ipcRenderer.on("khung-thoai:update-state", (_event, state) => callback(state)),
   notifyDesktop: (payload) => invoke("notify", payload),
   openExternal: (url) => invoke("open-external", url),
 })

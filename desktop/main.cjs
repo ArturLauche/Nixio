@@ -6,6 +6,7 @@ const { TaskQueue } = require("./task-queue.cjs")
 const { ProjectFiles } = require("./project-files.cjs")
 const { webSearch, fetchUrl, isSafePublicHttpsUrl } = require("./web-search.cjs")
 const { checkForUpdates } = require("./updater.cjs")
+const { createAutoUpdater, loadUpdaterLib } = require("./auto-update.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -39,6 +40,7 @@ let tasks
 let projects
 let mainWindow
 let closeApproved = false
+let autoUpdate
 
 function localFile(url) {
   const { hostname, pathname } = new URL(url)
@@ -86,6 +88,15 @@ function createWindow() {
 app.whenReady().then(() => {
   // Windows only shows notifications for apps with an explicit AppUserModelID.
   if (process.platform === "win32") app.setAppUserModelId("com.khungthoai.editor")
+  autoUpdate = createAutoUpdater({
+    lib: loadUpdaterLib(),
+    app,
+    log: (message) => console.log("[update]", message),
+    beforeQuit: () => { closeApproved = true },
+    send: (state) => {
+      if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("khung-thoai:update-state", state)
+    },
+  })
   worker = new NativeWorker(workerExecutable())
   imageWorker = new NativeWorker(workerExecutable())
   tasks = new TaskQueue(() => new NativeWorker(workerExecutable(), { isolated: true }), (update) => {
@@ -128,6 +139,13 @@ app.whenReady().then(() => {
     isPackaged: app.isPackaged,
   }))
   handle("khung-thoai:check-update", () => checkForUpdates(app.getVersion()))
+  handle("khung-thoai:update-capabilities", () => ({
+    supported: Boolean(autoUpdate?.supported),
+    platform: process.platform,
+    version: app.getVersion(),
+  }))
+  handle("khung-thoai:update-download", () => autoUpdate.download())
+  handle("khung-thoai:update-install", () => autoUpdate.install())
   handle("khung-thoai:notify", (payload) => {
     if (!Notification.isSupported()) return false
     const title = String(payload?.title || "Khung Thoại").trim().slice(0, 120)
@@ -175,7 +193,7 @@ app.whenReady().then(() => {
   app.on("activate", () => { if (!mainWindow) createWindow() })
 })
 
-app.on("will-quit", () => { tasks?.close(); imageWorker?.close(); worker?.close() })
+app.on("will-quit", () => { autoUpdate?.dispose(); tasks?.close(); imageWorker?.close(); worker?.close() })
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })
