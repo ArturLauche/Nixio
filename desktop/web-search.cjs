@@ -65,16 +65,6 @@ function normalizeIp(host) {
   }
 }
 
-function ipv6Hextets(normalized) {
-  const [head, tail = ""] = normalized.split("::")
-  const left = head ? head.split(":") : []
-  const right = tail ? tail.split(":") : []
-  const zeros = normalized.includes("::") ? 8 - left.length - right.length : 0
-  const groups = [...left, ...Array(Math.max(0, zeros)).fill("0"), ...right]
-  if (groups.length !== 8) return null
-  return groups.map((group) => parseInt(group, 16))
-}
-
 function isPrivateIp(host) {
   const { version, clean } = normalizeIp(host)
   if (version === 4) {
@@ -96,21 +86,14 @@ function isPrivateIp(host) {
   }
   if (version === 6) {
     if (!clean) return true
-    const hextets = ipv6Hextets(clean)
-    if (!hextets) return true
-    const [first, second] = hextets
-    // Global unicast only lives in 2000::/3. ::/16 covers unspecified, loopback and the
-    // IPv4-mapped / IPv4-compatible forms.
-    if (first === 0) return true
-    if ((first & 0xfe00) === 0xfc00) return true // fc00::/7 unique-local
-    if (first >= 0xfe00) return true // fe00::/9 reserved, fe80::/10 link-local, ff00::/8 multicast
-    if (first === 0x2001 && second === 0x0db8) return true // 2001:db8::/32 documentation
-    // IPv6 transition networks embed an arbitrary IPv4 destination, so the whole class is
-    // denied instead of decoded: 6to4 (2002::/16), Teredo (2001::/32) and NAT64
-    // (64:ff9b::/32, covering the well-known and local-use prefixes).
-    if (first === 0x2002) return true
-    if (first === 0x2001 && second === 0x0000) return true
-    if (first === 0x0064 && second === 0xff9b) return true
+    const [first, second] = clean.split(":", 2).map((group) => parseInt(group || "0", 16))
+    // IANA's global unicast assignments are in 2000::/3. This also excludes ULA,
+    // scoped addresses, translation prefixes, and IPv4-mapped addresses.
+    if ((first & 0xe000) !== 0x2000) return true
+    if (first === 0x2001 && second === 0x0db8) return true // documentation
+    if (first === 0x3fff && (second & 0xf000) === 0) return true // documentation
+    if (first === 0x2002) return true // 6to4
+    if (first === 0x2001 && second === 0) return true // Teredo
     return false
   }
   return false

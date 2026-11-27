@@ -9,7 +9,7 @@ const MAX_PAYLOAD_BYTES = 512 * 1024
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 // The updater only ever needs the release API host. A redirect or an injected apiUrl that
 // leaves this set is refused instead of followed.
-const TRUSTED_RELEASE_HOSTS = new Set(["api.github.com"])
+const TRUSTED_RELEASE_ORIGIN = new URL(RELEASES_API_URL).origin
 
 function parseSemver(raw) {
   const cleaned = String(raw || "").trim().replace(/^v/i, "")
@@ -56,12 +56,8 @@ function safeGitHubUrl(rawUrl, fallback = RELEASES_PAGE_URL) {
   // isSafePublicHttpsUrl returns an href string, so the host has to be re-read from a URL.
   const safeHref = isSafePublicHttpsUrl(rawUrl)
   if (!safeHref) return fallback
-  let host
-  try {
-    host = new URL(safeHref).hostname.toLowerCase()
-  } catch {
-    return fallback
-  }
+  const { hostname: host, port, username, password } = new URL(safeHref)
+  if (port || username || password) return fallback
   if (host === "github.com" || host.endsWith(".github.com") || host.endsWith(".githubusercontent.com")) {
     return safeHref
   }
@@ -71,67 +67,30 @@ function safeGitHubUrl(rawUrl, fallback = RELEASES_PAGE_URL) {
 function trustedReleaseUrl(rawUrl) {
   const safeHref = isSafePublicHttpsUrl(rawUrl)
   if (!safeHref) return null
-  try {
-    return TRUSTED_RELEASE_HOSTS.has(new URL(safeHref).hostname.toLowerCase()) ? safeHref : null
-  } catch {
-    return null
-  }
+  const url = new URL(safeHref)
+  return url.origin === TRUSTED_RELEASE_ORIGIN && !url.username && !url.password ? url : null
 }
 
-/**
- * Single-hop adapter for an explicitly injected fetch. Redirects are requested manually so
- * the caller's loop — not the fetch implementation — decides whether a hop is allowed.
- */
-function requestFromFetch(fetchImpl) {
-  return async (url, { headers, signal }) => {
-    const response = await fetchImpl(url, {
-      method: "GET",
-      headers,
-      redirect: "manual",
-      signal,
-    })
-    let location = null
-    try {
-      const rawLocation = response.headers?.get?.("location")
-      if (rawLocation) location = new URL(rawLocation, url).href
-    } catch {
-      location = null
-    }
-    const ok = response.status >= 200 && response.status < 300
-    const text = ok && typeof response.text === "function" ? await response.text() : ""
-    return { status: Number(response.status) || 0, location, text }
-  }
-}
-
-/**
- * Fetch the release payload hop by hop. Each hop is checked against the same HTTPS +
- * trusted-host policy and its DNS answer is pinned again, so a redirect cannot move the
- * request to an internal or off-policy destination. Headers and the per-hop timeout stay
- * identical across hops, and the redirect count is bounded.
- */
-async function fetchReleasePayload(rawUrl, { version, timeoutMs, request, lookup }) {
+async function fetchReleasePayload(rawUrl, { version, request, lookup, signal }) {
   let current = trustedReleaseUrl(rawUrl)
   if (!current) throw new Error("URL kiểm tra cập nhật không hợp lệ.")
-  let redirects = 0
-  for (;;) {
-    const address = await resolvePublicAddress(new URL(current).hostname, { lookup })
-    const response = await request(current, {
-      address,
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": `KhungThoai/${version}`,
-      },
-      maxBytes: MAX_PAYLOAD_BYTES,
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (REDIRECT_STATUSES.has(response.status) || response.location) {
-      const next = response.location ? trustedReleaseUrl(response.location) : null
-      if (!next) throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
-      if (++redirects > MAX_REDIRECTS) throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
-      current = next
-      continue
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": `KhungThoai/${version}` }
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    signal.throwIfAborted()
+    const address = await resolvePublicAddress(current.hostname, { lookup })
+    signal.throwIfAborted()
+    const response = await request(current.href, { address, headers, maxBytes: MAX_PAYLOAD_BYTES, signal })
+    signal.throwIfAborted()
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return { status: response.status, text: String(response.text ?? "") }
     }
-    return { status: response.status, text: String(response.text ?? "") }
+    if (hop === MAX_REDIRECTS) throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
+    try {
+      current = response.location && trustedReleaseUrl(new URL(response.location, current))
+    } catch {
+      current = null
+    }
+    if (!current) throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
   }
 }
 
@@ -174,22 +133,27 @@ function normalizeReleasePayload(payload, currentVersion) {
 }
 
 async function checkForUpdates(currentVersion, {
-  fetchImpl,
-  request,
+  request = requestOnce,
   lookup,
   apiUrl = RELEASES_API_URL,
   timeoutMs = TIMEOUT_MS,
 } = {}) {
   const checkedAt = new Date().toISOString()
   const version = String(currentVersion || "1.0.0")
-  const send = request ?? (fetchImpl ? requestFromFetch(fetchImpl) : requestOnce)
+  const controller = new AbortController()
+  let timer
   try {
-    const response = await fetchReleasePayload(apiUrl, {
-      version,
-      timeoutMs,
-      request: send,
-      lookup,
+    const expired = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new DOMException("Update request timed out.", "TimeoutError")
+        controller.abort(error)
+        reject(error)
+      }, timeoutMs)
     })
+    const response = await Promise.race([
+      expired,
+      fetchReleasePayload(apiUrl, { version, request, lookup, signal: controller.signal }),
+    ])
     if (response.status === 404) {
       return {
         ok: true,
@@ -234,6 +198,8 @@ async function checkForUpdates(currentVersion, {
         : (error?.message || "Không thể kết nối máy chủ cập nhật."),
       checkedAt,
     }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

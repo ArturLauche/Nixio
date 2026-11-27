@@ -129,6 +129,8 @@ test("desktop egress policy denies IPv6 transition networks for literals and DNS
     "https://[2001:0:0:0:0:0:0:1]/",
     "https://[64:ff9b:1::1]/",
     "https://[fe00::1]/",
+    "https://[3fff::1]/",
+    "https://[100::1]/",
   ]) {
     assert.equal(guard(url), null, url)
   }

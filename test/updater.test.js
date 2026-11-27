@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events"
+import https from "node:https"
 import test from "node:test"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
@@ -140,7 +142,7 @@ test("checkAppUpdate respects cooldown, dismissed version, force override, and o
 
 test("desktop checkForUpdates handles 404 (no public releases yet) cleanly", async () => {
   const res = await desktopUpdater.checkForUpdates("1.0.0", {
-    fetchImpl: async () => ({ ok: false, status: 404 }),
+    request: async () => ({ status: 404 }),
     lookup: async () => [{ address: "93.184.216.34", family: 4 }],
   })
   assert.equal(res.ok, true)
@@ -350,15 +352,86 @@ test("desktop checkForUpdates pins the release API and validates every redirect 
   assert.equal(timedOut.ok, false)
   assert.match(timedOut.error, /Hết thời gian/)
 
-  // An explicitly injected fetch stays a single hop: the loop owns redirect handling.
-  const seenFetch = []
-  const viaFetch = await desktopUpdater.checkForUpdates("1.3.0", {
-    fetchImpl: async (url, options) => {
-      seenFetch.push({ url, redirect: options.redirect })
-      return { status: 200, headers: { get: () => null }, text: async () => payload }
-    },
-    lookup: publicLookup,
+})
+
+test("desktop updater uses a single deadline across DNS and redirect hops", async () => {
+  let finishLookup
+  let sendCount = 0
+  const result = await desktopUpdater.checkForUpdates("1.0.0", {
+    timeoutMs: 10,
+    lookup: () => new Promise((resolve) => { finishLookup = resolve }),
+    request: async () => { sendCount++ },
   })
-  assert.equal(viaFetch.ok, true)
-  assert.deepEqual(seenFetch, [{ url: desktopUpdater.RELEASES_API_URL, redirect: "manual" }])
+  assert.equal(result.ok, false)
+  assert.match(result.error, /Hết thời gian/)
+  finishLookup([{ address: "93.184.216.34", family: 4 }])
+  await new Promise(setImmediate)
+  assert.equal(sendCount, 0)
+
+  const signals = []
+  const redirected = await desktopUpdater.checkForUpdates("1.0.0", {
+    timeoutMs: 1000,
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+    request: async (_url, { signal }) => {
+      signals.push(signal)
+      return signals.length === 1 ? { status: 302, location: "/next" } : { status: 404 }
+    },
+  })
+  assert.equal(redirected.ok, true)
+  assert.equal(signals.length, 2)
+  assert.equal(signals[0], signals[1])
+})
+
+test("desktop updater accepts only the release API origin with no credentials", async () => {
+  for (const apiUrl of [
+    "https://api.github.com:8443/releases/latest",
+    "https://fixture@api.github.com/releases/latest",
+  ]) {
+    const response = await desktopUpdater.checkForUpdates("1.0.0", {
+      apiUrl,
+      lookup: async () => assert.fail("origin validation must precede DNS"),
+      request: async () => assert.fail("origin validation must precede requests"),
+    })
+    assert.equal(response.ok, false)
+    assert.match(response.error, /URL kiểm tra cập nhật không hợp lệ/)
+  }
+})
+
+
+test("desktop updater uses the pinned HTTPS transport for the release API", async (t) => {
+  const host = "api.github.com"
+  const addresses = ["93.184.216.34", "93.184.216.35"]
+  const requests = []
+  let lookups = 0
+  t.mock.method(https, "request", (options, onResponse) => {
+    requests.push(options)
+    const req = new EventEmitter()
+    req.end = () => {
+      const res = new EventEmitter()
+      res.destroy = () => {}
+      res.statusCode = requests.length === 1 ? 302 : 200
+      res.headers = res.statusCode === 302 ? { location: "/next" } : {}
+      onResponse(res)
+      if (res.statusCode === 200) {
+        res.emit("data", Buffer.from(JSON.stringify({ tag_name: "v1.4.0" })))
+        res.emit("end")
+      }
+    }
+    return req
+  })
+  const result = await desktopUpdater.checkForUpdates("1.3.0", {
+    lookup: async (name) => {
+      assert.equal(name, host)
+      return [{ address: addresses[lookups++], family: 4 }]
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.latestVersion, "1.4.0")
+  assert.equal(lookups, 2)
+  assert.deepEqual(requests.map(({ host }) => host), addresses)
+  for (const { port, servername, headers } of requests) {
+    assert.equal(port, 443)
+    assert.equal(servername, host)
+    assert.equal(headers.Host, host)
+  }
 })
