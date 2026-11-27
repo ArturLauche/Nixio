@@ -1,6 +1,7 @@
 import { runAgentTurn, summarizeHistoryWithLlm } from "../agent-harness.js"
 import { captureBoxSnapshot, compactChatHistory, computeBoxDiffs } from "../agent-context.js"
 import { parseSlashCommand } from "../agent-commands.js"
+import { createTurnRecorder } from "../agent-replay.js"
 import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkillPrefs } from "../agent-skills.js"
 import { createAgentTools } from "../agent-tools.js"
 import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
@@ -66,6 +67,7 @@ export function setupChat({
   notify,
   restoreHistory,
   usageLedger,
+  replay = null,
 }) {
   const panel = byId("chat-panel")
   const toggleBtn = byId("open-chat")
@@ -665,6 +667,7 @@ export function setupChat({
     chatHistory = saved.history
     renderPersistedSession()
     tools.setTodos?.(saved.todos)
+    replay?.refresh()
     statusEl.textContent = chatHistory.length ? `Đã khôi phục ${chatHistory.length} tin nhắn của dự án.` : ""
   }
 
@@ -847,6 +850,11 @@ export function setupChat({
       if (cmd.kind === "prompt") {
         return sendPrompt(cmd.prompt)
       }
+      if (cmd.kind === "replay") {
+        // Replay is read-only, so it never takes the busy lock or asks the provider anything.
+        replay?.open(cmd.id).then((result) => renderSystemNotice(result.message))
+        return true
+      }
       renderSystemNotice(`Lệnh không hợp lệ: /${cmd.name}. Gõ /help để xem danh sách lệnh.`)
       return true
     }
@@ -883,6 +891,14 @@ export function setupChat({
     let streamThoughtEl = null
     let streamThoughtPre = null
     let streamThought = ""
+    // One transcript per turn. It lives outside the try so a stopped or failed turn still lands in
+    // the replay panel with the steps that did run.
+    const recorder = createTurnRecorder()
+    const persistRecord = () => {
+      const record = recorder.snapshot()
+      if (record) replay?.save(record)
+      return record
+    }
 
     const clearStreamPreview = () => {
       streamBubble?.remove()
@@ -920,6 +936,7 @@ export function setupChat({
         stream: true,
         signal: activeController.signal,
         accounting,
+        recorder,
         onEvent(event) {
           if (event.type === "step") {
             clearStreamPreview()
@@ -1016,6 +1033,7 @@ export function setupChat({
       if (state.projectId) {
         saveProjectChatSession(state.projectId, { history: chatHistory, todos: result.todos })
       }
+      persistRecord()
       if (result.contextBudget) updateContextMeter(result.contextBudget)
       if (result.thought) {
         const thoughtDetails = document.createElement("details")
@@ -1074,6 +1092,12 @@ export function setupChat({
       errEl.textContent = stopped ? "Đã dừng lượt xử lý của AI." : "Lỗi: " + providerFailureText(error)
       turnEl.append(errEl)
       statusEl.textContent = stopped ? "Đã dừng." : "Gặp lỗi."
+      // The transcript keeps the steps that did run, and says why the turn ended early.
+      recorder.finish({
+        status: stopped ? "stopped" : "failed",
+        error: stopped ? "Người dùng đã dừng lượt này." : providerFailureText(error),
+      })
+      persistRecord()
       settled = { ok: false, cancelled: Boolean(stopped) }
     } finally {
       turnBeforeSnapshot = null

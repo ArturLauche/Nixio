@@ -653,6 +653,17 @@
         </div>
         <button type="button" id="usage-reset" class="button full">Đặt lại kế toán</button>
       </details>
+      <details class="chat-search-config" id="chat-replay">
+        <summary>Ghi &amp; phát lại lượt chạy</summary>
+        <p class="muted">Mỗi lượt được ghi có giới hạn: lời nhắc, quyết định của model, công cụ kèm tham số và kết quả, chi phí và thời gian. Khóa API, header và URL có mật khẩu được ẩn trước khi lưu. Phát lại chỉ đọc bản ghi — không gọi nhà cung cấp và không chạy lại công cụ.</p>
+        <p id="chat-replay-empty" class="muted">Chưa có bản ghi lượt nào.</p>
+        <ol id="chat-replay-list" class="chat-replay-list"></ol>
+        <div id="chat-replay-trace" class="chat-replay-trace" hidden></div>
+        <div class="form-actions">
+          <button type="button" id="chat-replay-export" class="button" disabled>Xuất JSON</button>
+          <button type="button" id="chat-replay-clear" class="button" disabled>Xóa bản ghi</button>
+        </div>
+      </details>
       <div class="chat-chips" role="group" aria-label="Gợi ý nhanh">
         <button type="button" class="button" data-chat-prompt="Đọc các khung thoại trên trang hiện tại, tra web các tên riêng hoặc thuật ngữ tiếng Nhật/nước ngoài cần xác minh rồi đề xuất bổ sung vào Bảng thuật ngữ.">Tra thuật ngữ</button>
         <button type="button" class="button" data-chat-prompt="/autofit">Khớp tràn khung</button>

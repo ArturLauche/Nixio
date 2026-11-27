@@ -8,6 +8,7 @@ export const SLASH_COMMANDS_HELP = [
   "- `/autofit` — Yêu cầu AI kiểm tra và khớp cỡ chữ cho trang đang mở.",
   "- `/compact [ai]` — Nén lịch sử chat (thêm `ai` để nhờ chính LLM viết tóm tắt thông minh).",
   `- \`/skill <id>\` — Đổi nhanh hồ sơ biên tập (${BUILTIN_SKILLS.map((s) => s.id).join(", ")}).`,
+  "- `/replay [id|latest]` — Phát lại một lượt đã ghi trong bảng “Ghi & phát lại”: xem lại đúng chuỗi công cụ, không gọi API và không chạy lại công cụ nào.",
   "- `/clear` — Bắt đầu phiên chat mới.",
 ].join("\n")
 
@@ -49,6 +50,10 @@ export function parseSlashCommand(input) {
   }
   if (name === "skill") {
     return { kind: "skill", skillId: arg.toLowerCase() }
+  }
+  if (name === "replay") {
+    const id = arg.trim()
+    return { kind: "replay", id: !id || id === "last" ? "latest" : id }
   }
   return { kind: "unknown", name }
 }

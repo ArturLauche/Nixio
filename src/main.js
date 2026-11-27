@@ -47,6 +47,7 @@ import { setupGestures } from "./controllers/gestures.js"
 import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
 import { setupUsage } from "./controllers/usage.js"
+import { setupReplay } from "./controllers/replay.js"
 import { announce } from "./live-region.js"
 import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
 import { createUsageLedger } from "./token-accounting.js"
@@ -1884,6 +1885,11 @@ const notify = (options) => notifications.notify(options)
 // is the project it is billed to.
 const usageLedger = createUsageLedger({ projectKey: () => state.projectId || "unsaved" })
 setupUsage({ byId, ledger: usageLedger, notify, pageId: () => state.pageId })
+// Turn transcripts belong to the project that was open when the turn ran, so the panel reads them the
+// same way the chat session is restored. A session with no file yet shares the "unsaved" bucket the
+// usage ledger already uses.
+const replay = setupReplay({ byId, projectId: () => state.projectId || "unsaved", notify })
+replay.refresh()
 
 function notifyOverflowIfAny(page, sourceLabel = "") {
   if (!page?.boxes?.length) return
@@ -2149,6 +2155,7 @@ chat = setupChat({
   renderFontOptions,
   restoreHistory,
   usageLedger,
+  replay,
 })
 
 restoreCustomFonts().then((restored) => {
