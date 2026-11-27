@@ -113,10 +113,12 @@ Nixio/
 │   ├── PoissonBlend.cs         # Multigrid SOR Poisson Seamless Blending & Seamless Clone Stamp (Parallel.For)
 │   ├── RawCleanup.cs, TextureRedraw.cs, GradientRedraw.cs, NativeImaging.cs, LocalOcr.cs, ProjectStorage.cs, NativeRpc.cs
 ├── docs/
-│   └── architecture.md         # Sơ đồ RPC KTR1, máy trạng thái tác vụ/phục hồi, bảng ranh giới tin cậy IPC, checklist thêm operation
+│   ├── architecture.md         # Sơ đồ RPC KTR1, máy trạng thái tác vụ/phục hồi, bảng ranh giới tin cậy IPC, checklist thêm operation
+│   └── release-reproducibility.md # Các đầu vào build đã pin, manifest digest & phần chưa tái lập
 ├── scripts/
 │   ├── desktop-build.mjs       # Build native C# + Vite + @electron/packager
-│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe
+│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe + manifest đầu vào tái lập
+│   ├── verify-release-repro.mjs # Build hai lần & đối chiếu digest artifact (reproducible build gate)
 │   ├── desktop-smoke.mjs       # Kiểm thử E2E Playwright cho bản Electron đóng gói
 │   ├── benchmark.mjs           # Đối chứng chất lượng redraw/OCR
 │   └── agent-eval.mjs          # Chấm output AI offline bằng fixture vàng (glossary, ID, tool, token)

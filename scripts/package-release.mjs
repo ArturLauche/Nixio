@@ -4,7 +4,9 @@ import {
   cpSync,
   createReadStream,
   existsSync,
+  lutimesSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -133,7 +135,7 @@ export function buildDebianPostrm() {
   ].join("\n")
 }
 
-export function buildRpmSpec({ version, sourceDir, iconPath, arch = "x86_64" }) {
+export function buildRpmSpec({ version, sourceDir, iconPath, arch = "x86_64", sourceDateEpoch }) {
   const { version: rpmVer, release: rpmRel } = rpmVersionParts(version)
   return [
     "%define _build_id_links none",
@@ -162,6 +164,9 @@ export function buildRpmSpec({ version, sourceDir, iconPath, arch = "x86_64" }) 
     `mkdir -p %{buildroot}/usr/share/icons/hicolor/scalable/apps`,
     `mkdir -p %{buildroot}/usr/share/mime/packages`,
     `cp -a "${sourceDir}/." "%{buildroot}/opt/${PACKAGE_ID}/"`,
+    ...(Number.isInteger(sourceDateEpoch)
+      ? [`find "%{buildroot}" -exec touch -h -d "@${sourceDateEpoch}" {} +`]
+      : []),
     `cat << 'EOF' > "%{buildroot}/usr/bin/${PACKAGE_ID}"`,
     buildLinuxLauncher().trimEnd(),
     "EOF",
@@ -261,6 +266,138 @@ export async function sha256File(filePath) {
   })
 }
 
+export function normalizeSourceDateEpoch(value) {
+  const epoch = typeof value === "string" && value.trim() !== "" ? Number(value) : value
+  if (!Number.isInteger(epoch) || epoch <= 0) {
+    throw new Error(`SOURCE_DATE_EPOCH must be a positive integer, got: ${value}`)
+  }
+  return epoch
+}
+
+function gitOutput(rootDir, args) {
+  const result = spawnSync("git", args, { cwd: rootDir, encoding: "utf8" })
+  return result.status === 0 ? result.stdout.trim() : null
+}
+
+export function gitCommitInfo(rootDir = root) {
+  const commit = gitOutput(rootDir, ["rev-parse", "HEAD"])
+  const commitTimeRaw = gitOutput(rootDir, ["log", "-1", "--format=%ct"])
+  const commitTime = commitTimeRaw ? normalizeSourceDateEpoch(commitTimeRaw) : null
+  return commit ? { commit, commitTime } : null
+}
+
+export function resolveSourceDateEpoch({ env = process.env, rootDir = root } = {}) {
+  const raw = env.SOURCE_DATE_EPOCH
+  if (raw !== undefined && raw !== "") return normalizeSourceDateEpoch(raw)
+  const info = gitCommitInfo(rootDir)
+  if (info?.commitTime) return info.commitTime
+  throw new Error(
+    "SOURCE_DATE_EPOCH is not set and the git HEAD commit time is unavailable; " +
+      "set SOURCE_DATE_EPOCH=<unix-seconds> so archive timestamps are reproducible.",
+  )
+}
+
+export function normalizeTreeTimestamps(dir, epochSeconds) {
+  const epoch = normalizeSourceDateEpoch(epochSeconds)
+  const time = new Date(epoch * 1000)
+  const visit = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory() && !entry.isSymbolicLink()) visit(full)
+      lutimesSync(full, time, time)
+    }
+  }
+  visit(dir)
+  lutimesSync(dir, time, time)
+}
+
+export function buildTarArgs({ archivePath, stageDir, folderName, epochSeconds }) {
+  return [
+    "-cf", archivePath,
+    "--sort=name",
+    "--dereference",
+    `--mtime=@${normalizeSourceDateEpoch(epochSeconds)}`,
+    "--owner=0", "--group=0", "--numeric-owner",
+    "-C", stageDir, folderName,
+  ]
+}
+
+const MANIFEST_INPUT_GLOBS = [
+  "package.json",
+  "package-lock.json",
+  "vite.config.js",
+  "index.html",
+  "desktop/assets/icon.svg",
+  ".github/workflows/release.yml",
+  "scripts/desktop-build.mjs",
+  "scripts/package-release.mjs",
+  "scripts/verify-release-repro.mjs",
+  "native/KhungThoai.Redraw.csproj",
+  "native/packages.lock.json",
+]
+
+function manifestInputPaths(rootDir = root) {
+  const paths = [...MANIFEST_INPUT_GLOBS]
+  const nativeDir = path.join(rootDir, "native")
+  if (existsSync(nativeDir)) {
+    for (const entry of readdirSync(nativeDir).sort()) {
+      if (entry.endsWith(".cs")) paths.push(path.join("native", entry))
+    }
+  }
+  return paths
+}
+
+function probeTool(executable, args) {
+  const result = spawnSync(executable, args, { encoding: "utf8" })
+  if (result.error || result.status !== 0) return { name: executable, version: null, available: false }
+  const version = (result.stdout || result.stderr || "").split(/\r?\n/).find((line) => line.trim())?.trim() ?? ""
+  return { name: executable, version: version || null, available: true }
+}
+
+export function releaseBuilders({ rootDir = root } = {}) {
+  return [
+    { name: "node", version: process.version, available: true },
+    probeTool("dotnet", ["--version"]),
+    probeTool("tar", ["--version"]),
+    probeTool("gzip", ["--version"]),
+    probeTool("dpkg-deb", ["--version"]),
+    probeTool("rpmbuild", ["--version"]),
+  ]
+}
+
+export async function buildInputManifest({ rootDir = root, version, env = process.env, sourceDateEpoch } = {}) {
+  const inputs = []
+  for (const rel of manifestInputPaths(rootDir)) {
+    const abs = path.join(rootDir, rel)
+    if (!existsSync(abs)) continue
+    inputs.push({ path: rel.split(path.sep).join("/"), sha256: await sha256File(abs), bytes: statSync(abs).size })
+  }
+  inputs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const git = gitCommitInfo(rootDir)
+  const epoch = sourceDateEpoch
+    ?? (env.SOURCE_DATE_EPOCH ? normalizeSourceDateEpoch(env.SOURCE_DATE_EPOCH) : git?.commitTime ?? null)
+  return {
+    format: "khung-thoai-release-manifest",
+    formatVersion: 1,
+    appVersion: version ?? normalizeVersion(),
+    sourceDateEpoch: epoch,
+    git,
+    builders: releaseBuilders({ rootDir }),
+    inputs,
+  }
+}
+
+export function diffArtifactSets(runA, runB) {
+  const byPathA = new Map(runA.map((item) => [item.path, item.sha256]))
+  const byPathB = new Map(runB.map((item) => [item.path, item.sha256]))
+  const missingInB = [...byPathA.keys()].filter((p) => !byPathB.has(p)).sort()
+  const missingInA = [...byPathB.keys()].filter((p) => !byPathA.has(p)).sort()
+  const mismatched = [...byPathA.keys()]
+    .filter((p) => byPathB.has(p) && byPathB.get(p) !== byPathA.get(p))
+    .sort()
+  return { missingInB, missingInA, mismatched, identical: !missingInB.length && !missingInA.length && !mismatched.length }
+}
+
 function run(executable, args, options = {}) {
   const result = spawnSync(executable, args, { cwd: root, stdio: "inherit", ...options })
   if (result.error) throw result.error
@@ -278,7 +415,7 @@ function directorySizeKb(dir) {
   return 0
 }
 
-function packageLinux({ version, arch, sourceDir, outDir }) {
+function packageLinux({ version, arch, sourceDir, outDir, sourceDateEpoch }) {
   const debArch = arch === "arm64" ? "arm64" : "amd64"
   const rpmArch = arch === "arm64" ? "aarch64" : "x86_64"
   const iconPath = path.join(root, "desktop", "assets", "icon.svg")
@@ -311,6 +448,7 @@ function packageLinux({ version, arch, sourceDir, outDir }) {
   writeFileSync(postrmPath, buildDebianPostrm(), "utf8")
   chmodSync(postinstPath, 0o755)
   chmodSync(postrmPath, 0o755)
+  normalizeTreeTimestamps(debRoot, sourceDateEpoch)
 
   const debFile = path.join(outDir, `${PACKAGE_ID}_${version}_${debArch}.deb`)
   run("dpkg-deb", ["--root-owner-group", "--build", debRoot, debFile])
@@ -322,7 +460,7 @@ function packageLinux({ version, arch, sourceDir, outDir }) {
     mkdirSync(path.join(rpmTop, sub), { recursive: true })
   }
   const specPath = path.join(rpmTop, "SPECS", `${PACKAGE_ID}.spec`)
-  writeFileSync(specPath, buildRpmSpec({ version, sourceDir, iconPath, arch: rpmArch }), "utf8")
+  writeFileSync(specPath, buildRpmSpec({ version, sourceDir, iconPath, arch: rpmArch, sourceDateEpoch }), "utf8")
   run("rpmbuild", ["-bb", "--define", `_topdir ${rpmTop}`, specPath])
 
   const { version: rpmVer, release: rpmRel } = rpmVersionParts(version)
@@ -337,7 +475,9 @@ function packageLinux({ version, arch, sourceDir, outDir }) {
   mkdirSync(tarStage, { recursive: true })
   symlinkSync(sourceDir, path.join(tarStage, tarFolderName))
   const tarFile = path.join(outDir, `${tarFolderName}.tar.gz`)
-  run("tar", ["-chzf", tarFile, "-C", tarStage, tarFolderName])
+  const tarPath = tarFile.slice(0, -".gz".length)
+  run("tar", buildTarArgs({ archivePath: tarPath, stageDir: tarStage, folderName: tarFolderName, epochSeconds: sourceDateEpoch }))
+  run("gzip", ["-n", "-f", tarPath])
 
   rmSync(stageRoot, { recursive: true, force: true })
   return [debFile, rpmFile, tarFile]
@@ -401,24 +541,34 @@ function packageWindows({ version, arch, sourceDir, outDir }) {
   return outputs
 }
 
-async function main() {
-  const [rid = `${process.platform === "win32" ? "win" : "linux"}-${process.arch}`, rawVersion] = process.argv.slice(2)
-  const version = normalizeVersion(rawVersion || process.env.RELEASE_VERSION || pkg.version)
-  const [family, arch] = rid.split("-")
+export async function packageRelease({ rid, version, outDir = path.join(root, "release-dist") } = {}) {
+  const resolvedVersion = normalizeVersion(version || process.env.RELEASE_VERSION || pkg.version)
+  const resolvedRid = rid || `${process.platform === "win32" ? "win" : "linux"}-${process.arch}`
+  const [family, arch] = resolvedRid.split("-")
   if (!["linux", "win"].includes(family) || !["x64", "arm64"].includes(arch)) {
     throw new Error("Usage: node scripts/package-release.mjs <linux-x64|win-x64> [version]")
   }
   const platformName = family === "win" ? "win32" : "linux"
   const sourceDir = path.join(root, "desktop-dist", `${APP_BINARY}-${platformName}-${arch}`)
   if (!existsSync(sourceDir)) {
-    throw new Error(`Packaged desktop app not found at ${sourceDir}. Run \`npm run desktop:package -- ${rid}\` first.`)
+    throw new Error(`Packaged desktop app not found at ${sourceDir}. Run \`npm run desktop:package -- ${resolvedRid}\` first.`)
   }
-  const outDir = path.join(root, "release-dist")
   mkdirSync(outDir, { recursive: true })
+  const sourceDateEpoch = resolveSourceDateEpoch()
+  if (!process.env.SOURCE_DATE_EPOCH) process.env.SOURCE_DATE_EPOCH = String(sourceDateEpoch)
 
   const artifacts = family === "linux"
-    ? packageLinux({ version, arch, sourceDir, outDir })
-    : packageWindows({ version, arch, sourceDir, outDir })
+    ? packageLinux({ version: resolvedVersion, arch, sourceDir, outDir, sourceDateEpoch })
+    : packageWindows({ version: resolvedVersion, arch, sourceDir, outDir })
+
+  const manifest = await buildInputManifest({ version: resolvedVersion, sourceDateEpoch })
+  writeFileSync(path.join(outDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8")
+  return { artifacts, manifest }
+}
+
+async function main() {
+  const [rid, rawVersion] = process.argv.slice(2)
+  const { artifacts } = await packageRelease({ rid, version: rawVersion })
 
   for (const file of artifacts) {
     const sizeMb = (statSync(file).size / (1024 * 1024)).toFixed(1)

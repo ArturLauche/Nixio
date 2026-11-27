@@ -110,9 +110,36 @@ jobs:
           path: release-dist/*
           if-no-files-found: error
 
+  verify-linux-repro:
+    name: Verify reproducible Linux build
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Install Linux packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm dpkg-dev
+      - run: npm ci
+      - name: Build the app and packages twice, then compare SHA-256 digests
+        run: node scripts/verify-release-repro.mjs linux-x64 "${{ needs.meta.outputs.version }}" --app
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-verify-linux-x64
+          path: release-verify/reproducibility-report.json
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
-    needs: [meta, build-linux, build-windows]
+    needs: [meta, build-linux, build-windows, verify-linux-repro]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
