@@ -262,8 +262,10 @@ export async function renderExportSlices(image, plan, { background = "#ffffff", 
   if (!profile?.format || !Array.isArray(plan?.slices) || !plan.slices.length) {
     throw new Error("Kế hoạch xuất theo hồ sơ không hợp lệ.")
   }
-  const width = Math.floor(Number(image?.naturalWidth))
-  const height = Math.floor(Number(image?.naturalHeight))
+  // The caller may hand over an HTMLImageElement (natural size) or an ImageBitmap (width and
+  // height only), because the exporter decodes the composed page with createImageBitmap.
+  const width = Math.floor(Number(image?.naturalWidth ?? image?.width))
+  const height = Math.floor(Number(image?.naturalHeight ?? image?.height))
   if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
     throw new Error("Trang không có ảnh hợp lệ để xuất theo hồ sơ.")
   }

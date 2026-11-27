@@ -316,6 +316,17 @@ test("renderExportSlices refuses a plan that does not match the image", async (t
   assert.equal(canvases.length, 0)
 })
 
+test("renderExportSlices reads the size of a decoded bitmap, not only an image element", async (t) => {
+  const { canvases } = installCanvasHarness(t)
+  const kakao = resolveExportProfile("kakaopage")
+  // createImageBitmap hands back an ImageBitmap: width and height, no naturalWidth.
+  const bitmap = { width: 720, height: 2400 }
+  const plan = planExportSlices(kakao, { width: 720, height: 2400, pageName: "trang.png" })
+  const files = await renderExportSlices(bitmap, plan)
+  assert.equal(files.length, plan.slices.length)
+  assert.equal(canvases.length, plan.slices.length)
+})
+
 test("exporting through a profile mutates neither the page image nor the shipped presets", async (t) => {
   installCanvasHarness(t)
   const presets = JSON.stringify(exportProfilePresets)

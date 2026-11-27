@@ -82,13 +82,13 @@ try {
   await page.locator("#zip-dialog button[value=export]").click()
   if (await page.locator("#preflight-dialog").isVisible()) await page.locator("#continue-export").click()
   await page.getByText("Đã tạo tệp xuất.").waitFor()
-  const zipPath = path.join(directory, "chapter.zip")
-  await waitForArtifact(async () => {
-    const info = await stat(zipPath).catch(() => null)
-    return info?.size > 0
-  }, "atomic ZIP commit")
+  const zipPath = await waitForArtifact(
+    () => app.evaluate(() => globalThis.downloads[1] ?? null),
+    "profile ZIP download",
+  )
+  assert.match(zipPath, /khung-thoai-goc\.zip$/)
   const zip = await JSZip.loadAsync(await readFile(zipPath))
-  assert.deepEqual(Object.keys(zip.files), ["01-01.png"])
+  assert.deepEqual(Object.keys(zip.files), ["01-01.png", "manifest.json"])
   await page.locator("#box-text").fill("Recover this latest edit")
   await page.locator("#box-form button[type=submit]").click()
   // The timer makes a project-specific snapshot, then the library opens it through the normal path.

@@ -40,6 +40,7 @@ export function setupExports({
   listButton,
   projectBusy,
   readTranslationSettings,
+  isNativeReady,
   commitLiveForm,
   checkpoint,
   render,

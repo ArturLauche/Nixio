@@ -2265,6 +2265,7 @@ setupExports({
   ...shared, selectPage, selectBox, listButton,
   qaReview,
   readTranslationSettings: translation.settings,
+  isNativeReady: () => projects.ready,
   commitLiveForm: commitLiveFormCheckpoint,
 })
 chat = setupChat({
