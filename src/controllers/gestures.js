@@ -2,6 +2,7 @@ import { clamp } from "../canvas.js"
 import { detectBubbleOnImage } from "../bubble.js"
 import { prepareNativeClone, prepareNativeInpaint, samplePixelColor } from "../retouch.js"
 import { resizeBox, rotateBox, snapBox } from "../tools.js"
+import { resizeGroup } from "../selection.js"
 
 const zoomSteps = [.25, .5, .75, 1, 1.25, 1.5, 2, 3, 4]
 const MIN_ZOOM = .1
@@ -284,7 +285,7 @@ export function setupGestures({
       return
     }
 
-    // Resize handle on active box.
+    // Resize handle on the primary box; the rest of a multi-selection follows its delta.
     const handleEl = event.target.closest?.(".resize-handle")
     if (tool === "text" && !state.placing && handleEl) {
       const box = selectedBox()
@@ -293,6 +294,10 @@ export function setupGestures({
       stage.setPointerCapture(event.pointerId)
       const before = editorSnapshot()
       if (box.cleanup) freezeCleanup(box)
+      const group = state.selectedBoxIds.size > 1
+        ? page.boxes.filter((item) => state.selectedBoxIds.has(item.id))
+        : []
+      if (!group.includes(box)) group.push(box)
       gesture = {
         kind: "resize",
         pointer: event.pointerId,
@@ -300,6 +305,8 @@ export function setupGestures({
         handle: handleEl.dataset.handle,
         origin,
         start: { x: box.x, y: box.y, w: box.w, h: box.h },
+        starts: new Map(group.map((item) => [item.id, { x: item.x, y: item.y, w: item.w, h: item.h }])),
+        boxes: new Map(group.map((item) => [item.id, item])),
         before,
       }
       return
@@ -410,9 +417,12 @@ export function setupGestures({
         { x: cursor.x - gesture.origin.x, y: cursor.y - gesture.origin.y },
         { rotation: gesture.box.rotation ?? 0, aspect },
       )
-      Object.assign(gesture.box, next)
-      const outline = overlays.querySelector('[aria-current="true"]')
-      if (outline) rectStyle(outline, gesture.box)
+      for (const [id, rect] of resizeGroup(gesture.starts, gesture.box.id, next)) {
+        const item = gesture.boxes.get(id)
+        Object.assign(item, rect)
+        const outline = overlays.querySelector(`[data-box="${id}"]`)
+        if (outline) rectStyle(outline, item)
+      }
       schedulePaint()
       return
     }
@@ -513,10 +523,17 @@ export function setupGestures({
       return
     }
     if (completed.kind === "resize") {
-      const b = completed.box
-      const s = completed.start
-      if (b.x !== s.x || b.y !== s.y || b.w !== s.w || b.h !== s.h) {
-        checkpoint(completed.before, { label: "Đổi kích thước khung", kind: "gesture" })
+      const resized = [...completed.boxes.values()].some((item) => {
+        const start = completed.starts.get(item.id)
+        return item.x !== start.x || item.y !== start.y || item.w !== start.w || item.h !== start.h
+      })
+      if (resized) {
+        checkpoint(completed.before, {
+          label: completed.boxes.size > 1
+            ? `Đổi kích thước ${completed.boxes.size} khung`
+            : "Đổi kích thước khung",
+          kind: "gesture",
+        })
       }
       render()
       return

@@ -15,6 +15,7 @@ import {
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
+import { outlineMarks, showsTransformHandles } from "./selection.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -778,7 +779,6 @@ function renderCanvas() {
   gestures.updateZoomDisplay()
   paintPreview(page)
 
-  const multiCount = state.selectedBoxIds.size
   overlays.replaceChildren(...page.boxes.map((box) => {
     const outline = document.createElement("div")
     outline.className = "outline"
@@ -787,10 +787,11 @@ function renderCanvas() {
     outline.setAttribute("aria-label", box.text)
     outline.dataset.box = box.id
     outline.dataset.focusKey = "box:" + box.id
-    const isPrimary = box.id === state.boxId
-    const isMulti = state.selectedBoxIds.has(box.id)
-    if (isPrimary) outline.setAttribute("aria-current", "true")
-    if (isMulti && multiCount > 1) outline.classList.add("multi-selected")
+    // The primary keeps its own marker inside a multi-selection, so the group highlight never hides
+    // which box the inspector edits.
+    const marks = outlineMarks({ id: box.id, boxId: state.boxId, selectedIds: state.selectedBoxIds })
+    if (marks.primary) outline.setAttribute("aria-current", "true")
+    if (marks.multi) outline.classList.add("multi-selected")
     outline.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault()
@@ -798,7 +799,7 @@ function renderCanvas() {
       }
     })
     rectStyle(outline, box)
-    if (isPrimary && multiCount <= 1 && tool === "text" && !state.placing && !state.compareOriginal) {
+    if (showsTransformHandles({ marks, tool, placing: state.placing, compareOriginal: state.compareOriginal })) {
       for (const handle of resizeHandleNames) {
         const dot = document.createElement("span")
         dot.className = "resize-handle"
