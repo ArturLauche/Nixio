@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 1,
+  "description": "Offline golden-output corpus for the Nixio agent harness and box translation routing. Every provider response is simulated; no API key and no network request are used.",
+  "testRates": {
+    "label": "Synthetic fixture test rates used only to exercise CI cost accounting; they are not provider prices and must not be read as current or quoted pricing.",
+    "inputPerMillionTokensUsd": 0.1,
+    "outputPerMillionTokensUsd": 0.4
+  },
+  "cases": [
+    {
+      "id": "openai-boxes-glossary-golden",
+      "note": "OpenAI-compatible box translation. The simulated reply wraps fenced JSON in a think block, so the real extractJsonObject cleanup path must run before the golden comparison.",
+      "kind": "translate",
+      "provider": "openai",
+      "sourceLanguage": "Japanese",
+      "targetLanguage": "Vietnamese",
+      "direction": "rtl",
+      "notes": "Trang bìa chương 1.",
+      "glossary": "# Nhân vật\n五条悟 = Gojo Satoru\n呪術師 = Chú thuật sư\n",
+      "page": { "name": "01.png", "width": 800, "height": 1200 },
+      "boxes": [
+        { "id": "b1", "text": "五条悟は最強だ。" },
+        { "id": "b2", "text": "呪術師として戦え。" }
+      ],
+      "script": [
+        {
+          "note": "Fenced JSON with a reasoning prefix; production strips both without touching the lines.",
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "<think>Đối chiếu glossary trước khi trả.</think>\n```json\n{\"lines\":[{\"id\":\"B1\",\"text\":\"Gojo Satoru là kẻ mạnh nhất.\"},{\"id\":\"B2\",\"text\":\"Hãy chiến đấu với tư cách một Chú thuật sư.\"}]}\n```"
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 1460, "completion_tokens": 92, "total_tokens": 1552 }
+          }
+        }
+      ],
+      "expected": {
+        "steps": 1,
+        "translations": {
+          "b1": "Gojo Satoru là kẻ mạnh nhất.",
+          "b2": "Hãy chiến đấu với tư cách một Chú thuật sư."
+        }
+      },
+      "gates": {
+        "maxSteps": 1,
+        "minIdCoverage": 1,
+        "minGlossaryCompliance": 1,
+        "minReferenceMatches": 1,
+        "maxUntranslatedSource": 0,
+        "minToolPrecision": 1,
+        "minToolRecall": 1
+      }
+    },
+    {
+      "id": "gemini-boxes-retry-golden",
+      "note": "Gemini box translation that survives one transient 503 through the real withLlmRetry wrapper, then matches the golden translations.",
+      "kind": "translate",
+      "provider": "gemini",
+      "sourceLanguage": "Japanese",
+      "targetLanguage": "Vietnamese",
+      "direction": "rtl",
+      "glossary": "虎杖悠仁 = Itadori Yuji\n呪力 = chú lực\n",
+      "page": { "name": "02.png", "width": 720, "height": 1080 },
+      "boxes": [
+        { "id": "b1", "text": "虎杖悠仁の呪力だ。" },
+        { "id": "b2", "text": "行くぞ。" }
+      ],
+      "script": [
+        {
+          "note": "Transient quota failure; retry-after 0 keeps the offline run fast.",
+          "status": 503,
+          "retryAfter": "0"
+        },
+        {
+          "reply": {
+            "candidates": [
+              {
+                "finishReason": "STOP",
+                "content": {
+                  "parts": [
+                    { "text": "{\"lines\":[{\"id\":\"B1\",\"text\":\"Đây là chú lực của Itadori Yuji.\"},{\"id\":\"B2\",\"text\":\"Đi thôi.\"}]}" }
+                  ]
+                }
+              }
+            ],
+            "usageMetadata": { "promptTokenCount": 1200, "candidatesTokenCount": 64, "totalTokenCount": 1264 }
+          }
+        }
+      ],
+      "expected": {
+        "steps": 2,
+        "translations": {
+          "b1": "Đây là chú lực của Itadori Yuji.",
+          "b2": "Đi thôi."
+        }
+      },
+      "gates": {
+        "maxSteps": 2,
+        "minIdCoverage": 1,
+        "minGlossaryCompliance": 1,
+        "minReferenceMatches": 1,
+        "maxUntranslatedSource": 0,
+        "minToolPrecision": 1,
+        "minToolRecall": 1
+      }
+    },
+    {
+      "id": "openai-boxes-missing-id-guard",
+      "note": "The simulated model drops B2. The case passes only when production rejects the incomplete ID set instead of silently translating the subset.",
+      "kind": "translate",
+      "provider": "openai",
+      "expectError": "thiếu hoặc trùng mã thoại",
+      "sourceLanguage": "Japanese",
+      "targetLanguage": "Vietnamese",
+      "direction": "rtl",
+      "glossary": "五条悟 = Gojo Satoru\n",
+      "page": { "name": "03.png", "width": 800, "height": 1200 },
+      "boxes": [
+        { "id": "b1", "text": "五条悟だ。" },
+        { "id": "b2", "text": "行くぞ。" }
+      ],
+      "script": [
+        {
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"lines\":[{\"id\":\"B1\",\"text\":\"Là Gojo Satoru.\"}]}"
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 640, "completion_tokens": 18, "total_tokens": 658 }
+          }
+        }
+      ],
+      "expected": {
+        "steps": 1,
+        "translations": {
+          "b1": "Là Gojo Satoru.",
+          "b2": "Đi thôi."
+        }
+      },
+      "gates": { "maxSteps": 1 }
+    },
+    {
+      "id": "openai-agent-update-boxes",
+      "note": "Full harness turn: the simulated model reads the page, updates both boxes, then answers. Tool precision/recall, order, ID coverage and glossary compliance are scored from the recorded stub calls.",
+      "kind": "agent",
+      "provider": "openai",
+      "sourceLanguage": "Japanese",
+      "targetLanguage": "Vietnamese",
+      "direction": "rtl",
+      "userMessage": "Dịch khung thoại trang 1 theo glossary đã chốt.",
+      "glossary": "五条悟 = Gojo Satoru\n",
+      "page": { "name": "01.png", "width": 800, "height": 1200 },
+      "boxes": [
+        { "id": "b1", "text": "五条悟だ。" },
+        { "id": "b2", "text": "行くぞ。" }
+      ],
+      "tools": [
+        {
+          "name": "list_boxes",
+          "category": "read",
+          "concurrencySafe": true,
+          "description": "Liệt kê khung thoại của một trang.",
+          "parameters": { "type": "object", "properties": { "pageIndex": { "type": "integer" } } },
+          "result": {
+            "summary": "2 khung thoại",
+            "data": {
+              "boxes": [
+                { "id": "b1", "text": "五条悟だ。" },
+                { "id": "b2", "text": "行くぞ。" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "update_box",
+          "category": "write",
+          "concurrencySafe": false,
+          "description": "Cập nhật lời thoại đã dịch của một khung.",
+          "parameters": {
+            "type": "object",
+            "properties": { "boxId": { "type": "string" }, "text": { "type": "string" } },
+            "required": ["boxId", "text"]
+          },
+          "result": { "summary": "Đã cập nhật khung thoại.", "data": { "ok": true } }
+        }
+      ],
+      "script": [
+        {
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": null,
+                  "tool_calls": [
+                    {
+                      "id": "call_1",
+                      "type": "function",
+                      "function": { "name": "list_boxes", "arguments": "{\"pageIndex\":1}" }
+                    }
+                  ]
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 820, "completion_tokens": 22, "total_tokens": 842 }
+          }
+        },
+        {
+          "reply": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": null,
+                  "tool_calls": [
+                    {
+                      "id": "call_2",
+                      "type": "function",
+                      "function": { "name": "update_box", "arguments": "{\"boxId\":\"b1\",\"text\":\"Là Gojo Satoru.\"}" }
+                    },
+                    {
+                      "id": "call_3",
+                      "type": "function",
+                      "function": { "name": "update_box", "arguments": "{\"boxId\":\"b2\",\"text\":\"Đi thôi.\"}" }
+                    }
+                  ]
+                }
+              }
+            ],
+            "usage": { "prompt_tokens": 910, "completion_tokens": 48, "total_tokens": 958 }
+          }
+        },
+        {
+          "reply": {
+            "choices": [
+              { "message": { "role": "assistant", "content": "Đã dịch 2 khung thoại theo glossary." } }
+            ],
+            "usage": { "prompt_tokens": 980, "completion_tokens": 18, "total_tokens": 998 }
+          }
+        }
+      ],
+      "expected": {
+        "steps": 3,
+        "answer": "Đã dịch 2 khung thoại theo glossary.",
+        "toolCalls": [
+          { "name": "list_boxes", "args": { "pageIndex": 1 } },
+          { "name": "update_box", "args": { "boxId": "b1", "text": "Là Gojo Satoru." } },
+          { "name": "update_box", "args": { "boxId": "b2", "text": "Đi thôi." } }
+        ],
+        "translations": {
+          "b1": "Là Gojo Satoru.",
+          "b2": "Đi thôi."
+        }
+      },
+      "gates": {
+        "maxSteps": 3,
+        "minIdCoverage": 1,
+        "minGlossaryCompliance": 1,
+        "minReferenceMatches": 1,
+        "maxUntranslatedSource": 0,
+        "minToolPrecision": 1,
+        "minToolRecall": 1,
+        "requireToolSequence": true
+      }
+    },
+    {
+      "id": "gemini-agent-audit-parallel",
+      "note": "Gemini harness turn with two parallel-safe read calls in one step, then a final answer. The case pins the exact tool order and step budget.",
+      "kind": "agent",
+      "provider": "gemini",
+      "sourceLanguage": "Japanese",
+      "targetLanguage": "Vietnamese",
+      "direction": "rtl",
+      "userMessage": "Kiểm tra lỗi glossary của chương.",
+      "glossary": "呪術師 = Chú thuật sư\n",
+      "page": { "name": "04.png", "width": 800, "height": 1200 },
+      "boxes": [{ "id": "b1", "text": "Gojo là Chú thuật sư." }],
+      "tools": [
+        {
+          "name": "list_boxes",
+          "category": "read",
+          "concurrencySafe": true,
+          "description": "Liệt kê khung thoại của trang hiện tại.",
+          "parameters": { "type": "object", "properties": {} },
+          "result": { "summary": "1 khung thoại", "data": { "boxes": [{ "id": "b1", "text": "Gojo là Chú thuật sư." }] } }
+        },
+        {
+          "name": "lint_chapter_qa",
+          "category": "read",
+          "concurrencySafe": true,
+          "description": "Chấm lỗi glossary và chính tả của chương.",
+          "parameters": { "type": "object", "properties": {} },
+          "result": {
+            "summary": "1 lỗi thuật ngữ",
+            "data": { "total": 1, "byType": { "glossary_violation": 1 } }
+          }
+        }
+      ],
+      "script": [
+        {
+          "reply": {
+            "candidates": [
+              {
+                "finishReason": "STOP",
+                "content": {
+                  "parts": [
+                    { "functionCall": { "name": "list_boxes", "args": {} } },
+                    { "functionCall": { "name": "lint_chapter_qa", "args": {} } }
+                  ]
+                }
+              }
+            ],
+            "usageMetadata": { "promptTokenCount": 760, "candidatesTokenCount": 30, "totalTokenCount": 790 }
+          }
+        },
+        {
+          "reply": {
+            "candidates": [
+              {
+                "finishReason": "STOP",
+                "content": { "parts": [{ "text": "Phát hiện 1 lỗi thuật ngữ cần sửa." }] }
+              }
+            ],
+            "usageMetadata": { "promptTokenCount": 840, "candidatesTokenCount": 16, "totalTokenCount": 856 }
+          }
+        }
+      ],
+      "expected": {
+        "steps": 2,
+        "answer": "Phát hiện 1 lỗi thuật ngữ cần sửa.",
+        "toolCalls": [
+          { "name": "list_boxes", "args": {} },
+          { "name": "lint_chapter_qa", "args": {} }
+        ]
+      },
+      "gates": {
+        "maxSteps": 2,
+        "minToolPrecision": 1,
+        "minToolRecall": 1,
+        "requireToolSequence": true
+      }
+    }
+  ]
+}

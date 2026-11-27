@@ -1,11 +1,15 @@
-import { alignScript, translateBoxesGemini, translateImage } from "../gemini.js"
+import { alignScript, translateImage } from "../gemini.js"
 import {
   alignScriptOpenAi,
-  translateBoxesOpenAi,
   translateImageOpenAi,
   validateEndpointUrl,
 } from "../openai-compat.js"
-import { remainingTranslations, translationNotes, translationSignature } from "../translation.js"
+import {
+  remainingTranslations,
+  translateBoxesForProvider,
+  translationNotes,
+  translationSignature,
+} from "../translation.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
 import { groupDialogue } from "../io.js"
 
@@ -253,9 +257,7 @@ export function setupTranslation({
     try {
       const report = (message) => status(page.name + " · " + message)
       const requestSettings = { ...settings, notes: translationNotes(settings), context, report, signal: translationController.signal }
-      const translated = settings.provider === "openai"
-        ? await translateBoxesOpenAi(page.boxes, requestSettings)
-        : await translateBoxesGemini(page, page.boxes, requestSettings)
+      const translated = await translateBoxesForProvider(settings.provider, page, page.boxes, requestSettings)
       translationController.signal.throwIfAborted()
       const byBoxId = new Map(translated.map((item) => [item.boxId, item]))
       let updated = 0

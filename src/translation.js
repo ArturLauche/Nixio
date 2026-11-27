@@ -1,3 +1,6 @@
+import { translateBoxesGemini } from "./gemini.js"
+import { translateBoxesOpenAi } from "./openai-compat.js"
+
 export function translationNotes({ notes, skillPrompt }) {
   return skillPrompt ? [notes, skillPrompt].filter(Boolean).join("\n\n") : notes
 }
@@ -25,4 +28,12 @@ export function translationLabel(page, settings) {
   if (job.state === "pending") return "Chờ xử lý"
   if (job.signature !== translationSignature(settings)) return "Thiết lập đã đổi"
   return job.kind === "align" ? "Đã ghép kịch bản" : "Đã dịch"
+}
+
+// Single provider branch for box-level translation, shared by the UI controller and the
+// offline evaluation harness so both exercise the same routing.
+export async function translateBoxesForProvider(provider, page, boxes, settings) {
+  return provider === "openai"
+    ? translateBoxesOpenAi(boxes, settings)
+    : translateBoxesGemini(page, boxes, settings)
 }

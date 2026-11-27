@@ -58,6 +58,15 @@ jobs:
       - name: Compare visual baselines
         if: runner.os == 'Linux'
         run: npm run test:visual
+      - name: Evaluate agent output against golden fixtures
+        run: npm run eval:agent -- --output artifacts/agent-eval.json
+      - name: Upload agent evaluation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-eval-${{ runner.os }}
+          path: artifacts/agent-eval.json
+          if-no-files-found: warn
       - run: npm run desktop:package
       - name: Exercise packaged desktop on Linux
         if: runner.os == 'Linux'
