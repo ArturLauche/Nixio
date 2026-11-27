@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { checkUndoToken, copyEditor, DEFAULT_ACTION_LABEL, EditHistory, HISTORY_HEAD } from "../src/history.js"
+import { checkUndoToken, copyEditor, DEFAULT_ACTION_LABEL, EditHistory, HISTORY_HEAD, HISTORY_START } from "../src/history.js"
 
 const image = { naturalWidth: 800, naturalHeight: 1200 }
 const file = new File(["raw"], "page-1.png")
@@ -471,4 +471,43 @@ test("group updates refresh the name and stay undoable as one action", () => {
   assert.equal(history.undo({ pages: [], text: "đang gõ" }).text, "gốc")
   assert.equal(history.future.at(-1).label, "Sửa nội dung khung")
   assert.equal(history.redo({ pages: [], text: "gốc" }).text, "đang gõ")
+})
+
+test("the oldest boundary restores the state before the first action and keeps redo", () => {
+  const timeline = createTimeline()
+  timeline.edit("A")
+  timeline.edit("B")
+
+  const result = timeline.jump(HISTORY_START)
+  assert.equal(result.ok, true)
+  assert.equal(timeline.text(), "gốc")
+  assert.deepEqual(applied(timeline.history), [false, false])
+  assert.equal(timeline.history.past.length, 0)
+
+  // Redo order is untouched, so the oldest action comes back first.
+  assert.equal(timeline.redo(), "A")
+  assert.equal(timeline.redo(), "B")
+})
+
+test("the oldest boundary is the current state when nothing at all is applied", () => {
+  const empty = createTimeline()
+  const nothing = empty.jump(HISTORY_START)
+  assert.equal(nothing.ok, false)
+  assert.equal(nothing.reason, "current")
+
+  const timeline = createTimeline()
+  timeline.edit("A")
+  assert.equal(timeline.undo(), "gốc")
+  const root = timeline.jump(HISTORY_START)
+  assert.equal(root.ok, false)
+  assert.equal(root.reason, "current")
+  assert.equal(timeline.redo(), "A")
+})
+
+test("the oldest boundary is not a valid action id and jump never mistakes it for one", () => {
+  const timeline = createTimeline()
+  const a = timeline.edit("A")
+  assert.notEqual(a.id, HISTORY_START)
+  assert.equal(timeline.jump("start-typo").reason, "unknown")
+  assert.equal(timeline.text(), "A")
 })

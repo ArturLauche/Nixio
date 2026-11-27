@@ -128,7 +128,7 @@ export function setupOcr({
 
   byId("apply-ocr").onclick = () => {
     if (!review || projectBusy() || !state.pages.includes(review.page)) return
-    checkpoint()
+    checkpoint(undefined, { label: `Đặt ${review.lines.length} dòng OCR lên trang`, kind: "ocr" })
     let applied = 0
     for (const line of review.lines) {
       line.text = line.text.trim()

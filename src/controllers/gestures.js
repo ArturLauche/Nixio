@@ -180,7 +180,7 @@ export function setupGestures({
       readout.textContent = color.toUpperCase()
       readout.hidden = false
       if (selectedBox() && event.shiftKey) {
-        checkpoint()
+        checkpoint(undefined, { label: "Đổi màu chữ từ hút màu", kind: "form" })
         selectedBox().color = color
         byId("box-color").value = color
         renderCanvas()
@@ -458,7 +458,7 @@ export function setupGestures({
       if (page) {
         page.retouchStrokes ??= []
         page.retouchStrokes.push(completed.stroke)
-        checkpoint(completed.before)
+        checkpoint(completed.before, { label: "Tẩy chữ và tái tạo nền (Inpaint)", kind: "retouch" })
         prepareNativeInpaint(page, completed.stroke).then((usedNative) => {
           if (usedNative && selectedPage() === page) {
             paintPreview(page)
@@ -472,7 +472,7 @@ export function setupGestures({
     }
     if (completed.kind === "retouch") {
       const page = selectedPage()
-      checkpoint(completed.before)
+      checkpoint(completed.before, { label: "Nét vẽ tay trên trang", kind: "retouch" })
       if (page && completed.stroke?.mode === "clone" && completed.stroke.seamless) {
         prepareNativeClone(page, completed.stroke).then((usedNative) => {
           if (usedNative && selectedPage() === page) {
@@ -485,30 +485,37 @@ export function setupGestures({
       return
     }
     if (completed.kind === "rotate") {
-      if (completed.box.rotation !== completed.startRotation) checkpoint(completed.before)
+      if (completed.box.rotation !== completed.startRotation) {
+        checkpoint(completed.before, { label: "Xoay khung thoại", kind: "gesture" })
+      }
       render()
       return
     }
     if (completed.kind === "resize") {
       const b = completed.box
       const s = completed.start
-      if (b.x !== s.x || b.y !== s.y || b.w !== s.w || b.h !== s.h) checkpoint(completed.before)
+      if (b.x !== s.x || b.y !== s.y || b.w !== s.w || b.h !== s.h) {
+        checkpoint(completed.before, { label: "Đổi kích thước khung", kind: "gesture" })
+      }
       render()
       return
     }
     if (completed.kind === "move") {
-      if (completed.moved) checkpoint(completed.before)
+      if (completed.moved) checkpoint(completed.before, { label: "Di chuyển khung", kind: "gesture" })
       else if (completed.collapseOnClick) selectBox(completed.box)
       render()
       return
     }
     if (completed.kind === "cleanup-stroke") {
-      checkpoint(completed.before)
+      checkpoint(completed.before, { label: "Tô vùng xoá nền", kind: "cleanup" })
       render()
       return
     }
     if (completed.kind === "draft") {
-      checkpoint(completed.before)
+      checkpoint(completed.before, {
+        label: completed.cleanupBox ? "Khoanh vùng xoá nền" : "Vẽ khung thoại mới",
+        kind: "gesture",
+      })
       if (completed.cleanupBox) {
         completed.cleanupBox.cleanupRect = placement(completed.origin, point(event))
         completed.cleanupBox.cleanupStrokes = []

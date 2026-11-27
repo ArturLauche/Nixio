@@ -13,7 +13,7 @@ import {
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 
-import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD } from "./history.js"
+import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
@@ -57,6 +57,12 @@ const state = {
 }
 const projectSettings = projectSettingIds.map(byId)
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
+// A settings edit is named by the visible label the user actually changed, so the timeline reads
+// "Đổi cài đặt Hướng đọc" instead of a generic name.
+const settingLabels = new Map(projectSettings.map((field) => [
+  field.id,
+  document.querySelector(`label[for="${field.id}"]`)?.firstChild?.textContent.trim() || field.id,
+]))
 let previewRedraw
 let cleanRawController = null
 
@@ -82,9 +88,17 @@ let nudgeTimer = null
 // One live form session is one action, so its deferred checkpoint keeps a name the timeline and
 // the one-click undo can show instead of the generic fallback.
 const FORM_EDIT_META = { label: "Sửa khung thoại", kind: "form" }
-// Timeline chips: only the kinds that exist today get a short label; every other kind stays bare
-// until the repository-wide label pass names it.
-const historyKindLabels = { form: "Khung", "raw-cleanup": "Raw" }
+// A held arrow key is one action too: the debounced checkpoint carries the name of the whole nudge.
+const NUDGE_META = { label: "Đẩy khung bằng phím", kind: "nudge" }
+// Timeline chips: every kind a checkpoint records today gets a short label, so a row never shows a
+// bare kind next to its own specific name.
+const historyKindLabels = {
+  form: "Khung", box: "Khung", gesture: "Bàn vẽ", nudge: "Phím", page: "Trang", "raw-cleanup": "Raw",
+  preset: "Mẫu", settings: "Cài đặt", translate: "Dịch", ocr: "OCR", ai: "AI",
+  find: "Tìm", retouch: "Cọ", cleanup: "Nền", layout: "Canh", script: "Kịch bản", text: "Chữ",
+}
+const alignLabels = { left: "trái", centerX: "giữa ngang", right: "phải", top: "trên", centerY: "giữa dọc", bottom: "dưới" }
+const distributeLabels = { horizontal: "ngang", vertical: "dọc" }
 
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
@@ -107,10 +121,13 @@ function commitNudgeCheckpoint() {
   if (!nudgeSnapshot) return false
   const before = nudgeSnapshot
   nudgeSnapshot = null
-  checkpoint(before)
+  checkpoint(before, NUDGE_META)
   return true
 }
 
+// The open form edit and the pending nudge are both actions of their own, so every path that
+// moves the playhead or starts a new action finalizes them first: a delayed nudge timer must never
+// record a snapshot taken before a jump on top of the action that jump produced.
 function commitLiveFormCheckpoint() {
   commitNudgeCheckpoint()
   if (!formEditSnapshot) return false
@@ -131,10 +148,10 @@ function releaseUnusedImages() {
 }
 
 function checkpoint(snapshot, meta) {
+  // A pending nudge owns the state before the newest action, so it is finalized before anything
+  // else is recorded: its delayed timer then has nothing left to record.
+  commitNudgeCheckpoint()
   if (!snapshot) {
-    if (nudgeSnapshot) {
-      commitNudgeCheckpoint()
-    }
     if (formEditSnapshot) {
       const pending = formEditSnapshot
       formEditSnapshot = null
@@ -214,6 +231,35 @@ function historyJumpTarget(rows, row) {
   return rows[row.index + 1]?.id ?? HISTORY_HEAD
 }
 
+// A click names its row by the action id captured when the row was drawn, and the target is
+// resolved again against the timeline as it stands now. Resolving it from an older list would let
+// HISTORY_HEAD point past a checkpoint recorded since the render, restoring a state the user did
+// not ask for. A row whose entry was cut by a branch or evicted by the cap resolves to null.
+function historyTargetFor(actionId) {
+  const rows = history.entries()
+  const row = rows.find((item) => item.id === actionId)
+  return row ? { id: historyJumpTarget(rows, row), label: row.label } : null
+}
+
+// Pending form and nudge edits are committed before the target is resolved, so the jump lands on
+// the boundary of the action the user clicked, not on the state the pending edit created.
+function jumpToHistoryRow(actionId) {
+  commitLiveFormCheckpoint()
+  const target = historyTargetFor(actionId)
+  if (!target) {
+    status("Mốc này không còn trong lịch sử vì một nhánh chỉnh sửa mới đã thay thế nó. Hãy chọn mốc khác.", true)
+    syncHistoryPanel()
+    return false
+  }
+  return jumpHistory(target.id, target.label)
+}
+
+// The state before the oldest action has no row of its own, so the panel offers it directly.
+function jumpToHistoryStart() {
+  commitLiveFormCheckpoint()
+  return jumpHistory(HISTORY_START, "")
+}
+
 function historyTime(at) {
   const date = new Date(at)
   const time = date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
@@ -230,8 +276,9 @@ function jumpHistory(id, label = "") {
     status("Chưa thể nhảy lịch sử khi đang kéo/thao tác trên ảnh. Hãy kết thúc thao tác đó rồi thử lại.", true)
     return false
   }
-  // A form edit that is still open becomes its own named action before the playhead moves, so a
-  // jump never drops what the user just typed.
+  // A form edit or nudge that is still open becomes its own named action before the playhead
+  // moves, so a jump never drops what the user just typed and never leaves a delayed timer
+  // pointing at a state from before the jump.
   commitLiveFormCheckpoint()
   const result = history.jump(id, editorSnapshot())
   if (!result.ok) {
@@ -243,7 +290,13 @@ function jumpHistory(id, label = "") {
     return false
   }
   applyHistorySnapshot(result.snapshot)
-  status(label ? `Đã quay lại trạng thái sau "${label}".` : "Đã trở về mốc mới nhất.")
+  status(
+    id === HISTORY_HEAD
+      ? "Đã trở về mốc mới nhất."
+      : label
+        ? `Đã quay lại trạng thái sau "${label}".`
+        : "Đã trở về trạng thái gốc, trước thao tác đầu tiên.",
+  )
   return true
 }
 
@@ -269,6 +322,9 @@ function syncHistoryPanel() {
     : shown.length === rows.length
       ? `${rows.length} thao tác`
       : `${shown.length}/${rows.length} thao tác khớp`
+  // The oldest boundary has no row of its own, so the direct control reports whether it is already
+  // where the playhead sits.
+  byId("history-start").disabled = !rows.length || applied === 0
   const empty = byId("history-empty")
   empty.hidden = shown.length > 0
   empty.textContent = rows.length
@@ -289,7 +345,7 @@ function syncHistoryPanel() {
     button.setAttribute("aria-label", delta
       ? `${row.label} lúc ${historyTime(row.at)}: ${delta > 0 ? `hoàn tác ${delta} thao tác` : `làm lại ${-delta} thao tác`}`
       : `${row.label} lúc ${historyTime(row.at)}: trạng thái hiện tại`)
-    button.onclick = () => jumpHistory(historyJumpTarget(rows, row), row.label)
+    button.onclick = () => jumpToHistoryRow(row.id)
 
     const label = document.createElement("span")
     label.className = "history-entry-label"
@@ -335,19 +391,25 @@ function toggleHistoryPanel(open = byId("history-panel").hidden) {
 }
 
 // Enter jumps to the newest matching action that is not the current state: the search narrows
-// which action is chosen, never what that action means.
+// which action is chosen, never what that action means. Pending edits are committed first, so the
+// choice is made on the timeline the panel is about to show.
 function jumpToNewestMatch() {
+  commitLiveFormCheckpoint()
   const rows = history.entries()
   const applied = rows.filter((row) => row.applied).length
   const row = history.entries({ query: byId("history-search").value })
     .filter((item) => applied !== item.index + 1)
     .at(-1)
-  if (!row) return status("Không còn mốc nào khác để nhảy tới trong lịch sử.", true)
-  return jumpHistory(historyJumpTarget(rows, row), row.label)
+  if (!row) {
+    syncHistoryPanel()
+    return status("Không còn mốc nào khác để nhảy tới trong lịch sử.", true)
+  }
+  return jumpToHistoryRow(row.id)
 }
 
 byId("history-toggle").onclick = () => toggleHistoryPanel()
 byId("history-close").onclick = () => toggleHistoryPanel(false)
+byId("history-start").onclick = () => jumpToHistoryStart()
 byId("history-search").addEventListener("input", syncHistoryPanel)
 
 // Arrow keys walk the named timeline, Enter jumps, Escape closes the panel and hands focus back
@@ -367,6 +429,9 @@ byId("history-panel").addEventListener("keydown", (event) => {
     event.preventDefault()
     return jumpToNewestMatch()
   }
+  // The search box keeps its native caret keys: Home/End and the horizontal arrows belong to the
+  // text field, so editing a query never turns into a focus jump inside the list.
+  if (event.target === byId("history-search") && ["Home", "End", "ArrowLeft", "ArrowRight"].includes(event.key)) return
   const steps = { ArrowDown: 1, ArrowUp: -1 }
   if (!(event.key in steps) && event.key !== "Home" && event.key !== "End") return
   const buttons = [...byId("history-list").querySelectorAll(".history-entry:not(:disabled)")]
@@ -397,7 +462,7 @@ byId("font-file").onchange = async (event) => {
     const box = selectedBox()
     if (box) {
       commitLiveFormCheckpoint()
-      checkpoint()
+      checkpoint(undefined, { label: "Đổi phông chữ khung", kind: "form" })
       box.font = family
       byId("box-font").value = family
       renderCanvas()
@@ -417,7 +482,9 @@ for (const field of projectSettings) {
   let before
   field.addEventListener("focus", () => { before = editorSnapshot() })
   field.addEventListener("change", () => {
-    if (before && before.settings[field.id] !== field.value) checkpoint(before)
+    if (before && before.settings[field.id] !== field.value) {
+      checkpoint(before, { label: `Đổi cài đặt ${settingLabels.get(field.id) ?? field.id}`, kind: "settings" })
+    }
     before = editorSnapshot()
     syncTranslationActions()
   })
@@ -474,7 +541,7 @@ function movePage(index, delta) {
   if (projectBusy()) return
   const target = index + delta
   if (target < 0 || target >= state.pages.length) return
-  checkpoint()
+  checkpoint(undefined, { label: `Đổi thứ tự trang ${state.pages[index].name}`, kind: "page" })
   const [page] = state.pages.splice(index, 1)
   state.pages.splice(target, 0, page)
   renderPages()
@@ -485,7 +552,7 @@ function movePage(index, delta) {
 
 function removePage(index) {
   if (projectBusy()) return
-  checkpoint()
+  checkpoint(undefined, { label: `Bỏ trang ${state.pages[index]?.name ?? ""}`, kind: "page" })
   const [page] = state.pages.splice(index, 1)
   if (!page) return
   if (page.id === state.pageId) selectPage(state.pages[Math.min(index, state.pages.length - 1)])
@@ -770,7 +837,7 @@ byId("save-preset").onclick = () => {
   if (!box || projectBusy()) return
   if (!name) return status("Hãy nhập tên mẫu dàn chữ.", true)
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Lưu mẫu dàn chữ "${name}"`, kind: "preset" })
   const preset = { name, style: projectStyle(box) }
   const index = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
   if (index < 0) state.presets.push(preset)
@@ -795,7 +862,7 @@ byId("apply-preset").onclick = () => {
         ? page.boxes.filter((b) => state.selectedBoxIds.has(b.id))
         : [selectedBox()].filter(Boolean)
   if (!boxes.length) return status("Hãy chọn khung để áp dụng mẫu.", true)
-  checkpoint()
+  checkpoint(undefined, { label: `Áp dụng mẫu "${preset.name}" cho ${boxes.length} khung`, kind: "preset" })
   const defaults = {
     bold: false, italic: false, uppercase: false, vertical: false,
     bubbleFit: false, warp: "none", warpAmount: 0,
@@ -810,7 +877,7 @@ byId("apply-preset").onclick = () => {
 
 byId("delete-preset").onclick = () => {
   if (projectBusy() || !state.presets.length) return
-  checkpoint()
+  checkpoint(undefined, { label: `Xóa mẫu dàn chữ "${state.presets[Number(byId("style-preset").value)]?.name ?? ""}"`, kind: "preset" })
   state.presets.splice(Number(byId("style-preset").value), 1)
   saveGlobalPresets(state.presets)
   renderPresets()
@@ -834,7 +901,7 @@ byId("presets-file")?.addEventListener("change", async (event) => {
   try {
     const imported = parsePresetsJson(await file.text())
     commitLiveFormCheckpoint()
-    checkpoint()
+    checkpoint(undefined, { label: `Nhập ${imported.length} mẫu dàn chữ`, kind: "preset" })
     state.presets = mergePresets(state.presets, imported)
     saveGlobalPresets(state.presets)
     for (const preset of imported) registerFontName(preset.style.font)
@@ -850,7 +917,7 @@ byId("reset-cleanup").onclick = () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Xóa vùng xoá nền của khung", kind: "cleanup" })
   delete box.cleanupRect
   delete box.cleanupStrokes
   delete box.cleanupExpand
@@ -863,7 +930,7 @@ byId("cleanup-mode")?.addEventListener("change", () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Đổi chế độ xoá chữ nền", kind: "cleanup" })
   const mode = byId("cleanup-mode").value
   if (mode === "content-aware") {
     box.cleanup = true
@@ -884,7 +951,7 @@ byId("undo-retouch").onclick = () => {
   const page = selectedPage()
   if (!page?.retouchStrokes?.length || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Hoàn tác nét cọ gần nhất", kind: "retouch" })
   page.retouchStrokes.pop()
   render()
   status("Đã hoàn tác nét cọ gần nhất.")
@@ -894,7 +961,7 @@ byId("clear-retouch").onclick = () => {
   const page = selectedPage()
   if (!page?.retouchStrokes?.length || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Xóa toàn bộ nét vẽ tay trang ${page.name}`, kind: "retouch" })
   page.retouchStrokes = []
   render()
   status("Đã xóa toàn bộ nét vẽ tay trên trang.")
@@ -1078,7 +1145,7 @@ byId("webtoon-stitch-run")?.addEventListener("click", async () => {
     const files = await stitchPagesVertically(subset)
     const decoded = []
     for (const file of files) decoded.push(await openImage(file))
-    checkpoint()
+    checkpoint(undefined, { label: `Ghép dọc ${subset.length} trang`, kind: "page" })
     state.pages.splice(startIdx, subset.length, ...decoded)
     selectPage(decoded[0])
     status(`Đã ghép ${subset.length} trang thành ${decoded.length} dải Webtoon (nhấn Ctrl+Z để hoàn tác).`)
@@ -1110,7 +1177,7 @@ byId("webtoon-slice-run")?.addEventListener("click", async () => {
     }
     const decoded = []
     for (const file of files) decoded.push(await openImage(file))
-    checkpoint()
+    checkpoint(undefined, { label: `Cắt thông minh trang ${page.name} thành ${decoded.length} trang`, kind: "page" })
     state.pages.splice(idx, 1, ...decoded)
     selectPage(decoded[0])
     status(`Đã cắt thông minh thành ${decoded.length} trang theo rãnh trống (nhấn Ctrl+Z để hoàn tác).`)
@@ -1140,7 +1207,7 @@ byId("detect-bubbles")?.addEventListener("click", () => {
     return status("Tất cả bong bóng phát hiện đã có khung hoặc trang đã đạt giới hạn 24 khung.")
   }
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Quét bong bóng trang ${page.name} (${chosen.length} khung)`, kind: "ocr" })
   let lastBox = null
   for (let i = 0; i < chosen.length; i++) {
     const queuedText = page.unplaced.length
@@ -1292,7 +1359,7 @@ function renderInspector() {
     const button = listButton(line.text, () => {
       if (!selectedPage() || projectBusy()) return
       commitLiveFormCheckpoint()
-      checkpoint()
+      checkpoint(undefined, { label: "Đặt lời thoại từ hàng chờ", kind: "box" })
       line.remove()
       addBox({ x: .32, y: .4, w: .36, h: .16 }, line.text, false)
     })
@@ -1343,7 +1410,7 @@ async function importPages(files) {
         rejected.push(file.name)
       }
     }
-    if (loaded.length) checkpoint()
+    if (loaded.length) checkpoint(undefined, { label: `Thêm ${loaded.length} ảnh vào chương`, kind: "page" })
     state.pages.push(...loaded)
     if (loaded.length && !selectedPage()) selectPage(loaded[0])
     else render()
@@ -1450,7 +1517,7 @@ byId("script-file").onchange = async (event) => {
   syncProjectActions()
   try {
     const script = await readDialogueFile(file)
-    checkpoint()
+    checkpoint(undefined, { label: `Nhập kịch bản ${file.name}`, kind: "script" })
     byId("script-text").value = script
     status("Đã đọc " + file.name + ".")
   } catch (error) {
@@ -1488,7 +1555,7 @@ byId("apply-script").onclick = () => {
   if (projectBusy()) return
   if (!current || !groups.length) return status("Hãy thêm ảnh và nhập lời thoại.", true)
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Dàn kịch bản (${groups.length} nhóm thoại)`, kind: "script" })
   const unplaced = []
   let placed = 0
   for (const { reference, lines } of groups) {
@@ -1513,7 +1580,7 @@ function addBox(rectangle, line, record = true) {
   const page = selectedPage()
   if (!page || projectBusy()) return
   commitLiveFormCheckpoint()
-  if (record) checkpoint()
+  if (record) checkpoint(undefined, { label: "Thêm khung thoại", kind: "box" })
   const box = makeBox(page, rectangle, line)
   page.boxes.push(box)
   state.boxId = box.id
@@ -1592,7 +1659,7 @@ form.onsubmit = (event) => {
   if (!box || projectBusy()) return
   const text = byId("box-text").value.trim()
   if (!text) return status("Hãy nhập nội dung khung.", true)
-  if (!commitLiveFormCheckpoint()) checkpoint()
+  if (!commitLiveFormCheckpoint()) checkpoint(undefined, { label: "Lưu khung thoại", kind: "form" })
   applyFormToBox(box, { requireText: true })
   renderPages()
   renderCanvas()
@@ -1606,7 +1673,7 @@ function deleteSelectedBoxes() {
   const ids = state.selectedBoxIds.size ? new Set(state.selectedBoxIds) : (state.boxId ? new Set([state.boxId]) : null)
   if (!ids?.size) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: ids.size > 1 ? `Xóa ${ids.size} khung thoại` : "Xóa khung thoại", kind: "box" })
   const removed = page.boxes.filter((box) => ids.has(box.id)).length
   page.boxes = page.boxes.filter((box) => !ids.has(box.id))
   state.boxId = null
@@ -1624,7 +1691,7 @@ byId("autofit-box").onclick = () => {
   const box = selectedBox()
   if (!page || !box || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Tự khớp cỡ chữ khung", kind: "text" })
   const next = autoFitBox(page, box)
   box.size = next
   byId("box-size").value = next
@@ -1637,7 +1704,7 @@ byId("autofit-page").onclick = () => {
   const page = selectedPage()
   if (!page?.boxes.length || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Tự khớp cỡ chữ trang ${page.name}`, kind: "text" })
   page.boxes.forEach((box) => { box.size = autoFitBox(page, box) })
   render()
   status(`Đã khớp cỡ chữ cho ${page.boxes.length} khung trên trang.`)
@@ -1647,7 +1714,7 @@ byId("multi-autofit").onclick = () => {
   const page = selectedPage()
   if (!page || state.selectedBoxIds.size < 2 || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: `Tự khớp cỡ chữ ${state.selectedBoxIds.size} khung đã chọn`, kind: "text" })
   const targets = page.boxes.filter((box) => state.selectedBoxIds.has(box.id))
   targets.forEach((box) => { box.size = autoFitBox(page, box) })
   render()
@@ -1661,7 +1728,7 @@ document.querySelectorAll("[data-align]").forEach((button) => {
     commitLiveFormCheckpoint()
     const before = editorSnapshot()
     if (!alignBoxes(page.boxes, state.selectedBoxIds, button.dataset.align)) return
-    checkpoint(before)
+    checkpoint(before, { label: `Căn ${alignLabels[button.dataset.align] ?? button.dataset.align} ${state.selectedBoxIds.size} khung`, kind: "layout" })
     render()
     status("Đã căn hàng các khung đã chọn.")
   }
@@ -1674,7 +1741,7 @@ document.querySelectorAll("[data-distribute]").forEach((button) => {
     commitLiveFormCheckpoint()
     const before = editorSnapshot()
     if (!distributeBoxes(page.boxes, state.selectedBoxIds, button.dataset.distribute)) return
-    checkpoint(before)
+    checkpoint(before, { label: `Chia đều khoảng cách ${distributeLabels[button.dataset.distribute] ?? ""} ${state.selectedBoxIds.size} khung`, kind: "layout" })
     render()
     status("Đã chia đều khoảng cách các khung đã chọn.")
   }
@@ -1685,7 +1752,7 @@ function duplicateSelectedBox() {
   const box = selectedBox()
   if (!page || !box || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Nhân bản khung thoại", kind: "box" })
   const copy = duplicateBox(box)
   page.boxes.push(copy)
   state.boxId = copy.id
@@ -1702,7 +1769,7 @@ function moveBoxLayer(delta) {
   commitLiveFormCheckpoint()
   const result = reorderBox(page.boxes, state.boxId, delta)
   if (!result.moved) return
-  checkpoint()
+  checkpoint(undefined, { label: delta > 0 ? "Đưa khung lên lớp trên" : "Đưa khung xuống lớp dưới", kind: "box" })
   page.boxes = result.boxes
   render()
   status(delta > 0 ? "Đã đưa khung lên lớp trên." : "Đã đưa khung xuống lớp dưới.")
@@ -1732,7 +1799,7 @@ byId("cleanup-expand").onchange = () => {
   const box = selectedBox()
   if (!box || projectBusy()) return
   commitLiveFormCheckpoint()
-  checkpoint()
+  checkpoint(undefined, { label: "Đổi độ giãn vùng xoá nền", kind: "cleanup" })
   box.cleanupExpand = clamp(Math.round(Number(byId("cleanup-expand").value) || 0), -8, 8)
   render()
 }

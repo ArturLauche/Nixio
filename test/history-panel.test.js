@@ -21,6 +21,15 @@ const historyJumpTarget = new Function(
   `${mainFunction("historyJumpTarget")}\nreturn historyJumpTarget`,
 )(HISTORY_HEAD)
 
+// The click path resolves a row id against the timeline as it stands after the pending commits, so
+// the shipped resolver is exercised against a real EditHistory instead of a mirrored copy.
+const historyResolver = (history) => new Function(
+  "history",
+  "HISTORY_HEAD",
+  "historyJumpTarget",
+  `${mainFunction("historyTargetFor")}\nreturn historyTargetFor`,
+)(history, HISTORY_HEAD, historyJumpTarget)
+
 const image = { naturalWidth: 800, naturalHeight: 1200 }
 const file = new File(["raw"], "page-1.png")
 
@@ -191,7 +200,7 @@ test("the panel lists the unfiltered timeline and derives every target from it",
   const panel = mainFunction("syncHistoryPanel")
   assert.match(panel, /const rows = history\.entries\(\)/)
   assert.match(panel, /const shown = history\.entries\(\{ query: byId\("history-search"\)\.value \}\)/)
-  assert.match(panel, /jumpHistory\(historyJumpTarget\(rows, row\), row\.label\)/)
+  assert.match(panel, /jumpToHistoryRow\(row\.id\)/)
   assert.match(panel, /\.\.\.shown\.map\(/)
 
   // Current-state feedback, focus restoration and the current row's disabled state.
@@ -242,4 +251,90 @@ test("an open live form edit is still recorded as one named action", () => {
 
 test("the panel keeps its own keys away from the nudging and shortcut handlers", () => {
   assert.match(main, /if \(event\.target\.closest\("#history-panel"\)\) return/)
+})
+
+test("a row keeps its action id and resolves its target after the pending commit", () => {
+  const timeline = createTimeline()
+  timeline.edit("A")
+  timeline.edit("B")
+  const rendered = timeline.rows()
+  const clicked = rendered.at(-1)
+
+  // Drawn as the newest action, the row alone can only name the newest boundary.
+  assert.equal(historyJumpTarget(rendered, clicked), HISTORY_HEAD)
+
+  // A form or nudge edit is still open: committing it records a real checkpoint after the render.
+  timeline.edit("C")
+  const target = historyResolver(timeline.history)(clicked.id)
+  assert.equal(target.label, "B")
+  assert.notEqual(target.id, HISTORY_HEAD)
+  assert.equal(target.id, timeline.rows()[2].id)
+
+  // The jump therefore lands on the state after B and keeps C waiting in redo order.
+  assert.equal(timeline.jump(clicked), "B")
+  assert.deepEqual(timeline.rows().map(({ applied }) => applied), [true, true, false])
+})
+
+test("a row cut by a new branch resolves to nothing instead of jumping somewhere else", () => {
+  const timeline = createTimeline()
+  timeline.edit("A")
+  timeline.edit("B")
+  const rendered = timeline.rows()
+
+  // Undo back to A, then record a new action: the branch cut drops B from the timeline.
+  timeline.jump(rendered[0])
+  timeline.edit("C")
+  const resolve = historyResolver(timeline.history)
+  assert.equal(resolve(rendered[1].id), null)
+
+  // The row that survived still targets the next action of the new branch, not a stale id.
+  assert.equal(resolve(rendered[0].id).id, timeline.rows()[1].id)
+})
+
+test("the click path commits pending edits before it resolves the row", () => {
+  const jump = mainFunction("jumpToHistoryRow")
+  assert.ok(jump.indexOf("commitLiveFormCheckpoint()") < jump.indexOf("historyTargetFor(actionId)"))
+  assert.match(jump, /if \(!target\) \{[\s\S]*?status\(/)
+  assert.match(jump, /syncHistoryPanel\(\)/)
+  assert.match(jump, /jumpHistory\(target\.id, target\.label\)/)
+
+  // Enter reuses the same path, so a filtered choice cannot retarget a row either.
+  const enter = mainFunction("jumpToNewestMatch")
+  assert.ok(enter.indexOf("commitLiveFormCheckpoint()") < enter.indexOf("history.entries()"))
+  assert.match(enter, /jumpToHistoryRow\(row\.id\)/)
+})
+
+test("the oldest state has its own control and reports when it is already current", () => {
+  assert.match(markup, /<button type="button" id="history-start"[^>]*>Về trạng thái gốc<\/button>/)
+  assert.match(main, /byId\("history-start"\)\.onclick = \(\) => jumpToHistoryStart\(\)/)
+  assert.match(mainFunction("syncHistoryPanel"), /byId\("history-start"\)\.disabled = !rows\.length \|\| applied === 0/)
+  assert.match(mainFunction("jumpToHistoryStart"), /jumpHistory\(HISTORY_START, ""\)/)
+  assert.match(mainFunction("jumpHistory"), /Đã trở về trạng thái gốc, trước thao tác đầu tiên\./)
+})
+
+test("a pending nudge is finalized before the next action, a jump and a keyboard undo", () => {
+  const checkpoint = mainFunction("checkpoint")
+  assert.match(checkpoint, /^function checkpoint\(snapshot, meta\) \{\n(?:  \/\/.*\n)*  commitNudgeCheckpoint\(\)/)
+  assert.match(mainFunction("commitNudgeCheckpoint"), /checkpoint\(before, NUDGE_META\)/)
+
+  // The form commit finalizes the nudge first, so the older action keeps the older boundary.
+  const commit = mainFunction("commitLiveFormCheckpoint")
+  assert.ok(commit.indexOf("commitNudgeCheckpoint()") < commit.indexOf("formEditSnapshot"))
+  assert.match(commit, /checkpoint\(before, FORM_EDIT_META\)/)
+
+  // Jump and keyboard undo both route through that commit, so no timer survives either.
+  assert.match(mainFunction("jumpHistory"), /commitLiveFormCheckpoint\(\)/)
+  assert.match(mainFunction("restoreHistory"), /commitLiveFormCheckpoint\(\)/)
+})
+
+test("the search box keeps its native Home/End and horizontal arrow keys", () => {
+  const start = main.indexOf('byId("history-panel").addEventListener("keydown"')
+  assert.ok(start > 0, "the panel must handle its own keys")
+  const body = main.slice(start, main.indexOf("\n})\n", start))
+  assert.match(
+    body,
+    /if \(event\.target === byId\("history-search"\) && \["Home", "End", "ArrowLeft", "ArrowRight"\]\.includes\(event\.key\)\) return/,
+  )
+  // The guard sits before the list's roving focus, so the caret keys actually stay native.
+  assert.ok(body.indexOf('"ArrowLeft"') < body.indexOf("const steps ="))
 })

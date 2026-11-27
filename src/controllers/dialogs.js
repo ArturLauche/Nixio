@@ -87,7 +87,7 @@ export function setupDialogs({
     commitLiveForm?.()
     const matches = findMatches(state.pages, query, findOptions())
     if (!matches.length) return status("Không có mục nào khớp để thay thế.")
-    checkpoint()
+    checkpoint(undefined, { label: `Thay thế "${query}" trong chương`, kind: "find" })
     const { replacedItems, replacedOccurrences, skippedEmpty } = replaceMatches(
       state.pages,
       query,

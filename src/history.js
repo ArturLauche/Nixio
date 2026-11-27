@@ -19,6 +19,10 @@ export const DEFAULT_ACTION_LABEL = "Chỉnh sửa"
 // Jump target for the newest boundary: the state after every recorded action.
 export const HISTORY_HEAD = "head"
 
+// Jump target for the oldest boundary: the state before the oldest recorded action. No row can
+// name it, because a row always names the state after its own action.
+export const HISTORY_START = "start"
+
 function actionLabel(token) {
   return token?.label ? `"${token.label}"` : "thao tác này"
 }
@@ -128,11 +132,12 @@ export class EditHistory {
     return entry.snapshot
   }
 
-  // Moves the playhead to the boundary just before `id`, or to HISTORY_HEAD for the newest state.
-  // Unknown, cleared and evicted ids leave the timeline untouched, and the jump itself is atomic:
-  // the live state is copied before either stack moves, so a failed clone changes nothing.
+  // Moves the playhead to the boundary just before `id`, to HISTORY_START for the state before the
+  // oldest action, or to HISTORY_HEAD for the newest state. Unknown, cleared and evicted ids leave
+  // the timeline untouched, and the jump itself is atomic: the live state is copied before either
+  // stack moves, so a failed clone changes nothing.
   jump(id, editor) {
-    const target = id === HISTORY_HEAD ? this.size : this.indexOf(id)
+    const target = id === HISTORY_HEAD ? this.size : id === HISTORY_START ? 0 : this.indexOf(id)
     if (target < 0) return { ok: false, reason: "unknown", entry: null, snapshot: null }
     if (target === this.past.length) {
       return { ok: false, reason: "current", entry: this.descriptor(target), snapshot: null }

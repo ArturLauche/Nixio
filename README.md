@@ -166,11 +166,13 @@ Nixio/
 ### 4. Tìm & thay thế, hoàn tác và phím tắt
 - Mở **Tìm & thay** (`Ctrl/Cmd+H` hoặc `Ctrl/Cmd+F`) để tìm kiếm/thay thế xuyên suốt chương (hỗ trợ phân biệt hoa/thường, khớp nguyên từ Unicode, gồm cả câu chưa đặt, tự bảo vệ không làm rỗng hoàn toàn nội dung khung).
 - Lịch sử **Hoàn tác / Làm lại** giữ tối đa 40 thao tác trong phiên (tự gom chuỗi giữ phím mũi tên và gom trọn 1 lượt sửa của Trợ lý AI thành 1 mốc Hoàn tác).
+- **Lịch sử thao tác có tên** (`Ctrl/Cmd + Shift + H`): mỗi mốc là một câu tiếng Việt cụ thể kèm giờ (`Làm sạch raw trang 1`, `Dịch trang 3`, `Đẩy khung bằng phím`), gõ không dấu vẫn tìm được (`lam sach` khớp "Làm sạch…"), dùng `↑`/`↓` để chọn mốc và `Enter` để nhảy — nhảy lùi vẫn giữ nguyên phần **Làm lại**, còn nút **Về trạng thái gốc** đưa về trạng thái trước thao tác đầu tiên (mốc mà không dòng nào đại diện được). Một phiên sửa khung hoặc một đợt đẩy khung bằng phím chỉ chiếm đúng một mốc.
 
 | Phím tắt | Tác dụng |
 |---|---|
 | `Ctrl / Cmd + Z` | Hoàn tác |
 | `Ctrl / Cmd + Shift + Z` hoặc `Ctrl + Y` | Làm lại |
+| `Ctrl / Cmd + Shift + H` | Mở lịch sử thao tác có tên (tìm & nhảy tới mốc) |
 | `Ctrl / Cmd + D` | Nhân bản khung đang chọn |
 | `Ctrl / Cmd + H` (hoặc `F`) | Mở hộp thoại Tìm & thay thế |
 | `Ctrl + Cuộn chuột` | Thu phóng bàn vẽ (25%–400%) |
