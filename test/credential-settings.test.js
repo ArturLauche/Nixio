@@ -274,14 +274,46 @@ test("migration writes only the first usable legacy key per vault scope", async 
   assert.deepEqual(vault.calls.status, [["gemini", undefined]])
   assert.deepEqual(vault.calls.save, [["gemini", undefined, GEMINI_KEY]])
   assert.deepEqual(outcome.secrets.map(({ outcome }) => outcome), ["migrated", "already-stored"])
+  // The second value is a different key for the scope this run already filled, so it is dropped with a
+  // re-entry prompt instead of a success message.
+  assert.equal(outcome.secrets[1].needsReentry, true)
+  assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY)
   assert.deepEqual(storedConfig(storage), { provider: "gemini" })
   assertNoSecret(outcome)
 })
 
-test("an unavailable or unsupported vault erases plaintext and asks for the key again", async () => {
+test("a vault that is not open yet keeps the plaintext key for the next launch", async () => {
+  for (const reason of ["unavailable", "api-unavailable"]) {
+    const storage = memoryStorage({
+      [LLM_CONFIG_STORAGE_KEY]: JSON.stringify({ provider: "gemini", baseUrl: "", llmModel: "", geminiKey: GEMINI_KEY }),
+    })
+    const vault = fakeVault({ status: () => ({ stored: false, supported: false, protection: null, reason }) })
+    const outcome = await migrateLegacyCredentials({ storage, api: vault.api })
+    assert.equal(outcome.secrets[0].outcome, "vault-unavailable", reason)
+    assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED)
+    assert.equal(outcome.needsReentry, false)
+    assert.equal(outcome.persisted, false)
+    assert.equal(vault.calls.save.length, 0)
+    // Nothing was erased: a transient lock must not cost the user the only copy of the key.
+    assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), true)
+    assertNoSecret(outcome)
+  }
+})
+
+test("a browser without a vault keeps the legacy record untouched too", async () => {
+  const storage = memoryStorage({
+    [LLM_CONFIG_STORAGE_KEY]: JSON.stringify({ provider: "gemini", baseUrl: "", llmModel: "", geminiKey: GEMINI_KEY }),
+  })
+  const outcome = await migrateLegacyCredentials({ storage, api: null })
+  assert.equal(outcome.secrets[0].outcome, "no-vault")
+  assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED)
+  assert.equal(outcome.needsReentry, false)
+  assert.equal(outcome.persisted, false)
+  assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), true)
+})
+
+test("a permanently unsupported vault erases plaintext and asks for the key again", async () => {
   const scenarios = [
-    { reason: "unavailable", outcome: "vault-unavailable", code: CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY },
-    { reason: "api-unavailable", outcome: "vault-unavailable", code: CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY },
     { reason: "unsupported-provider", outcome: "vault-unsupported", code: CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY },
     { reason: "probe-failed", outcome: "vault-unsupported", code: CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY },
   ]
@@ -329,16 +361,18 @@ test("a status call that throws fails closed: no save, plaintext erased", async 
   assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), false)
 })
 
-test("a browser without a vault erases plaintext and keeps nothing", async () => {
+test("a browser without a vault keeps the plaintext record instead of deleting it", async () => {
   const storage = memoryStorage({
     [LLM_CONFIG_STORAGE_KEY]: JSON.stringify({ provider: "gemini", baseUrl: "", llmModel: "", geminiKey: GEMINI_KEY }),
   })
   const outcome = await migrateLegacyCredentials({ storage, api: null })
   assert.equal(outcome.secrets[0].outcome, "no-vault")
-  assert.equal(outcome.needsReentry, true)
-  assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY)
+  // There is no vault to move the key to and the settings screen hides saving in a browser, so erasing
+  // it would leave the user with no key and no way to keep one between sessions.
+  assert.equal(outcome.needsReentry, false)
+  assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED)
   assert.deepEqual(outcome.vault, { available: false, supported: false, reason: "no-desktop-vault" })
-  assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), false)
+  assert.equal(storage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), true)
 })
 
 test("unknown fields leave storage, are named back, and unrelated settings are untouched", async () => {
@@ -623,9 +657,11 @@ test("the preload surface is discovered by default, and a partial one is treated
   // A document with only some of the three channels is not a vault.
   globalThis.khungThoaiDesktop = { credentialStatus: async () => ({ stored: true, supported: true, protection: "kb" }) }
   assert.equal(createCredentialSettings().available, false)
-  const outcome = await migrateLegacyCredentials({ storage: memoryStorage({ [LLM_CONFIG_STORAGE_KEY]: JSON.stringify(legacy) }) })
+  const partialStorage = memoryStorage({ [LLM_CONFIG_STORAGE_KEY]: JSON.stringify(legacy) })
+  const outcome = await migrateLegacyCredentials({ storage: partialStorage })
   assert.equal(outcome.secrets[0].outcome, "no-vault")
-  assert.equal(outcome.needsReentry, true)
+  assert.equal(outcome.code, CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED)
+  assert.equal(partialStorage.raw(LLM_CONFIG_STORAGE_KEY).includes(GEMINI_KEY), true)
 })
 
 test("a scope-less or failing status is refused instead of being shown", async () => {

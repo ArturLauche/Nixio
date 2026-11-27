@@ -64,6 +64,11 @@ const MAX_PREFIX_SCAN = 256
 const REQUEST_TIMEOUT_MS = 120000
 const STREAM_IDLE_TIMEOUT_MS = 120000
 const STREAM_TOTAL_TIMEOUT_MS = 600000
+// A caller may ask for its own whole-exchange deadline (the renderer passes the per-call timeout it
+// would apply to a browser fetch). It can only shorten the lifetime inside these bounds; anything else
+// is refused rather than silently replaced.
+const MIN_REQUEST_TIMEOUT_MS = 1000
+const MAX_REQUEST_TIMEOUT_MS = STREAM_TOTAL_TIMEOUT_MS
 // The renderer may name the exchange it is starting, which is what makes a cancel reach work that has
 // not produced a ticket yet (a vault read, a DNS answer, a header block). The grammar keeps a name a
 // short opaque token so it can never carry a URL, a secret or a path.
@@ -159,31 +164,52 @@ const isSuccessStatus = (status) => status >= 200 && status < 300
  * A frame only ever emits text that cannot be the start of a secret: everything after the last
  * position that could still grow into one is held back and re-examined with the next frame, so a key
  * reflected across a chunk boundary never crosses the IPC.
+ *
+ * The same scan covers the encodings a reflected header plausibly takes (base64 of the key and of the
+ * `Bearer <key>` value, URL-encoded forms), because a debug or misconfigured gateway echoes the header
+ * encoded far more often than literally. The hold-back window therefore spans the longest form.
  */
+function encodedSecretForms(secret) {
+  if (!secret) return []
+  const forms = new Set()
+  for (const value of [secret, "Bearer " + secret]) {
+    forms.add(Buffer.from(value, "utf8").toString("base64"))
+    forms.add(Buffer.from(value, "utf8").toString("base64url"))
+    forms.add(encodeURIComponent(value))
+  }
+  forms.delete(secret)
+  return [...forms].filter((form) => form.length >= 8)
+}
+
 class SecretRedactor {
   constructor(secret) {
     this.secret = typeof secret === "string" && secret ? secret : null
+    this.forms = [this.secret, ...encodedSecretForms(this.secret)].filter(Boolean)
+    this.window = this.forms.reduce((longest, form) => Math.max(longest, form.length), 0)
     // A "key" longer than the scan window would make the suffix search unbounded, so such a value is
     // held back whole and emitted only once at flush.
-    this.holdAll = Boolean(this.secret && this.secret.length - 1 > MAX_PREFIX_SCAN)
+    this.holdAll = Boolean(this.window && this.window - 1 > MAX_PREFIX_SCAN)
     this.tail = ""
   }
 
   redact(text) {
     // split/join replaces every occurrence without interpreting the secret as a pattern.
-    return text.split(this.secret).join(REDACTED)
+    return this.forms.reduce((result, form) => result.split(form).join(REDACTED), text)
   }
 
-  // Longest suffix of `text` that is a proper prefix of the secret, so it is held back until it can
-  // be shown not to complete one.
+  // Longest suffix of `text` that is a proper prefix of the secret or of one of its encodings, so it is
+  // held back until it can be shown not to complete one.
   holdback(text) {
     if (this.holdAll) return text.length
-    const limit = Math.min(this.secret.length - 1, text.length)
-    for (let size = limit; size > 0; size--) {
-      if (text.charCodeAt(text.length - size) !== this.secret.charCodeAt(0)) continue
-      if (text.endsWith(this.secret.slice(0, size))) return size
+    let longest = 0
+    for (const form of this.forms) {
+      const limit = Math.min(form.length - 1, text.length, this.window - 1)
+      for (let size = limit; size > longest; size--) {
+        if (text.charCodeAt(text.length - size) !== form.charCodeAt(0)) continue
+        if (text.endsWith(form.slice(0, size))) { longest = size; break }
+      }
     }
-    return 0
+    return longest
   }
 
   push(text) {
@@ -207,6 +233,16 @@ function senderKeyOf(event) {
   return Number.isInteger(id) && id > 0 ? "w" + id : null
 }
 
+// The optional whole-exchange deadline a caller carries. It is validated as a bounded integer so a
+// renderer cannot ask main to hold a socket open forever, or turn the timer into a zero-delay abort.
+function parseRequestTimeout(value) {
+  if (value === undefined || value === null) return null
+  if (!Number.isInteger(value) || value < MIN_REQUEST_TIMEOUT_MS || value > MAX_REQUEST_TIMEOUT_MS) {
+    throw providerError(PROVIDER_CODES.REQUEST)
+  }
+  return value
+}
+
 // The optional correlation token a caller uses to cancel an exchange before it has a ticket. It is
 // validated as a token rather than used as a key on its own: ownership always comes from the frame's
 // sender, so a shared table cannot be steered by a guessed name.
@@ -222,6 +258,7 @@ function parseProviderRequest(raw, streaming) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw providerError(PROVIDER_CODES.REQUEST)
   const { provider, operation, model, payload } = raw
   const requestId = parseRequestId(raw.requestId)
+  const timeoutMs = parseRequestTimeout(raw.timeoutMs)
   if (!PROVIDER_NAMES.has(provider)) throw providerError(PROVIDER_CODES.REQUEST)
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw providerError(PROVIDER_CODES.REQUEST)
   if (provider === "gemini") {
@@ -243,7 +280,7 @@ function parseProviderRequest(raw, streaming) {
   if (typeof body !== "string" || !body || Buffer.byteLength(body) > MAX_REQUEST_BYTES) {
     throw providerError(PROVIDER_CODES.REQUEST)
   }
-  return { provider, operation, model, body, requestId }
+  return { provider, operation, model, body, requestId, timeoutMs }
 }
 
 // The canonical provider+endpoint scope is the only identity a key has. It is resolved here, from the
@@ -481,12 +518,12 @@ class ProviderTransport {
     const destination = request.provider === "gemini"
       ? geminiDestination(request.model, request.operation)
       : openAiDestination(raw.endpoint)
-    const entry = this.register(senderKey, request.requestId, streaming ? "stream" : "request")
+    const entry = this.register(senderKey, request.requestId, streaming ? "stream" : "request", request.timeoutMs)
     entry.body = request.body
     return { entry, destination }
   }
 
-  register(senderKey, requestId, kind) {
+  register(senderKey, requestId, kind, lifetimeMs = null) {
     const ticket = (kind === "stream" ? "s" : "r") + randomUUID().replace(/-/g, "")
     const entry = {
       ticket,
@@ -514,7 +551,8 @@ class ProviderTransport {
     if (requestId) this.requests.set(this.requestKey(senderKey, requestId), entry)
     entry.deadline = setTimeout(
       () => this.abortEntry(entry, providerError(PROVIDER_CODES.TIMEOUT)),
-      kind === "stream" ? this.streamLifetimeMs : this.lifetimeMs,
+      // A caller deadline only ever shortens the transport default it was validated against.
+      lifetimeMs ?? (kind === "stream" ? this.streamLifetimeMs : this.lifetimeMs),
     )
     entry.deadline?.unref?.()
     return entry

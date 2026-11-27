@@ -294,8 +294,8 @@ test("a desktop translation reaches main through the vault and never reads the p
   assert.equal(harness.requests[0].endpoint, OPENAI_BASE)
   assert.deepEqual(
     Object.keys(harness.requests[0]).sort(),
-    ["endpoint", "operation", "payload", "provider", "requestId"],
-    "the envelope carries no key, header or URL override",
+    ["endpoint", "operation", "payload", "provider", "requestId", "timeoutMs"],
+    "the envelope carries no key, header or URL override, only the caller deadline",
   )
   assert.equal(JSON.stringify(harness.requests).includes(TYPED_SECRET), false)
 })

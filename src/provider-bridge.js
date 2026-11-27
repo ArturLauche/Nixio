@@ -14,6 +14,10 @@
 const GEMINI_ORIGIN = "https://generativelanguage.googleapis.com"
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"])
 const DEFAULT_TIMEOUT_MS = 120000
+// Mirrors the bounds desktop/provider-transport.cjs validates, so the renderer never sends a deadline
+// main would refuse.
+const MIN_TIMEOUT_MS = 1000
+const MAX_TIMEOUT_MS = 600000
 const CHAT_PATH = "/chat/completions"
 
 // Mirrors the codes in desktop/provider-transport.cjs; a test asserts the two lists stay equal.
@@ -117,7 +121,16 @@ function browserCall(spec) {
 
 // The envelope is the whole of what main receives: no key, no header, no URL for the Gemini shape,
 // and for the OpenAI-compatible shape only the user-configured base URL that bound the credential.
+// The per-call deadline the caller asked for travels with the envelope, so main ends the exchange at
+// the same point a browser fetch would. A value outside the range main accepts is clamped here instead
+// of turning a working call into a validation error.
+function timeoutField(spec) {
+  if (!Number.isFinite(spec.timeoutMs) || spec.timeoutMs <= 0) return {}
+  return { timeoutMs: Math.min(Math.max(Math.round(spec.timeoutMs), MIN_TIMEOUT_MS), MAX_TIMEOUT_MS) }
+}
+
 function envelopeFor(spec, requestId, stream) {
+  const timeout = timeoutField(spec)
   if (spec.provider === "gemini") {
     return {
       provider: "gemini",
@@ -125,6 +138,7 @@ function envelopeFor(spec, requestId, stream) {
       model: spec.model,
       payload: spec.payload,
       requestId,
+      ...timeout,
     }
   }
   return {
@@ -133,6 +147,7 @@ function envelopeFor(spec, requestId, stream) {
     endpoint: spec.endpoint,
     payload: spec.payload,
     requestId,
+    ...timeout,
   }
 }
 

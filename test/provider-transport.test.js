@@ -865,7 +865,38 @@ test("an exchange that never answers is ended by its own lifetime", async () => 
   assert.equal(instance.entries.size, 0)
 })
 
-test("redaction is literal: an encoded reflection is a disclosed limitation", async () => {
+test("a caller deadline is bounded and replaces the transport default", async () => {
+  const healthy = provider({
+    keys: { [openAiHandle]: OPENAI_KEY },
+    handler: () => ({ status: 200, headers: { "content-type": "application/json" }, chunks: [JSON.stringify({ ok: true })] }),
+  })
+  // Out-of-range deadlines are refused before an entry exists, never silently replaced.
+  for (const timeoutMs of [0, 999, 600001, 1.5, "1000", true]) {
+    const refused = await healthy.instance.execute("w1", openAiRequest({ timeoutMs }))
+    assert.equal(refused.code, PROVIDER_CODES.REQUEST, "accepted timeoutMs " + String(timeoutMs))
+  }
+  assert.equal(healthy.instance.entries.size, 0)
+  const accepted = await healthy.instance.execute("w1", openAiRequest({ timeoutMs: 1000 }))
+  assert.equal(accepted.ok, true)
+
+  // A caller deadline wins over the much shorter transport default: the hanging lookup below would be
+  // killed at 20 ms if the default were still in force.
+  const hanging = new ProviderTransport({
+    credentials: fakeStore({ [openAiHandle]: OPENAI_KEY }),
+    emit: eventSink().emit,
+    lookup: () => new Promise(() => {}),
+    request: fakeTransport().request,
+    lifetimeMs: 20,
+  })
+  const pending = hanging.execute("w1", openAiRequest({ timeoutMs: 5000, requestId: "req-timeout-1" }))
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(hanging.entries.size, 1, "the transport default outlived the caller deadline")
+  hanging.cancel("w1", { requestId: "req-timeout-1" })
+  const cancelled = await pending
+  assert.equal(cancelled.code, PROVIDER_CODES.CANCELLED)
+})
+
+test("an encoded reflection of the key is redacted too", async () => {
   const encoded = Buffer.from(OPENAI_KEY, "utf8").toString("base64")
   const { instance } = provider({
     keys: { [openAiHandle]: OPENAI_KEY },
@@ -880,10 +911,10 @@ test("redaction is literal: an encoded reflection is a disclosed limitation", as
   // The literal secret is removed wherever it appears.
   assert.equal(result.body.includes(OPENAI_KEY), false)
   assert.equal(result.body.includes("[redacted]"), true)
-  // An arbitrary encoding is not recognizable by a literal scan. That limit is deliberate and stated
-  // here instead of being overclaimed: what keeps a reflected value from travelling is the closed
-  // response shape (status, content-type, body), the never-forwarded headers, and the absence of any
-  // request, response or credential logging in this module.
-  assert.equal(result.body.includes(encoded), true)
+  // A gateway that echoes the Authorization value as base64 is the common case, so those forms are
+  // scanned with the same hold-back window as the literal key.
+  assert.equal(result.body.includes(encoded), false, "a base64 reflection reached the renderer")
+  const bearer = Buffer.from("Bearer " + OPENAI_KEY, "utf8").toString("base64")
+  assert.equal(result.body.includes(bearer), false, "an encoded Authorization header reached the renderer")
   assert.equal(JSON.stringify(result).includes("x-echo"), false, "a response header reached the renderer")
 })

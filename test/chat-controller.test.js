@@ -506,8 +506,8 @@ test("a desktop chat turn uses the vault and never reads or sends the password f
   assert.equal(requests.length, 1)
   assert.deepEqual(
     Object.keys(requests[0]).sort(),
-    ["model", "operation", "payload", "provider", "requestId"],
-    "the envelope names a provider and an operation, never a key or a URL",
+    ["model", "operation", "payload", "provider", "requestId", "timeoutMs"],
+    "the envelope names a provider, an operation and a deadline, never a key or a URL",
   )
   assert.equal(JSON.stringify(requests).includes(CHAT_DESKTOP_SECRET), false)
   assert.match(textOf(harness.messages().at(-1)), /Đã kiểm tra trang 1\./)

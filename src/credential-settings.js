@@ -68,6 +68,9 @@ export const CREDENTIAL_SETTINGS_CODES = Object.freeze({
   MIGRATION_CLEANED: "MIGRATION_CLEANED",
   MIGRATION_APPLIED: "MIGRATION_APPLIED",
   MIGRATION_REENTRY: "MIGRATION_REENTRY",
+  // Nothing was erased: the vault is not open yet, or this runtime has no vault at all, and the only
+  // copy of the key is the legacy record.
+  MIGRATION_DEFERRED: "MIGRATION_DEFERRED",
 })
 
 // Fixed strings only. Nothing here interpolates a key, a scope URL, a native error or a stack, so a
@@ -93,6 +96,7 @@ export const CREDENTIAL_SETTINGS_MESSAGES = Object.freeze({
   [CREDENTIAL_SETTINGS_CODES.MIGRATION_CLEANED]: "Đã xóa khóa và trường lạ khỏi cấu hình AI đã lưu; không có khóa nào dùng được để chuyển.",
   [CREDENTIAL_SETTINGS_CODES.MIGRATION_APPLIED]: "Đã chuyển khóa API cũ vào kho bảo mật và xóa khỏi bộ nhớ trình duyệt.",
   [CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY]: "Đã xóa khóa API cũ khỏi bộ nhớ trình duyệt nhưng chưa chuyển được vào kho bảo mật. Hãy nhập lại khóa để dùng tính năng AI.",
+  [CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED]: "Kho khóa bảo mật của hệ điều hành chưa mở nên khóa API cũ vẫn được giữ nguyên trong cấu hình. Lần khởi động sau Nixio sẽ thử chuyển lại.",
 })
 
 // The parts of the contract the next stage has to satisfy. Data, not behaviour, so the DOM wiring and
@@ -313,14 +317,17 @@ async function migrateSecret(candidate, record, bridge, cache) {
   }
   cache.vault = { available: true, supported: true, reason: null }
   // A valid vault secret is never replaced by a legacy one: the user may have already entered a newer
-  // key, and the vault copy is the one the provider calls use.
-  if (status.stored) return secretOutcome(candidate.field, scope, "already-stored", false)
+  // key, and the vault copy is the one the provider calls use. When this same run filled that scope,
+  // the legacy value is a second, different key that is about to be erased, so the user has to hear
+  // that one of the two was dropped instead of reading a clean success.
+  if (status.stored) return secretOutcome(candidate.field, scope, "already-stored", cache.written.has(scope.scopeKey))
   try {
     await bridge.credentialSave(scope.provider, scope.endpoint, candidate.value)
   } catch {
     return secretOutcome(candidate.field, scope, "rejected", true)
   }
   status.stored = true
+  cache.written.add(scope.scopeKey)
   return secretOutcome(candidate.field, scope, "migrated", false)
 }
 
@@ -361,9 +368,27 @@ export async function migrateLegacyCredentials({ storage, api } = {}) {
   // a no-op, so an up-to-date install never touches storage on startup.
   if (!inspection.changed) return result(CREDENTIAL_SETTINGS_CODES.MIGRATION_NOOP, empty)
   const bridge = api === undefined ? desktopCredentialApi() : api
-  const cache = { statuses: new Map(), vault: bridge ? { available: true, supported: null, reason: null } : { available: false, supported: false, reason: "no-desktop-vault" } }
+  const cache = {
+    statuses: new Map(),
+    written: new Set(),
+    vault: bridge ? { available: true, supported: null, reason: null } : { available: false, supported: false, reason: "no-desktop-vault" },
+  }
   const secrets = []
   for (const candidate of inspection.secrets) secrets.push(await migrateSecret(candidate, inspection.record, bridge, cache))
+  // Every secret either never had a vault, or met a vault that is not open yet. Erasing the record
+  // here would destroy the only copy of a key on a condition this module already knows is temporary,
+  // so the plaintext is kept and the next launch retries the migration.
+  const deferred = secrets.length > 0 && secrets.every(({ outcome }) => outcome === "vault-unavailable" || outcome === "no-vault")
+  if (deferred) {
+    return result(CREDENTIAL_SETTINGS_CODES.MIGRATION_DEFERRED, {
+      changed: false,
+      persisted: false,
+      secrets,
+      unknownFields: inspection.unknownFields,
+      needsReentry: false,
+      vault: cache.vault,
+    })
+  }
   let persisted = false
   try {
     target.setItem(LLM_CONFIG_STORAGE_KEY, JSON.stringify(inspection.record))
