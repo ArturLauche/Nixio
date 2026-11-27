@@ -377,6 +377,19 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .script-export-row select { width: 88px; flex: 0 0 auto; }
 .script-export-row button { flex: 1; }
 .translation .button + .button { margin-top: 5px; }
+/* Credential settings: the vault controls stay hidden until a desktop shell reveals them, and the
+   status line is the only place a key outcome is reported. */
+.credential-actions { display: flex; gap: 5px; margin-top: 2px; }
+.credential-actions .button { flex: 1 1 auto; }
+.credential-actions .button + .button { margin-top: 0; }
+.credential-status {
+  margin: 5px 0 0;
+  font-size: .71rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.credential-status:empty { display: none; }
+.credential-status[data-error="true"] { color: var(--danger); }
 .exports h2 { margin-bottom: 8px; }
 .exports .button { margin-bottom: 4px; width: 100%; justify-content: flex-start; }
 

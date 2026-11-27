@@ -12,6 +12,8 @@ import {
 } from "../translation.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
 import { groupDialogue } from "../io.js"
+import { createCredentialSettings } from "../credential-settings.js"
+import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
 
 const llmStorageKey = "khung-thoai-llm-config"
 const llmPresets = {
@@ -35,6 +37,7 @@ export function setupTranslation({
   applyTranslation,
   projectBusy,
   onSettingsChange,
+  configWritesReady,
   notify,
   notifyOverflowIfAny,
 }) {
@@ -54,19 +57,32 @@ export function setupTranslation({
     }
   }
 
-  function saveStoredLlmConfig() {
-    try {
-      localStorage.setItem(
-        llmStorageKey,
-        JSON.stringify({
-          provider: byId("translation-provider").value,
-          baseUrl: byId("llm-base-url").value.trim(),
-          llmModel: byId("llm-model").value.trim(),
-        }),
-      )
-    } catch {
-      // Ignore storage access errors.
+  // The startup migration erases plaintext keys from this record, so a write that landed before it
+  // finished would put them back. Every write therefore waits for `configWritesReady`; the record
+  // itself is captured when the user makes the change, not when the promise settles.
+  const configReady = configWritesReady ? Promise.resolve(configWritesReady).catch(() => {}) : null
+
+  function writeStoredLlmConfig(record) {
+    const write = () => {
+      try {
+        localStorage.setItem(llmStorageKey, JSON.stringify(record))
+      } catch {
+        // Ignore storage access errors.
+      }
     }
+    if (!configReady) {
+      write()
+      return Promise.resolve()
+    }
+    return configReady.then(write, write)
+  }
+
+  function saveStoredLlmConfig() {
+    return writeStoredLlmConfig({
+      provider: byId("translation-provider").value,
+      baseUrl: byId("llm-base-url").value.trim(),
+      llmModel: byId("llm-model").value.trim(),
+    })
   }
 
   function syncProviderFields() {
@@ -75,11 +91,119 @@ export function setupTranslation({
     byId("openai-fields").hidden = !isOpenAi
   }
 
+  // --- Credential vault (Nixio #60) ------------------------------------------------------------
+  //
+  // The password fields are write-only: a value typed here is handed to main once, on submit, and the
+  // field is emptied before the answer arrives. No result, status or error ever carries a key back, so
+  // nothing can prefill these inputs. A browser has no vault at all and keeps the value on screen for
+  // this session only.
+  const credentials = createCredentialSettings()
+  // The vault controls need the three credential channels, which only the desktop preload exposes.
+  const vaultOwnsKeys = credentials.available
+  const credentialInputIds = { gemini: "gemini-key", openai: "llm-key" }
+  const credentialStatusIds = { gemini: "gemini-key-status", openai: "llm-key-status" }
+  const credentialRemoveIds = { gemini: "gemini-key-remove", openai: "llm-key-remove" }
+  let boundScopeKey = null
+
+  function credentialProvider() {
+    return byId("translation-provider").value === "openai" ? "openai" : "gemini"
+  }
+
+  // Gemini has one fixed destination, so its key is bound to the provider alone; an OpenAI-compatible
+  // key is bound to the exact Base URL that is on screen right now.
+  function scopeEndpoint(provider) {
+    return provider === "openai" ? byId("llm-base-url").value.trim() : undefined
+  }
+
+  function clearCredentialInputs() {
+    for (const id of Object.values(credentialInputIds)) byId(id).value = ""
+  }
+
+  function clearCredentialStatus(provider) {
+    const element = byId(credentialStatusIds[provider])
+    element.textContent = ""
+    element.dataset.error = "false"
+    byId(credentialRemoveIds[provider]).disabled = true
+  }
+
+  function renderCredentialStatus(outcome) {
+    const provider = outcome?.provider === "openai" || outcome?.provider === "gemini"
+      ? outcome.provider
+      : credentialProvider()
+    const element = byId(credentialStatusIds[provider])
+    element.textContent = outcome?.message || ""
+    element.dataset.error = outcome?.ok === false ? "true" : "false"
+    byId(credentialRemoveIds[provider]).disabled = outcome?.stored !== true
+  }
+
+  // The status line and a provider request both read these same two inputs, so the scope the screen
+  // describes is the scope main binds the stored key to. Every question is issued with a sequence
+  // number per provider and only the answer to the newest question is rendered: a scope probe issued
+  // before a save would otherwise answer after it and replace "đã lưu khóa" with a plain status. The
+  // call itself is made synchronously, so a save is bound to the scope that was on screen when the
+  // user clicked, never to one they switched to while it was in flight.
+  const credentialIssued = new Map()
+  let credentialSequence = 0
+
+  function issueCredential(provider, operation) {
+    const sequence = ++credentialSequence
+    credentialIssued.set(provider, sequence)
+    return operation().then((outcome) => {
+      // A superseded answer means the user already moved on, and the helper reports it without
+      // claiming anything about the scope that is now on screen.
+      if (credentialIssued.get(provider) === sequence && outcome?.superseded !== true) {
+        renderCredentialStatus(outcome)
+      }
+      return outcome
+    })
+  }
+
+  function bindCredentialScope(provider = credentialProvider(), { refresh = true } = {}) {
+    const applied = credentials.setScope(provider, scopeEndpoint(provider))
+    const scopeKey = applied.ok ? applied.scopeKey : null
+    if (scopeKey !== boundScopeKey) {
+      // A value typed for the previous provider or endpoint must not be saved under this one.
+      clearCredentialInputs()
+      for (const name of Object.keys(credentialStatusIds)) clearCredentialStatus(name)
+      boundScopeKey = scopeKey
+    }
+    if (refresh) {
+      // `refresh` still answers when the scope is unusable, so the status line explains why.
+      void issueCredential(provider, () => credentials.refresh()).catch(() => {})
+    }
+    return applied
+  }
+
+  async function saveCredential(provider) {
+    // Bind first: this is what clears a value that was typed for a different endpoint.
+    const applied = bindCredentialScope(provider, { refresh: false })
+    if (!applied.ok) return issueCredential(provider, () => credentials.refresh())
+    const input = byId(credentialInputIds[provider])
+    const secret = input.value
+    // Emptied before the round trip, so a rejected save cannot leave the key in the field.
+    input.value = ""
+    return issueCredential(provider, () => credentials.save(secret))
+  }
+
+  async function removeCredential(provider) {
+    const applied = bindCredentialScope(provider, { refresh: false })
+    if (!applied.ok) return issueCredential(provider, () => credentials.refresh())
+    return issueCredential(provider, () => credentials.remove())
+  }
+
+  function syncCredentialControls() {
+    for (const id of ["gemini-key-actions", "llm-key-actions"]) byId(id).hidden = !vaultOwnsKeys
+    for (const id of Object.values(credentialRemoveIds)) byId(id).disabled = true
+  }
+
   loadStoredLlmConfig()
   syncProviderFields()
+  syncCredentialControls()
+  bindCredentialScope()
 
   byId("translation-provider").onchange = () => {
     syncProviderFields()
+    bindCredentialScope()
     saveStoredLlmConfig()
     onSettingsChange?.()
   }
@@ -88,16 +212,22 @@ export function setupTranslation({
     if (!preset) return
     byId("llm-base-url").value = preset.baseUrl
     if (preset.model && !byId("llm-model").value.trim()) byId("llm-model").value = preset.model
+    bindCredentialScope()
     saveStoredLlmConfig()
     onSettingsChange?.()
   }
   byId("llm-base-url").onchange = () => {
+    bindCredentialScope()
     saveStoredLlmConfig()
     onSettingsChange?.()
   }
   byId("llm-model").onchange = () => {
     saveStoredLlmConfig()
     onSettingsChange?.()
+  }
+  for (const provider of Object.keys(credentialInputIds)) {
+    byId(credentialInputIds[provider] + "-save").onclick = () => saveCredential(provider)
+    byId(credentialInputIds[provider] + "-remove").onclick = () => removeCredential(provider)
   }
 
   function readTranslationSettings() {
@@ -116,12 +246,28 @@ export function setupTranslation({
     }
   }
 
+  // Main answers a request that has no stored credential through a fixed code, so the article status
+  // stays Vietnamese while the renderer never repeats main's own wording or a raw provider header.
+  function providerFailureText(error, provider) {
+    if (error?.code === PROVIDER_BRIDGE_CODES.CREDENTIAL) {
+      return provider === "gemini"
+        ? "Chưa có khóa API Gemini trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
+        : "Chưa có khóa API cho endpoint này trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
+    }
+    return error?.message || String(error)
+  }
+
   function prepareCredentials(settings) {
+    // On the desktop main attaches the stored key, so the password fields are never read for a
+    // request: an unconfigured provider is rejected by main instead of by a value left on screen. A
+    // browser has no vault and keeps using the field for this session only.
+    const vaultKeys = vaultOwnsKeys || providerCredentialsInMain()
     if (settings.provider === "openai") {
       validateEndpointUrl(settings.baseUrl)
       if (!settings.llmModel) throw new Error("Hãy nhập tên Model LLM.")
-      return { ...settings, apiKey: byId("llm-key").value.trim() }
+      return vaultKeys ? settings : { ...settings, apiKey: byId("llm-key").value.trim() }
     }
+    if (vaultKeys) return settings
     const key = byId("gemini-key").value.trim()
     if (!key) throw new Error("Hãy nhập khóa API Gemini.")
     return { ...settings, key }
@@ -204,24 +350,25 @@ export function setupTranslation({
       if (active && pages.includes(active)) notifyOverflowIfAny?.(active, "sau khi dịch")
     } catch (error) {
       const stopped = translationController.signal.aborted
+      const reason = providerFailureText(error, settings.provider)
       if (activePage)
         activePage.translationJob = {
           kind,
           signature,
           state: stopped ? "pending" : "error",
-          error: stopped ? undefined : error.message,
+          error: stopped ? undefined : reason,
         }
       status(
         stopped
           ? `Đã dừng sau ${completed} trang. Có thể tiếp tục dịch chương.`
-          : `Đã ${action} ${completed}/${pages.length} trang. ${error.message}`,
+          : `Đã ${action} ${completed}/${pages.length} trang. ${reason}`,
         !stopped,
       )
       if (!stopped && pages.length > 1) {
         notify?.({
           kind: "error",
           title: `Lỗi khi ${action} chương`,
-          message: `Hoàn tất ${completed}/${pages.length} trang. ${error.message}`,
+          message: `Hoàn tất ${completed}/${pages.length} trang. ${reason}`,
           key: "batch-translate",
         })
       }
@@ -282,13 +429,14 @@ export function setupTranslation({
       notifyOverflowIfAny?.(page, "sau khi dịch khung chữ")
     } catch (error) {
       const stopped = translationController.signal.aborted
+      const reason = providerFailureText(error, settings.provider)
       page.translationJob = {
         kind: "translate",
         signature,
         state: stopped ? "pending" : "error",
-        error: stopped ? undefined : error.message,
+        error: stopped ? undefined : reason,
       }
-      status(stopped ? "Đã dừng dịch khung chữ." : "Không dịch được khung chữ. " + error.message, !stopped)
+      status(stopped ? "Đã dừng dịch khung chữ." : "Không dịch được khung chữ. " + reason, !stopped)
     } finally {
       state.translating = false
       translationController = null

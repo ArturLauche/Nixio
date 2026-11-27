@@ -38,6 +38,7 @@ import { setupExports } from "./controllers/export.js"
 import { setupDialogs } from "./controllers/dialogs.js"
 import { setupGestures } from "./controllers/gestures.js"
 import { setupChat } from "./controllers/chat.js"
+import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
 
 const history = new EditHistory()
 const ownedUrls = new Set()
@@ -1779,6 +1780,30 @@ window.addEventListener("online", () => {
   })
 })
 
+// Nixio #60: the legacy LLM record is sanitized before any settings writer exists, and the promise is
+// handed to the translation controller so a write that lands mid-migration waits instead of putting
+// the plaintext keys back on disk. A storage failure is reported and startup continues.
+const credentialMigration = migrateLegacyCredentials()
+const MIGRATION_NOTICES = new Set([
+  CREDENTIAL_SETTINGS_CODES.MIGRATION_APPLIED,
+  CREDENTIAL_SETTINGS_CODES.MIGRATION_CLEANED,
+  CREDENTIAL_SETTINGS_CODES.MIGRATION_REENTRY,
+  CREDENTIAL_SETTINGS_CODES.STORAGE_UNAVAILABLE,
+  CREDENTIAL_SETTINGS_CODES.CONFIG_CORRUPT,
+])
+
+credentialMigration.then(
+  (outcome) => {
+    // An up-to-date install and a missing record say nothing: only the answers that changed something,
+    // need a key again, or failed to read storage are worth a status line.
+    if (!outcome || !MIGRATION_NOTICES.has(outcome.code)) return
+    status(outcome.message, outcome.code !== CREDENTIAL_SETTINGS_CODES.MIGRATION_APPLIED)
+  },
+  // The helper reports its own failures, so a rejection here would be a defect rather than a state to
+  // explain; it must not stop the editor from opening.
+  () => {},
+)
+
 const shared = {
   state, byId, status, checkpoint, renderPages, renderInspector, renderCanvas, render,
   selectedPage, selectedBox, projectBusy, notify, notifyOverflowIfAny,
@@ -1792,6 +1817,7 @@ const translation = setupTranslation({
   ...shared,
   pageForScript,
   applyTranslation,
+  configWritesReady: credentialMigration,
   onSettingsChange: () => {
     syncTranslationActions()
     chat?.refreshModelBadge()

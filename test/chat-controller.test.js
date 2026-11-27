@@ -425,3 +425,111 @@ test("AI compaction disables the composer, releases on cancel, and reports failu
   assert.equal(harness.byId("chat-send").disabled, false)
   assert.equal(input.disabled, false)
 })
+
+// The desktop shell owns the provider credential: chat is handed a provider and an operation, and the
+// key never enters a request envelope. `providerStream` answers with the same fixed code main uses when
+// nothing is stored for the scope, so both the success and the rejection path are covered here.
+const CHAT_DESKTOP_SECRET = "sk-renderer-chat-must-not-travel-51bd"
+
+function installDesktopProvider(t, { credentialError = false, answer = "Đã kiểm tra trang 1." } = {}) {
+  const requests = []
+  let listener = null
+  const frames = [
+    {
+      type: "chunk",
+      ticket: "t1",
+      text: "data: " + JSON.stringify({ candidates: [{ content: { parts: [{ text: answer }] } }] }) + "\n\n",
+    },
+    { type: "end", ticket: "t1" },
+  ]
+  const previous = globalThis.khungThoaiDesktop
+  globalThis.khungThoaiDesktop = {
+    async providerRequest(envelope) {
+      requests.push(JSON.parse(JSON.stringify(envelope)))
+      return { ok: false, code: "ERR_PROVIDER_POLICY", message: "The buffered path is not used here." }
+    },
+    async providerStream(envelope) {
+      requests.push(JSON.parse(JSON.stringify(envelope)))
+      if (credentialError) {
+        return {
+          ok: false,
+          code: "ERR_PROVIDER_CREDENTIAL",
+          message: "No usable API key is stored for this provider and endpoint.",
+        }
+      }
+      return { ok: true, status: 200, contentType: "sse", ticket: "t1" }
+    },
+    async providerActivate() {
+      queueMicrotask(() => { for (const frame of frames) listener?.(frame) })
+      return { ok: true, active: true }
+    },
+    providerCancel: () => ({ ok: true }),
+    onProviderEvent(callback) {
+      listener = callback
+      return () => { listener = null }
+    },
+    async credentialStatus() {
+      return { stored: true, supported: true, protection: "safeStorage", reason: null }
+    },
+    async credentialSave() { return { stored: true } },
+    async credentialRemove() { return { removed: true } },
+  }
+  t.after(() => {
+    if (previous === undefined) delete globalThis.khungThoaiDesktop
+    else globalThis.khungThoaiDesktop = previous
+  })
+  return requests
+}
+
+// The password field reports every read, so "the desktop never takes the key" is a recorded fact.
+function watchSecretField(element) {
+  const reads = []
+  let held = CHAT_DESKTOP_SECRET
+  Object.defineProperty(element, "value", {
+    configurable: true,
+    get() { reads.push("read"); return held },
+    set(next) { held = String(next ?? "") },
+  })
+  return reads
+}
+
+test("a desktop chat turn uses the vault and never reads or sends the password field", async (t) => {
+  const harness = await createHarness()
+  const requests = installDesktopProvider(t)
+  const reads = watchSecretField(harness.byId("gemini-key"))
+
+  harness.submit("Xin chào")
+  await drain()
+
+  assert.deepEqual(reads, [], "the desktop must not read the key field")
+  assert.equal(harness.fetchCalls.length, 0, "a desktop turn must not fall back to the renderer fetch")
+  assert.equal(requests.length, 1)
+  assert.deepEqual(
+    Object.keys(requests[0]).sort(),
+    ["model", "operation", "payload", "provider", "requestId"],
+    "the envelope names a provider and an operation, never a key or a URL",
+  )
+  assert.equal(JSON.stringify(requests).includes(CHAT_DESKTOP_SECRET), false)
+  assert.match(textOf(harness.messages().at(-1)), /Đã kiểm tra trang 1\./)
+})
+
+test("a desktop chat turn with no stored key reports the vault in Vietnamese", async (t) => {
+  const harness = await createHarness()
+  const requests = installDesktopProvider(t, { credentialError: true })
+  const reads = watchSecretField(harness.byId("gemini-key"))
+
+  harness.submit("Xin chào")
+  await drain()
+
+  assert.deepEqual(reads, [], "a missing credential is main's answer, not a reason to read the field")
+  assert.equal(harness.fetchCalls.length, 0)
+  assert.equal(requests.length, 1)
+  const errorCard = byClass(harness.byId("chat-messages"), "chat-msg error").at(-1)
+  assert.ok(errorCard, "the failed turn is reported in the transcript")
+  assert.match(String(errorCard.textContent), /Chưa có khóa API Gemini trong kho bảo mật/)
+  assert.equal(
+    String(errorCard.textContent).includes("No usable API key"),
+    false,
+    "main's own wording is not shown",
+  )
+})

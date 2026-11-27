@@ -98,8 +98,13 @@
           </label>
           <div id="gemini-fields">
             <label class="field" for="gemini-key">Khóa API
-              <input id="gemini-key" type="password" autocomplete="off">
+              <input id="gemini-key" type="password" autocomplete="off" spellcheck="false">
             </label>
+            <div id="gemini-key-actions" class="credential-actions" hidden>
+              <button type="button" id="gemini-key-save" class="button">Lưu khóa</button>
+              <button type="button" id="gemini-key-remove" class="button">Xóa khóa</button>
+            </div>
+            <p id="gemini-key-status" class="credential-status" role="status" aria-live="polite"></p>
             <label class="field" for="gemini-model">Model
               <select id="gemini-model">
                 <option value="auto">Tự động</option>
@@ -125,8 +130,13 @@
               <input id="llm-model" type="text" placeholder="qwen2.5:7b, hy-mt2-manga, gpt-4o-mini">
             </label>
             <label class="field" for="llm-key">API Key (trống nếu chạy cục bộ)
-              <input id="llm-key" type="password" autocomplete="off">
+              <input id="llm-key" type="password" autocomplete="off" spellcheck="false">
             </label>
+            <div id="llm-key-actions" class="credential-actions" hidden>
+              <button type="button" id="llm-key-save" class="button">Lưu khóa</button>
+              <button type="button" id="llm-key-remove" class="button">Xóa khóa</button>
+            </div>
+            <p id="llm-key-status" class="credential-status" role="status" aria-live="polite"></p>
           </div>
           <label class="field" for="source-language">Ngôn ngữ gốc
             <select id="source-language">

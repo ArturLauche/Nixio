@@ -4,6 +4,7 @@ import { parseSlashCommand } from "../agent-commands.js"
 import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkillPrefs } from "../agent-skills.js"
 import { createAgentTools } from "../agent-tools.js"
 import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
+import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
 
 const searchStorageKey = "khung-thoai-search-config"
 const planExecutionPrompt =
@@ -184,11 +185,24 @@ export function setupChat({
 
   function readAgentSettings() {
     const base = readTranslationSettings()
+    // The desktop keeps the keys in the OS vault and main attaches them, so the password fields are
+    // never read into a request here. A browser has no vault and uses the value on screen, in memory
+    // only, which is the same shape the harness already accepts.
+    if (providerCredentialsInMain()) return base
     return {
       ...base,
       key: byId("gemini-key").value.trim(),
       apiKey: byId("llm-key").value.trim(),
     }
+  }
+
+  // Main rejects a provider request whose vault entry is missing with a fixed code, so the chat keeps
+  // a Vietnamese message instead of echoing main's own wording.
+  function providerFailureText(error) {
+    if (error?.code !== PROVIDER_BRIDGE_CODES.CREDENTIAL) return error?.message || String(error)
+    return readTranslationSettings().provider === "gemini"
+      ? "Chưa có khóa API Gemini trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
+      : "Chưa có khóa API cho endpoint này trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
   }
 
   function refreshModelBadge() {
@@ -680,7 +694,7 @@ export function setupChat({
     } catch (error) {
       statusEl.textContent = activeController.signal.aborted
         ? "Đã dừng tóm tắt ngữ cảnh."
-        : "Không tóm tắt được bằng AI: " + (error?.message || String(error))
+        : "Không tóm tắt được bằng AI: " + providerFailureText(error)
     } finally {
       activeController = null
       syncBusyControls()
@@ -972,7 +986,7 @@ export function setupChat({
       const stopped = activeController?.signal.aborted
       const errEl = document.createElement("div")
       errEl.className = "chat-msg error"
-      errEl.textContent = stopped ? "Đã dừng lượt xử lý của AI." : "Lỗi: " + (error?.message || String(error))
+      errEl.textContent = stopped ? "Đã dừng lượt xử lý của AI." : "Lỗi: " + providerFailureText(error)
       turnEl.append(errEl)
       statusEl.textContent = stopped ? "Đã dừng." : "Gặp lỗi."
       settled = { ok: false, cancelled: Boolean(stopped) }
