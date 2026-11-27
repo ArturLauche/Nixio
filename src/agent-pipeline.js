@@ -102,10 +102,12 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
     summary: outcome?.ok ? outcome.summary : (outcome?.error || "Lỗi không xác định"),
     data: outcome?.data,
     modelText: outcome?.modelText,
+    attachment: outcome?.attachment,
     error: outcome?.error,
     durationMs,
   }
-  onEvent?.({ type: "tool_end", ...settled })
+  const { attachment: _omitted, ...publicEvent } = settled
+  onEvent?.({ type: "tool_end", ...publicEvent, hasAttachment: Boolean(settled.attachment) })
   return settled
 }
 

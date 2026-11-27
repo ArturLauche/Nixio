@@ -3,6 +3,7 @@ import { exportPage, nativePageLayers, textOverflows } from "../canvas.js"
 import { filenameStem, saveFile } from "../io.js"
 import { translationSignature } from "../translation.js"
 import { exportDialogueScript } from "../tools.js"
+import { lintChapter } from "../linter.js"
 import { desktop } from "../native.js"
 
 export function setupExports({
@@ -59,7 +60,8 @@ export function setupExports({
   let pendingExport
   function exportIssues(pages) {
     const issues = []
-    const signature = translationSignature(readTranslationSettings())
+    const settings = readTranslationSettings()
+    const signature = translationSignature(settings)
     const context = document.createElement("canvas").getContext("2d")
     if (state.queue.length)
       issues.push({ text: `${state.queue.length} câu chưa đặt trong chương.` })
@@ -94,6 +96,22 @@ export function setupExports({
             text: prefix + "Chữ tràn khung · " + box.text.slice(0, 70),
           })
       }
+    }
+    const qa = lintChapter(pages, {
+      glossaryText: settings.glossary ?? "",
+      sourceLanguage: settings.source ?? "Japanese",
+      targetLanguage: settings.target ?? "Vietnamese",
+      maxIssues: 40,
+    })
+    for (const item of qa.issues) {
+      if (item.severity !== "warning") continue
+      const page = pages[item.pageIndex - 1]
+      const box = page?.boxes.find((b) => b.id === item.boxId)
+      issues.push({
+        page,
+        box,
+        text: `${item.pageName} · QA: ${item.message}`,
+      })
     }
     return issues
   }

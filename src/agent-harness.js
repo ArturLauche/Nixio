@@ -578,6 +578,7 @@ export async function runAgentTurn({
     })
 
     const geminiResponses = []
+    const openAiAttachments = []
     const guardReminders = []
     for (const entry of settled) {
       toolTrace.push(entry)
@@ -601,6 +602,13 @@ export async function runAgentTurn({
 
       if (isOpenAi) {
         openAiMessages.push({ role: "tool", tool_call_id: entry.id, content: retained.text })
+        if (entry.ok && entry.attachment?.base64) {
+          openAiAttachments.push({
+            summary: entry.summary,
+            mimeType: entry.attachment.mimeType || "image/jpeg",
+            base64: entry.attachment.base64,
+          })
+        }
       } else {
         geminiResponses.push({
           functionResponse: {
@@ -612,9 +620,26 @@ export async function runAgentTurn({
               : { ok: false, error: entry.error, ...(entry.code && { code: entry.code }) },
           },
         })
+        if (entry.ok && entry.attachment?.base64) {
+          geminiResponses.push({
+            inlineData: {
+              mimeType: entry.attachment.mimeType || "image/jpeg",
+              data: entry.attachment.base64,
+            },
+          })
+        }
       }
     }
     if (isOpenAi) {
+      for (const att of openAiAttachments) {
+        openAiMessages.push({
+          role: "user",
+          content: [
+            { type: "text", text: `[Ảnh đính kèm từ inspect_page_image: ${att.summary}]` },
+            { type: "image_url", image_url: { url: `data:${att.mimeType};base64,${att.base64}` } },
+          ],
+        })
+      }
       for (const reminder of guardReminders) {
         openAiMessages.push({ role: "user", content: reminder })
       }
