@@ -23,6 +23,14 @@ export function setupDialogs({
     }
   }
 
+  function findError(message) {
+    const error = byId("find-error")
+    if (!error) return
+    error.textContent = message ?? ""
+    if (message) byId("find-query").setAttribute("aria-invalid", "true")
+    else byId("find-query").removeAttribute("aria-invalid")
+  }
+
   function renderFindResults() {
     const query = byId("find-query").value
     const results = byId("find-results")
@@ -60,7 +68,8 @@ export function setupDialogs({
   }
 
   function openFind() {
-    if (projectBusy()) return
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    findError(null)
     commitLiveForm?.()
     if (!findDialog.open) findDialog.showModal()
     renderFindResults()
@@ -74,15 +83,23 @@ export function setupDialogs({
 
   byId("open-find").onclick = openFind
   byId("close-find").onclick = () => findDialog.close()
-  byId("find-query").oninput = renderFindResults
+  byId("find-query").oninput = () => {
+    findError(null)
+    renderFindResults()
+  }
   byId("find-case").onchange = renderFindResults
   byId("find-word").onchange = renderFindResults
   byId("find-unplaced").onchange = renderFindResults
 
   byId("replace-all-btn").onclick = () => {
-    if (projectBusy()) return
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
     const query = byId("find-query").value
-    if (!query) return status("Hãy nhập nội dung cần tìm.", true)
+    if (!query) {
+      findError("Hãy nhập nội dung cần tìm.")
+      byId("find-query").focus()
+      return
+    }
+    findError(null)
     const replacement = byId("replace-text").value
     commitLiveForm?.()
     const matches = findMatches(state.pages, query, findOptions())

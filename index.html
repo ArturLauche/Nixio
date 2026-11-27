@@ -17,7 +17,7 @@
     <div class="header-actions">
       <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
       <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)">Trợ lý AI</button>
-      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H)">Tìm &amp; thay</button>
+      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H / Ctrl+F)">Tìm &amp; thay</button>
       <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
       <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại">Cập nhật</button>
       <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" title="Trung tâm thông báo">Thông báo <span id="notif-badge" class="notif-badge" hidden>0</span></button>
@@ -538,6 +538,7 @@
     <label class="field" for="find-query">Tìm kiếm
       <input id="find-query" type="search" placeholder="Nhập từ hoặc cụm thoại cần tìm">
     </label>
+    <p id="find-error" class="find-error" role="alert"></p>
     <label class="field" for="replace-text">Thay bằng
       <input id="replace-text" type="text" placeholder="Nội dung thay thế">
     </label>
