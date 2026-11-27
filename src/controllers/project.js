@@ -452,15 +452,26 @@ export function setupProjects({
   }
   if (desktop?.native) {
     byId("local-processing").hidden = false
-    byId("native-status").textContent = "Đang kiểm tra worker C#…"
+    // Nixio #107: the line changes once the worker answers, so it is a live region; an OCR error
+    // becomes an alert because the reader must hear it without moving focus back here.
+    const setNativeStatus = (text, error = false) => {
+      const element = byId("native-status")
+      element.setAttribute("role", error ? "alert" : "status")
+      element.setAttribute("aria-live", error ? "assertive" : "polite")
+      element.textContent = text
+    }
+    setNativeStatus("Đang kiểm tra worker C#…")
     nativeCapabilities()
       .then(async (capabilities) => {
         nativeReady = Boolean(capabilities)
         const nativeLanguages = capabilities?.languages ?? []
         onCapabilities(nativeReady, nativeLanguages)
-        byId("native-status").textContent = capabilities
-          ? (capabilities.ocrError ?? "OCR cục bộ sẵn sàng.")
-          : "Chạy npm run desktop:native để bật xử lý C#."
+        setNativeStatus(
+          capabilities
+            ? (capabilities.ocrError ?? "OCR cục bộ sẵn sàng.")
+            : "Chạy npm run desktop:native để bật xử lý C#.",
+          Boolean(capabilities?.ocrError),
+        )
         byId("local-ocr-language").replaceChildren(
           ...nativeLanguages.map((language) => new Option(language, language)),
         )

@@ -1,11 +1,16 @@
 import { desktop } from "../native.js"
 import { holdFocus } from "../focus.js"
+import { announce } from "../live-region.js"
 
 const ACTIVE = ["running", "queued"]
+// A task that starts or stops working changes what the reader can do, so each state change is
+// announced once; progress ticks stay visual.
+const ANNOUNCED = ["running", "done", "error", "cancelled"]
 
 export function setupTasks(byId) {
   if (!desktop?.onTask) return
   const tasks = new Map()
+  const announcedStates = new Map()
   const panel = byId("task-panel")
   const list = byId("task-list")
 
@@ -47,13 +52,24 @@ export function setupTasks(byId) {
     list.replaceChildren(...rows.map(row))
     restoreFocus()
     for (const [id, task] of tasks) {
-      if (!rows.includes(task) && !ACTIVE.includes(task.state)) tasks.delete(id)
+      if (!rows.includes(task) && !ACTIVE.includes(task.state)) {
+        tasks.delete(id)
+        announcedStates.delete(id)
+      }
     }
   }
 
   desktop.onTask((update) => {
     const known = tasks.get(update.id)
     tasks.set(update.id, { ...update, cancelling: Boolean(known?.cancelling) })
+    // The queue names its own stages ("Đang xử lý", "Hoàn tất", "Đã hủy"), so the announcement is
+    // the operation plus that stage.
+    if (announcedStates.get(update.id) !== update.state) {
+      announcedStates.set(update.id, update.state)
+      if (ANNOUNCED.includes(update.state)) {
+        announce(`${update.operation}: ${update.stage}.`, { assertive: update.state === "error" })
+      }
+    }
     paint()
   })
 }

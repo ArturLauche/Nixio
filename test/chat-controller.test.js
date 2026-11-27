@@ -605,3 +605,56 @@ test("an Escape that belongs to the editor closes the panel without stealing the
   harness.document.dispatch("keydown", { key: "Escape" })
   assert.equal(panel.hidden, true, "Escape on a closed panel changes nothing")
 })
+
+// #91: the transcript must not drag a reader back to the end while an answer streams, so the test
+// drives a real SSE stream and scrolls away between two deltas.
+function streamingResponse() {
+  const encoder = new TextEncoder()
+  let controller = null
+  const body = new ReadableStream({ start(inner) { controller = inner } })
+  const send = (text) => controller.enqueue(encoder.encode(
+    "data: " + JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }) + "\n\n",
+  ))
+  return {
+    body,
+    send,
+    close: () => controller.close(),
+    response: () => Promise.resolve({ ok: true, status: 200, headers: { get: () => "text/event-stream" }, body }),
+  }
+}
+
+test("streaming follows the tail until the reader scrolls back and offers a jump control", async () => {
+  const harness = await createHarness()
+  const stream = streamingResponse()
+  harness.setFetch(() => stream.response())
+  const messages = harness.byId("chat-messages")
+  const jump = harness.byId("chat-jump")
+  Object.defineProperty(messages, "clientHeight", { configurable: true, get: () => 100 })
+  Object.defineProperty(messages, "scrollHeight", {
+    configurable: true,
+    get: () => (messages.children.length ? 400 : 0),
+  })
+
+  harness.submit("Dịch trang 1")
+  await drain()
+  stream.send("Phần một.")
+  await drain()
+  assert.equal(messages.scrollTop, 400, "a reader at the tail follows the stream")
+
+  messages.scrollTop = 0
+  messages.dispatch("scroll")
+
+  stream.send("Phần hai.")
+  await drain()
+  assert.equal(messages.scrollTop, 0, "a later delta must not drag the reader back")
+  assert.equal(jump.hidden, false, "leaving the tail offers the jump control")
+
+  jump.click()
+  assert.equal(messages.scrollTop, 400, "the jump control returns to the newest output")
+  assert.equal(jump.hidden, true)
+  assert.equal(harness.byId("chat-input").focused, true)
+
+  stream.close()
+  await drain()
+  assert.equal(messages.scrollTop, 400, "the finished turn keeps the tail pinned")
+})
