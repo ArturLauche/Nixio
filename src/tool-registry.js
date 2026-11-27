@@ -164,12 +164,13 @@ export function createToolRegistry(entries = [], { host = {} } = {}) {
     },
     // Fail-closed dispatch: an unregistered name, a tool the user's permissions hide and a handler
     // that throws all come back as `ok: false`, so a model that invents a tool never reaches code.
-    async dispatch(name, args, { flags = {}, signal } = {}) {
+    // `run` replaces the handler call for callers that must wrap it, such as the AI review draft.
+    async dispatch(name, args, { flags = {}, signal, run } = {}) {
       const tool = get(name)
       if (!tool) return { ok: false, error: `Công cụ không tồn tại: ${name}` }
       if (!isAvailable(tool, flags)) return denial(tool, flags)
       try {
-        const result = await tool.run(args ?? {}, { signal })
+        const result = await (run ? run(tool, args ?? {}, { signal }) : tool.run(args ?? {}, { signal }))
         return { ok: true, category: tool.category, ...result }
       } catch (error) {
         return { ok: false, category: tool.category, error: error?.message || String(error) }

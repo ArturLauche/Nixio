@@ -1,5 +1,6 @@
 import { TOOL_APPROVAL_REJECTED, TOOL_APPROVAL_UNAVAILABLE } from "./agent-pipeline.js"
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
+import { clonePagesForDraft, describeChange, diffGlossaryChange, diffPages, isRejectedChange } from "./agent-review.js"
 import { lintChapter } from "./linter.js"
 import {
   findTerm,
@@ -113,16 +114,16 @@ function defaultCapturePageImage(page, { box = null, maxDim = 768 } = {}) {
 
 export function createAgentTools({
   state,
-  byId,
-  selectedPage,
-  selectedIndex,
+  byId: liveById,
+  selectedPage: liveSelectedPage,
+  selectedIndex = () => -1,
   selectPage,
-  checkpoint,
-  render,
-  commitLiveForm,
+  checkpoint: liveCheckpoint,
+  render: liveRender,
+  commitLiveForm: liveCommitLiveForm,
   readTranslationSettings,
   registerFontName,
-  renderFontOptions,
+  renderFontOptions: liveRenderFontOptions,
   onTodosChange,
   onPlanSubmit,
   onAskUser,
@@ -140,6 +141,27 @@ export function createAgentTools({
 }) {
   let currentTodos = []
   let currentPlan = null
+  let reviewSession = null
+  let reviewRejections = []
+  // Set while a write tool runs against a draft: nothing may reach the live editor or the history
+  // until the user accepts the change, so every mutating callback is muted.
+  let draft = null
+
+  const checkpoint = (...args) => {
+    if (!draft) liveCheckpoint?.(...args)
+  }
+  const render = (...args) => {
+    if (!draft) liveRender?.(...args)
+  }
+  const commitLiveForm = (...args) => {
+    if (!draft) liveCommitLiveForm?.(...args)
+  }
+  const renderFontOptions = (...args) => {
+    if (!draft) liveRenderFontOptions?.(...args)
+  }
+  const byId = (id) => (draft ? draft.fields.get(id) ?? null : liveById(id))
+  const selectedPage = () => (draft ? draft.pages[selectedIndex()] ?? null : liveSelectedPage?.() ?? null)
+
   const catalog = [
     {
       name: "web_search",
@@ -1176,6 +1198,62 @@ export function createAgentTools({
     }
   }
 
+  // A write tool runs against a cloned draft while a review is open: the live pages, the live
+  // selection and the history stay untouched, and only the difference comes back as proposals.
+  async function runStagedReview(tool, args, { signal, callId = "" } = {}) {
+    liveCommitLiveForm?.()
+    const livePages = state.pages
+    const liveSelectedBoxIds = state.selectedBoxIds
+    const liveBoxId = state.boxId
+    const glossaryField = liveById("translation-glossary")
+    const draftField = glossaryField ? { value: String(glossaryField.value ?? ""), dispatchEvent() {} } : null
+    const fields = new Map()
+    if (draftField) fields.set("translation-glossary", draftField)
+
+    const working = { pages: clonePagesForDraft(livePages), fields }
+    draft = working
+    state.pages = working.pages
+    if (liveSelectedBoxIds) state.selectedBoxIds = new Set([...liveSelectedBoxIds])
+    let outcome
+    try {
+      outcome = await tool.run(args ?? {}, { signal })
+    } finally {
+      draft = null
+      state.pages = livePages
+      state.selectedBoxIds = liveSelectedBoxIds
+      state.boxId = liveBoxId
+    }
+
+    const changes = diffPages(livePages, working.pages, { toolName: tool.name, toolCallId: callId })
+    const glossaryChange = draftField ? diffGlossaryChange(glossaryField.value, draftField.value, { toolName: tool.name, toolCallId: callId }) : null
+    if (glossaryChange) changes.push(glossaryChange)
+    for (const change of changes) change.blocked = isRejectedChange(reviewRejections, change)
+    reviewSession?.add(changes)
+
+    if (!changes.length) {
+      return {
+        summary: outcome?.summary ?? "Không có thay đổi nào",
+        data: { ...(outcome?.data ?? {}), staged: true, changes: [] },
+      }
+    }
+
+    const blocked = changes.filter((change) => change.blocked)
+    const fresh = changes.filter((change) => !change.blocked)
+    const lines = [`Đã đề xuất ${changes.length} thay đổi và CHƯA áp dụng gì:`]
+    for (const change of changes.slice(0, 8)) lines.push(`- ${describeChange(change)}`)
+    if (blocked.length) {
+      lines.push(`${blocked.length} thay đổi trùng với thay đổi người dùng đã từ chối trước đây; chỉ được áp dụng nếu người dùng chọn lại.`)
+    }
+    lines.push("Người dùng sẽ tự chọn từng thay đổi để áp dụng, nên đừng coi chúng là đã xong.")
+    return {
+      summary: fresh.length
+        ? `Đã đề xuất ${changes.length} thay đổi, chờ duyệt`
+        : `Bỏ qua ${blocked.length} thay đổi đã bị từ chối trước đó`,
+      data: { staged: true, proposed: outcome?.data, blocked: blocked.length, changes },
+      modelText: lines.join("\n"),
+    }
+  }
+
   return {
     definitions(flags = {}) {
       return registry.definitions(flags)
@@ -1221,7 +1299,21 @@ export function createAgentTools({
       currentTodos = []
       currentPlan = null
     },
-    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal } = {}) {
+    // Opens the review window for one turn. Until endReview() every write tool stages its effect
+    // instead of applying it; `rejections` is the project's memory of refused changes.
+    beginReview(session, { rejections = [] } = {}) {
+      reviewSession = session ?? null
+      reviewRejections = Array.isArray(rejections) ? rejections : []
+      return Boolean(reviewSession)
+    },
+    endReview() {
+      reviewSession = null
+      reviewRejections = []
+    },
+    isReviewing() {
+      return Boolean(reviewSession)
+    },
+    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal, callId = "" } = {}) {
       const flags = { allowEdits, allowWebSearch, planMode }
       const tool = registry.get(name)
       if (!tool) return { ok: false, error: `Công cụ không tồn tại: ${name}` }
@@ -1250,7 +1342,16 @@ export function createAgentTools({
           }
         }
       }
-      return registry.dispatch(name, args, { flags, signal })
+      // A write inside a review window runs against a draft and returns the changes it would make,
+      // so the registry still owns validation, timeout and error shaping on both paths.
+      const staged = Boolean(reviewSession) && tool.category === "write"
+      return registry.dispatch(name, args, {
+        flags,
+        signal,
+        ...(staged && {
+          run: (target, runArgs, context) => runStagedReview(target, runArgs, { ...context, callId }),
+        }),
+      })
     },
   }
 }

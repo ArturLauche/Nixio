@@ -140,3 +140,51 @@ export function clearProjectTurnRecords(projectId, storage = globalThis.localSto
     writeAll(all, storage, TURN_RECORDS_KEY)
   }
 }
+// Changes the user rejected. Kept apart from the chat session so clearing the transcript does not
+// forget a refusal, and so the review card can flag an identical proposal instead of re-applying it.
+const REJECTIONS_KEY = "khung-thoai-ai-rejections"
+const MAX_REJECTIONS = 120
+
+function readRejections(storage = globalThis.localStorage) {
+  try {
+    const parsed = JSON.parse(storage?.getItem(REJECTIONS_KEY) || "null")
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function cleanRejection(entry) {
+  if (!entry || typeof entry !== "object") return null
+  if (typeof entry.key !== "string" || !entry.key) return null
+  if (typeof entry.value !== "string") return null
+  return {
+    key: entry.key,
+    value: entry.value,
+    pageId: String(entry.pageId ?? ""),
+    boxId: String(entry.boxId ?? ""),
+    field: String(entry.field ?? ""),
+    kind: String(entry.kind ?? ""),
+    at: Number.isFinite(entry.at) ? entry.at : 0,
+  }
+}
+
+export function loadProjectRejections(projectId, storage = globalThis.localStorage) {
+  if (!projectId) return []
+  const entry = readRejections(storage)[projectId]
+  return Array.isArray(entry) ? entry.map(cleanRejection).filter(Boolean).slice(-MAX_REJECTIONS) : []
+}
+
+export function saveProjectRejections(projectId, entries = [], storage = globalThis.localStorage) {
+  if (!projectId) return false
+  const all = readRejections(storage)
+  const clean = (entries ?? []).map(cleanRejection).filter(Boolean).slice(-MAX_REJECTIONS)
+  if (!clean.length) delete all[projectId]
+  else all[projectId] = clean
+  try {
+    storage?.setItem(REJECTIONS_KEY, JSON.stringify(all))
+  } catch {
+    return false
+  }
+  return true
+}

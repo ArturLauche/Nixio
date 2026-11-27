@@ -1090,7 +1090,7 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .chat-todo-item { display: flex; align-items: baseline; gap: 6px; color: var(--ink); }
 .chat-todo-item[data-status="completed"] { color: var(--muted); text-decoration: line-through; }
 .chat-todo-item[data-status="in_progress"] { font-weight: 600; color: var(--accent-text); }
-.chat-plan-card, .chat-ask-card, .chat-approval-card, .chat-diff-card {
+.chat-plan-card, .chat-ask-card, .chat-approval-card, .chat-review-card {
   border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-2);
   padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: .76rem;
 }
@@ -1103,13 +1103,14 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
   border: 1px solid var(--line); font-family: inherit; font-size: .76rem;
   line-height: 1.5; white-space: pre-wrap; max-height: 200px; overflow: auto;
 }
-.chat-diff-card summary { font-weight: 600; color: var(--accent-text); }
-.chat-diff-list {
-  margin: 4px 0; padding-left: 14px; display: grid; gap: 3px;
-  font-family: ui-monospace, SFMono-Regular, monospace; font-size: .7rem; color: var(--ink);
-}
-.chat-diff-list li[data-kind="added"] { color: var(--accent-text); }
-.chat-diff-list li[data-kind="removed"] { color: var(--danger); }
+.chat-review-card { border-color: var(--accent-border); }
+.chat-review-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.chat-review-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: var(--ink); }
+.chat-review-item[data-status="applied"] .chat-review-label { color: var(--muted); }
+.chat-review-item[data-status="rejected"] .chat-review-label { color: var(--muted); text-decoration: line-through; }
+.chat-review-check { accent-color: var(--accent-text); }
+.chat-review-label { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .72rem; }
+.chat-review-note { flex-basis: 100%; color: var(--warn); font-size: .7rem; }
 .chat-ask-question { margin: 0; font-size: .8rem; color: var(--ink); line-height: 1.45; }
 .chat-ask-options { display: flex; flex-direction: column; gap: 4px; }
 .chat-ask-option {

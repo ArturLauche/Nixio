@@ -1,10 +1,25 @@
 import { runAgentTurn, summarizeHistoryWithLlm } from "../agent-harness.js"
-import { captureBoxSnapshot, compactChatHistory, computeBoxDiffs } from "../agent-context.js"
+import { compactChatHistory } from "../agent-context.js"
+import {
+  applyAcceptedChanges,
+  clearRejections,
+  createReviewSession,
+  describeChange,
+  explainNoChanges,
+  recordRejections,
+  reviewActionLabel,
+} from "../agent-review.js"
 import { parseSlashCommand } from "../agent-commands.js"
 import { createTurnRecorder } from "../agent-replay.js"
 import { BUILTIN_SKILLS, getSkill, loadSkillPrefs, resolveSkillPrompt, saveSkillPrefs } from "../agent-skills.js"
 import { createAgentTools } from "../agent-tools.js"
-import { clearProjectChatSession, loadProjectChatSession, saveProjectChatSession } from "../chat-storage.js"
+import {
+  clearProjectChatSession,
+  loadProjectChatSession,
+  loadProjectRejections,
+  saveProjectChatSession,
+  saveProjectRejections,
+} from "../chat-storage.js"
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
 import { providerLabel, resolveProvider } from "../provider-registry.js"
 import { formatTokens, formatUsd } from "../token-accounting.js"
@@ -88,6 +103,7 @@ export function setupChat({
   const allowEditsInput = byId("chat-allow-edits")
   const allowWebInput = byId("chat-allow-web")
   const confirmBulkInput = byId("chat-confirm-bulk")
+  const reviewInput = byId("chat-review-changes")
   const compactBtn = byId("chat-compact")
   const skillSelect = byId("chat-skill")
   const skillCustomInput = byId("chat-skill-custom")
@@ -100,6 +116,12 @@ export function setupChat({
   let chatHistory = []
   let activeController = null
   let activeTurnEl = null
+  // Changes the user refused in this project. Staged proposals are checked against it so an
+  // identical change is flagged instead of being applied again behind their back.
+  let rejectionLog = []
+
+  // Trusted mode still records every change; it only skips the wait for a click.
+  const reviewEveryChange = () => (reviewInput ? Boolean(reviewInput.checked) : true)
 
   function syncBusyControls() {
     const busy = Boolean(activeController)
@@ -557,55 +579,139 @@ export function setupChat({
     contextMeterEl.hidden = false
   }
 
-  function renderDiffCard(diffs, container) {
-    if (!diffs?.total) return
-    const card = document.createElement("details")
-    card.className = "chat-diff-card"
-    card.open = diffs.total <= 4
-    const summary = document.createElement("summary")
-    summary.textContent = `Tóm tắt thay đổi (${diffs.total} khung)`
+  // Applies the changes the user picked as ONE named history action, and remembers what was
+  // refused so a later turn cannot quietly propose the same thing again.
+  function applyReviewChanges(review, ids) {
+    const before = editorSnapshot?.() ?? null
+    const outcome = applyAcceptedChanges({
+      pages: state.pages,
+      session: review,
+      ids,
+      glossaryField: byId("translation-glossary"),
+    })
+    if (outcome.applied.length) {
+      checkpoint(before, { label: reviewActionLabel(outcome.applied, outcome.rejected), kind: "ai" })
+      render?.()
+    }
+    if (outcome.rejected.length) rejectionLog = recordRejections(rejectionLog, outcome.rejected)
+    if (outcome.applied.length) rejectionLog = clearRejections(rejectionLog, outcome.applied)
+    if (outcome.applied.length || outcome.rejected.length) {
+      if (state.projectId) saveProjectRejections(state.projectId, rejectionLog)
+    }
+    return outcome
+  }
+
+  // The review surface: one row per proposed change, a checkbox each, accept-all / apply-picked /
+  // reject-all. Nothing here mutates the project until a button is pressed.
+  function renderReviewCard(review, container) {
+    const counts = review.summary()
+    if (!counts.total) return null
+    const card = document.createElement("div")
+    card.className = "chat-review-card"
+
+    const head = document.createElement("div")
+    head.className = "chat-plan-head"
+    const title = document.createElement("strong")
+    const badge = document.createElement("span")
+    badge.className = "chat-badge"
+    head.append(title, badge)
+
     const list = document.createElement("ul")
-    list.className = "chat-diff-list"
-    const clip = (s) => {
-      const clean = String(s || "").replace(/\s+/g, " ").trim()
-      return clean.length > 48 ? clean.slice(0, 48) + "…" : clean
+    list.className = "chat-review-list"
+    const rows = new Map()
+    for (const change of review.changes) {
+      const row = document.createElement("li")
+      row.className = "chat-review-item"
+      row.dataset.status = change.status
+      const checkbox = document.createElement("input")
+      checkbox.type = "checkbox"
+      checkbox.className = "chat-review-check"
+      checkbox.checked = change.status !== "rejected" && !change.blocked
+      checkbox.disabled = change.status === "applied"
+      checkbox.setAttribute("aria-label", `Chấp nhận: ${describeChange(change)}`)
+      const label = document.createElement("span")
+      label.className = "chat-review-label"
+      label.textContent = describeChange(change)
+      row.append(checkbox, label)
+      if (change.blocked) {
+        const note = document.createElement("small")
+        note.className = "chat-review-note"
+        note.textContent = "Bạn đã từ chối thay đổi này trước đây"
+        row.append(note)
+      }
+      rows.set(change.id, { row, checkbox })
+      list.append(row)
     }
-    for (const item of diffs.items) {
-      const li = document.createElement("li")
-      li.dataset.kind = item.kind
-      if (item.kind === "added") {
-        li.textContent = `+ Tr.${item.pageIndex}: "${clip(item.afterText)}"`
-      } else if (item.kind === "removed") {
-        li.textContent = `− Tr.${item.pageIndex}: "${clip(item.beforeText)}"`
-      } else if (item.beforeText !== item.afterText) {
-        li.textContent = `✎ Tr.${item.pageIndex}: "${clip(item.beforeText)}" → "${clip(item.afterText)}"`
+
+    const actions = document.createElement("div")
+    actions.className = "form-actions"
+    const acceptAllBtn = document.createElement("button")
+    acceptAllBtn.type = "button"
+    acceptAllBtn.className = "button primary"
+    acceptAllBtn.textContent = "Chấp nhận tất cả"
+    const applyBtn = document.createElement("button")
+    applyBtn.type = "button"
+    applyBtn.className = "button"
+    applyBtn.textContent = "Áp dụng mục đã chọn"
+    const rejectAllBtn = document.createElement("button")
+    rejectAllBtn.type = "button"
+    rejectAllBtn.className = "button danger"
+    rejectAllBtn.textContent = "Từ chối tất cả"
+    actions.append(acceptAllBtn, applyBtn, rejectAllBtn)
+
+    const refresh = () => {
+      const next = review.summary()
+      title.textContent = `Thay đổi AI đề xuất (${next.total})`
+      if (next.pending) badge.textContent = `${next.pending} chờ duyệt`
+      else if (next.applied && !next.rejected) badge.textContent = `Đã áp dụng ${next.applied}`
+      else badge.textContent = `${next.applied} áp dụng · ${next.rejected} từ chối`
+      card.dataset.state = next.applied && !next.pending ? "applied" : next.pending ? "pending" : "resolved"
+      for (const [id, entry] of rows) {
+        const change = review.changes.find((item) => item.id === id)
+        entry.row.dataset.status = change?.status ?? "rejected"
+        if (change?.status === "applied") entry.checkbox.disabled = true
+      }
+    }
+
+    const settle = (ids) => {
+      const outcome = applyReviewChanges(review, ids)
+      for (const button of [acceptAllBtn, applyBtn, rejectAllBtn]) button.disabled = true
+      for (const entry of rows.values()) entry.checkbox.disabled = true
+      refresh()
+      if (outcome.applied.length) {
+        statusEl.textContent = `Đã áp dụng ${outcome.applied.length} thay đổi${outcome.rejected.length ? `, bỏ ${outcome.rejected.length}` : ""}.`
+        notify?.({
+          kind: "success",
+          title: "Đã áp dụng chỉnh sửa AI",
+          message: `Đã áp dụng ${outcome.applied.length} thay đổi${outcome.rejected.length ? `, bỏ ${outcome.rejected.length}` : ""} — gộp thành 1 mốc Hoàn tác.`,
+          key: "ai-edits",
+          actions: restoreHistory ? [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }] : [],
+        })
       } else {
-        li.textContent = `✎ Tr.${item.pageIndex}: cập nhật kiểu chữ "${clip(item.afterText)}"`
+        statusEl.textContent = `Đã từ chối ${outcome.rejected.length} thay đổi; dự án giữ nguyên.`
       }
-      list.append(li)
+      return outcome
     }
-    if (diffs.total > diffs.items.length) {
-      const more = document.createElement("li")
-      more.textContent = `… và ${diffs.total - diffs.items.length} thay đổi khác.`
-      list.append(more)
-    }
-    card.append(summary, list)
-    if (restoreHistory) {
-      const actions = document.createElement("div")
-      actions.className = "form-actions"
-      const undoBtn = document.createElement("button")
-      undoBtn.type = "button"
-      undoBtn.className = "button"
-      undoBtn.textContent = "Hoàn tác cả lượt AI này"
-      undoBtn.onclick = () => {
-        restoreHistory("undo")
-        undoBtn.disabled = true
-        undoBtn.textContent = "Đã hoàn tác"
-      }
-      actions.append(undoBtn)
-      card.append(actions)
-    }
+
+    // Accept-all skips the rows the user already refused once: those need an explicit tick.
+    acceptAllBtn.onclick = () => settle(review.changes.filter((change) => !change.blocked).map((change) => change.id))
+    applyBtn.onclick = () => settle(
+      review.changes.filter((change) => rows.get(change.id)?.checkbox.checked).map((change) => change.id),
+    )
+    rejectAllBtn.onclick = () => settle([])
+
+    card.append(head, list, actions)
     container.append(card)
+    refresh()
+    return { card, settle }
+  }
+
+  function renderTurnNote(text, container) {
+    if (!text) return
+    const note = document.createElement("div")
+    note.className = "chat-msg system"
+    note.textContent = text
+    container.append(note)
   }
 
   const tools = createAgentTools({
@@ -640,7 +746,7 @@ export function setupChat({
     const intro = document.createElement("div")
     intro.className = "chat-msg system"
     intro.textContent =
-      "Trợ lý AI Harness v2.5 hỗ trợ ngữ cảnh dự án trực tiếp, hồ sơ kỹ năng theo thể loại, thẻ hỏi trắc nghiệm, duyệt thao tác hàng loạt, Chế độ Kế hoạch (Plan Mode), tự thử lại khi lỗi mạng/429, chống lặp công cụ và lệnh nhanh (/qc, /plan, /autofit, /compact, /skill, /help)."
+      "Trợ lý AI Harness v2.5 hỗ trợ ngữ cảnh dự án trực tiếp, hồ sơ kỹ năng theo thể loại, thẻ hỏi trắc nghiệm, duyệt từng thay đổi AI (kèm duyệt thao tác hàng loạt), Chế độ Kế hoạch (Plan Mode), tự thử lại khi lỗi mạng/429, chống lặp công cụ và lệnh nhanh (/qc, /plan, /autofit, /compact, /skill, /help)."
     messagesEl.append(intro)
   }
 
@@ -660,6 +766,7 @@ export function setupChat({
     if (activeController) return
     const saved = loadProjectChatSession(state.projectId)
     chatHistory = saved.history
+    rejectionLog = loadProjectRejections(state.projectId)
     renderPersistedSession()
     tools.setTodos?.(saved.todos)
     replay?.refresh()
@@ -908,10 +1015,12 @@ export function setupChat({
     try {
       const traceCards = new Map()
       const confirmBulkEdits = Boolean(confirmBulkInput?.checked)
-      const beforeBoxes = captureBoxSnapshot(state.pages)
+      const autoApply = !reviewEveryChange()
+      const review = createReviewSession({ turnId: `turn_${Date.now()}` })
       commitLiveForm?.()
       turnBeforeSnapshot = editorSnapshot?.() ?? null
       turnCheckpointRecorded = false
+      tools.beginReview?.(review, { rejections: rejectionLog })
       activeController = new AbortController()
       syncBusyControls()
       statusEl.textContent = planMode ? "Đang khảo sát & lập kế hoạch…" : "Đang suy nghĩ…"
@@ -1045,8 +1154,29 @@ export function setupChat({
       appendSafeTextWithLinks(assistantBubble, result.answer)
       turnEl.append(assistantBubble)
 
-      if (result.editsMade > 0) {
-        renderDiffCard(computeBoxDiffs(beforeBoxes, state.pages), turnEl)
+      // Proposed edits land here, not in the project: the user decides change by change, and a
+      // trusted mode applies them without a click while still keeping the list on record.
+      const reviewCounts = review.summary()
+      if (reviewCounts.total) {
+        const handle = renderReviewCard(review, turnEl)
+        if (autoApply) {
+          handle?.settle(review.changes.filter((change) => !change.blocked).map((change) => change.id))
+        } else if (reviewCounts.pending) {
+          notify?.({
+            kind: "info",
+            title: "AI đề xuất thay đổi",
+            message: `${reviewCounts.pending} thay đổi đang chờ bạn duyệt trong khung chat.`,
+            key: "ai-review",
+          })
+        }
+      } else {
+        // A turn that changes nothing still owes the reader a reason.
+        renderTurnNote(explainNoChanges({
+          planMode,
+          allowEdits: Boolean(allowEditsInput.checked),
+          budgetBlocked: Boolean(result.budgetBlocked),
+          writeCalls: result.toolTrace.filter((entry) => entry.category === "write").length,
+        }), turnEl)
       }
 
       statusEl.textContent = result.budgetBlocked
@@ -1067,17 +1197,6 @@ export function setupChat({
         statsEl.textContent = parts.join(" · ")
         statsEl.hidden = false
       }
-      if (result.editsMade > 0) {
-        notify?.({
-          kind: "success",
-          title: "Trợ lý AI đã chỉnh sửa dự án",
-          message: `Đã thực hiện ${result.editsMade} thao tác chỉnh sửa (gộp thành 1 mốc Hoàn tác).`,
-          key: "ai-edits",
-          actions: restoreHistory
-            ? [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }]
-            : [],
-        })
-      }
       settled = { ok: true, cancelled: false }
     } catch (error) {
       clearStreamPreview()
@@ -1097,6 +1216,7 @@ export function setupChat({
     } finally {
       turnBeforeSnapshot = null
       turnCheckpointRecorded = false
+      tools.endReview?.()
       activeController = null
       activeTurnEl = null
       syncBusyControls()
