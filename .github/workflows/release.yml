@@ -153,16 +153,20 @@ jobs:
           - **Windows 10/11**: Cài [UB-Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) hoặc \`winget install UB-Mannheim.TesseractOCR\`
 
           ## Điểm nổi bật trong ${TAG}
-          - **Redraw & Typeset Pro (PhotoCraft)**:
-            - **Poisson Seamless Blending C#** cho Multi-Scale PatchMatch Inpaint — hòa khớp ánh sáng/chuyển sắc biên tuyệt đối không lộ viền ghép.
-            - **Làm sạch ảnh Raw tự động** (cân bằng trắng từng kênh R/G/B khử ố vàng giấy scan + khử nhiễu bilateral giữ screentone + tăng sắc nét nhẹ trên C# & JS).
-            - **Cọ tẩy nét Redraw** xóa cục bộ nét vẽ/inpaint bị lem lên nét nhân vật.
-            - **Dàn chữ ôm bong bóng bầu dục (\`Ôm bong bóng\`)** tương thích auto-fit và **Uốn chữ SFX** (\`arc\`, \`arcDown\`, \`wave\`).
-          - **Trợ lý AI · Agent Harness v2.5 (DeepSeek Harness)**:
-            - Tự thử lại LLM (\`withLlmRetry\` exponential backoff) cho lỗi 429/5xx và chống lặp công cụ (\`RepeatToolGuard\`).
-            - **Thẻ hỏi trắc nghiệm \`ask_user\`**, **duyệt thao tác hàng loạt**, **5 Hồ sơ kỹ năng theo thể loại** áp dụng cho cả Chat và Dịch ảnh/khung chữ.
-            - **Lệnh nhanh Slash Commands** (\`/qc\`, \`/plan\`, \`/autofit\`, \`/compact ai\`, \`/skill\`, \`/help\`), tóm tắt lịch sử bằng LLM và tự động lưu phiên chat/Todo theo từng dự án.
-          - **Kiểm tra cập nhật & Trung tâm Thông báo**: Tự phát hiện bản mới qua GitHub Releases (\`wiothemilo-lang/Nixio\`), cảnh báo khung tràn chữ kèm nút 1 chạm **Khớp cỡ cả trang** và nhắc lưu dự án.
+          - **PhotoCraft C# Pro (Xử lý ảnh & Redraw)**:
+            - **Seamless Healing Clone Stamp (Poisson Blending C#)**: Cọ sao chép nền tự động hòa khớp ánh sáng/chuyển sắc viền ghép bằng bộ giải màng điều hòa đa luồng (\`Parallel.For\`), đồng bộ qua Undo/Redo và tự đợi hoàn tất khi xuất PNG/PSD/ZIP.
+            - **PatchMatch nhận biết cấu trúc nét & tăng tốc SIMD**: Bổ sung gradient cấu trúc (\`structureWeight\`) giữ liền nét viền khung/tóc, tăng tốc bằng \`System.Numerics.Vector<float>\` (SIMD) và song song hóa \`RawCleanup\` / \`ComputeCosts\` trên .NET 10.
+            - **Làm sạch ảnh Raw cả chương & Web Worker**: Chạy lọc raw hàng loạt cho toàn bộ chương (có dừng giữa chừng & 1 bước Hoàn tác), bỏ qua pixel trong suốt chuẩn xác, và đẩy xử lý bản Web sang Web Worker không đơ giao diện.
+            - **Tăng tốc nở/co mặt nạ** bằng thuật toán cửa sổ trượt.
+          - **Quy trình Biên tập & Giao diện Pro**:
+            - **Chế độ tối (Dark Mode)** toàn giao diện và **Thanh kéo so sánh gốc (Split-screen Before/After)** bằng phím \`Shift + \\\`.
+            - **Bộ Mẫu dàn chữ toàn cục (Global Presets) + Xuất/Nhập JSON**: 4 mẫu khởi đầu sẵn có, tự lưu xuyên suốt các dự án và chia sẻ được trong nhóm dịch.
+            - **Quét tự động toàn bộ bong bóng trên trang**: Nhận diện hàng loạt bong bóng thoại sáng và sắp xếp theo thứ tự đọc RTL/LTR.
+          - **Trợ lý AI · Agent Harness v3 (DeepSeek Harness) & Bảo mật Web**:
+            - **SSE Token & Reasoning Streaming**: Hiển thị từng chữ câu trả lời và suy luận (\`reasoning_content\` / \`thought\`) theo thời gian thực cho cả Gemini và OpenAI/Local LLM.
+            - **Đo ngân sách ngữ cảnh thực tế (\`Context Budget Meter\`)**: Theo dõi token sử dụng thực từ API kèm cảnh báo trực quan.
+            - **Gom 1 mốc Undo cho cả lượt AI + Thẻ tóm tắt Diff**: Xem nhanh mọi khung AI vừa thêm/sửa/xóa và hoàn tác trọn lượt chỉ với 1 bấm.
+            - **Tự thử lại (\`withLlmRetry\`)** cho cả bộ dịch Gemini & OpenAI-compat; **chống DNS Rebinding (IP Pinning)** và tự động yêu cầu duyệt thao tác ghi sau khi AI đọc nội dung web.
 
           Kiểm tra toàn vẹn tệp bằng \`SHA256SUMS.txt\`.
           EOF

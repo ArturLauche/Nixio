@@ -1,4 +1,4 @@
-export const APP_VERSION = "1.1.0"
+export const APP_VERSION = "1.2.0"
 export const REPO_SLUG = "wiothemilo-lang/Nixio"
 export const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`
 export const RELEASES_PAGE_URL = `https://github.com/${REPO_SLUG}/releases`
