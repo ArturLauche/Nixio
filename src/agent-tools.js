@@ -1,5 +1,14 @@
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
 import { lintChapter } from "./linter.js"
+import {
+  findTerm,
+  formatTerminologyGraph,
+  glossaryStatusText,
+  mergeTerminology,
+  parseTerminologyGraph,
+  resolveTerms,
+  termSummary,
+} from "./terminology-graph.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
 import { translationSignature } from "./translation.js"
 import {
@@ -503,16 +512,73 @@ export function createAgentTools({
       },
     },
     {
+      name: "query_terminology",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 8000,
+      description:
+        "Tra Bảng thuật ngữ: nhập một dòng thoại để biết thuật ngữ nào áp dụng theo thứ tự ổn định (kèm lý do), hoặc một tên/thuật ngữ để xem alias, biến thể, dạng ưu tiên/dạng bị cấm, dạng từ và quan hệ (broader/narrower/related/conflict).",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Dòng thoại hoặc văn bản cần tra thuật ngữ áp dụng." },
+          term: { type: "string", description: "Tên gốc, tên dịch hoặc alias cần xem chi tiết." },
+          limit: { type: "integer", description: "Số kết quả tối đa (1-40, mặc định 20)." },
+        },
+      },
+      async run(args) {
+        const settings = readTranslationSettings?.() ?? {}
+        const graph = parseTerminologyGraph(settings.glossary ?? "")
+        if (args?.term) {
+          const term = findTerm(graph, args.term)
+          if (!term) {
+            return {
+              summary: `Không có thuật ngữ nào khớp "${String(args.term).trim()}"`,
+              data: { total: graph.terms.length, term: null },
+            }
+          }
+          const summary = term.translate
+            ? `"${term.source}" → "${term.target}"${term.forbidden.length ? ` · cấm: ${term.forbidden.join(", ")}` : ""}`
+            : `"${term.source}" giữ nguyên, không dịch`
+          return { summary, data: { total: graph.terms.length, term: termSummary(term, graph) } }
+        }
+        const text = String(args?.text ?? "")
+        if (!text.trim()) {
+          return {
+            summary: glossaryStatusText(graph),
+            data: {
+              total: graph.terms.length,
+              terms: graph.terms.map((term) => termSummary(term, graph)),
+            },
+          }
+        }
+        const limit = clamp(Math.round(Number(args?.limit) || 20), 1, 40)
+        const matched = resolveTerms(graph, text, {
+          sourceLanguage: settings.source ?? "",
+          targetLanguage: settings.target ?? "",
+          limit,
+        })
+        return {
+          summary: matched.length
+            ? `Áp dụng ${matched.length} thuật ngữ cho dòng này: ${matched.map((hit) => `"${hit.target}"`).join(", ")}`
+            : `Dòng này không khớp thuật ngữ nào trong ${graph.terms.length} mục`,
+          data: { total: graph.terms.length, matched },
+        }
+      },
+    },
+    {
       name: "update_glossary",
       category: "write",
-      description: "Thêm hoặc cập nhật các cặp thuật ngữ / tên nhân vật (dạng 'từ gốc = từ dịch') vào Bảng thuật ngữ của dự án.",
+      description:
+        "Thêm hoặc cập nhật thuật ngữ / tên nhân vật trong Bảng thuật ngữ của dự án. Mỗi mục là dòng 'nguồn = dịch', có thể kèm chỉ thị thuộc đồ thị: @alias, @variant, @pos, @keep, @prefer, @forbid, @broader, @narrower, @related, @conflict.",
       parameters: {
         type: "object",
         properties: {
           entries: {
             type: "array",
             items: { type: "string" },
-            description: "Danh sách dòng dạng 'Tên gốc = Tên dịch' (ví dụ ['五条悟 = Gojo Satoru']).",
+            description:
+              "Danh sách mục, ví dụ ['五条悟 = Gojo Satoru', '先生 = Thầy\\n@pos honorific\\n@keep']. Mục trùng nguồn hoặc trùng alias được gộp vào mục đã có.",
           },
           mode: { type: "string", enum: ["append", "replace"], description: "append (mặc định) để thêm/gộp, replace để thay mới toàn bộ." },
         },
@@ -522,22 +588,24 @@ export function createAgentTools({
         const field = byId("translation-glossary")
         if (!field) throw new Error("Không tìm thấy trường Bảng thuật ngữ.")
         const rawEntries = Array.isArray(args?.entries) ? args.entries : []
-        const cleaned = rawEntries.map((line) => String(line || "").trim()).filter(Boolean)
+        const cleaned = rawEntries.filter((entry) => typeof entry === "string" ? entry.trim() : entry && typeof entry === "object")
         if (!cleaned.length) throw new Error("Danh sách thuật ngữ rỗng.")
         commitLiveForm?.()
         checkpoint()
         const mode = args?.mode === "replace" ? "replace" : "append"
-        const existingLines = mode === "replace" ? [] : field.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-        const keyOf = (line) => line.split("=")[0].trim().toLowerCase()
-        const merged = new Map()
-        for (const line of existingLines) merged.set(keyOf(line), line)
-        for (const line of cleaned) merged.set(keyOf(line), line)
-        field.value = [...merged.values()].join("\n")
+        const base = mode === "replace" ? { terms: [], problems: [] } : parseTerminologyGraph(field.value)
+        const merged = mergeTerminology(base, cleaned)
+        if (!merged.graph.terms.length) throw new Error("Danh sách thuật ngữ rỗng.")
+        field.value = formatTerminologyGraph(merged.graph)
         field.dispatchEvent?.(new Event("input"))
         render()
         return {
-          summary: `Đã cập nhật Bảng thuật ngữ (${cleaned.length} mục, tổng ${merged.size} mục)`,
-          data: { totalEntries: merged.size, addedOrUpdated: cleaned },
+          summary: `Đã cập nhật Bảng thuật ngữ (${merged.added.length + merged.updated.length} mục, tổng ${merged.graph.terms.length} mục)`,
+          data: {
+            totalEntries: merged.graph.terms.length,
+            added: merged.added,
+            updated: merged.updated,
+          },
         }
       },
     },
@@ -1033,10 +1101,8 @@ export function createAgentTools({
         }
       }
     }
-    const glossaryLines = String(settings.glossary || "")
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
+    // Directives belong to a term, so the count the model sees is terms, not text lines.
+    const glossaryCount = parseTerminologyGraph(settings.glossary ?? "").terms.length
     return {
       pageCount: state.pages.length,
       currentPageIndex: currentIdx >= 0 ? currentIdx + 1 : null,
@@ -1048,7 +1114,7 @@ export function createAgentTools({
       overflowCount,
       unplacedCount: current?.unplaced?.length ?? 0,
       queueCount: state.queue?.length ?? 0,
-      glossaryCount: glossaryLines.length,
+      glossaryCount,
       presetNames: (state.presets ?? []).map((p) => p.name),
       notesPreview: String(settings.notes || "").replace(/\s+/g, " ").trim().slice(0, 160),
     }

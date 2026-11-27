@@ -13,6 +13,7 @@ import {
   termSummary,
 } from "../src/terminology-graph.js"
 import { lintChapter, parseGlossary } from "../src/linter.js"
+import { createAgentTools } from "../src/agent-tools.js"
 
 const graphTerm = (graph, ref) => termSummary(findTerm(graph, ref), graph)
 
@@ -239,4 +240,62 @@ test("merging follows the graph, so an alias, a case difference or a declared re
   const folded = mergeTerminology(parseTerminologyGraph("Đi thôi = Đi thôi"), ["di thoi = Bước đi"])
   assert.equal(folded.graph.terms.length, 1)
   assert.deepEqual(folded.updated, ["Đi thôi"])
+})
+
+test("update_glossary stores the graph and query_terminology reads it back with reasons", async () => {
+  const field = { value: "先生 = Thầy", dispatchEvent() {} }
+  const state = { pages: [], queue: [], presets: [] }
+  const tools = createAgentTools({
+    state,
+    byId: (id) => (id === "translation-glossary" ? field : null),
+    selectedPage: () => null,
+    selectedIndex: () => -1,
+    selectPage() {},
+    checkpoint() {},
+    render() {},
+    readTranslationSettings: () => ({ source: "Japanese", target: "Vietnamese", direction: "rtl", notes: "", glossary: field.value }),
+  })
+
+  const added = await tools.execute("update_glossary", {
+    entries: [{
+      source: "五条悟",
+      target: "Gojo Satoru",
+      aliases: ["五条先生"],
+      partOfSpeech: "name",
+      forbidden: ["Gojo Saturo"],
+      relations: { conflict: ["先生"] },
+    }],
+  }, { allowEdits: true })
+  assert.equal(added.ok, true)
+  // The relation is written from both ends of the conflict, which is what keeps it symmetric.
+  assert.equal(
+    field.value,
+    "先生 = Thầy\n@conflict 五条悟\n五条悟 = Gojo Satoru\n@alias 五条先生\n@pos name\n@forbid Gojo Saturo\n@conflict 先生",
+  )
+  assert.equal(added.data.totalEntries, 2)
+  // The runtime snapshot counts terms, so directives never inflate the glossary size.
+  assert.equal(tools.getRuntimeSnapshot().glossaryCount, 2)
+
+  const detail = await tools.execute("query_terminology", { term: "gojo saturo" })
+  assert.equal(detail.ok, true)
+  assert.equal(detail.data.term.source, "五条悟")
+  assert.deepEqual(detail.data.term.forbidden, ["Gojo Saturo"])
+  assert.deepEqual(detail.data.term.relations.conflict, ["先生"])
+
+  const matched = await tools.execute("query_terminology", { text: "五条先生 nhìn Gojo Saturo" })
+  assert.equal(matched.ok, true)
+  assert.equal(matched.data.matched[0].kind, "alias")
+  assert.match(matched.data.matched[0].reason, /dịch thành "Gojo Satoru"/)
+
+  const status = await tools.execute("query_terminology", {})
+  assert.match(status.summary, /^2 thuật ngữ · 2 liên kết$/)
+  assert.equal(status.data.terms.length, 2)
+
+  const replaced = await tools.execute("update_glossary", { entries: ["A = B"], mode: "replace" }, { allowEdits: true })
+  assert.equal(replaced.ok, true)
+  assert.equal(field.value, "A = B")
+
+  const empty = await tools.execute("update_glossary", { entries: [] }, { allowEdits: true })
+  assert.equal(empty.ok, false)
+  assert.match(empty.error, /Danh sách thuật ngữ rỗng/)
 })
