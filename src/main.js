@@ -6,6 +6,7 @@ import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "
 import { detectAllBubblesOnImage } from "./bubble.js"
 import {
   loadGlobalPresets,
+  MAX_GLOBAL_PRESETS,
   mergePresets,
   parsePresetsJson,
   saveGlobalPresets,
@@ -17,7 +18,7 @@ import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } 
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
-import { alignBoxes, distributeBoxes, duplicateBox, nudgeBox, reorderBox } from "./tools.js"
+import { alignBoxes, distributeBoxes, duplicateBox, reorderBox } from "./tools.js"
 import { cleanRawPageImage, cleanRawPixels } from "./raw-cleanup.js"
 import { smartSlicePageImage, stitchPagesVertically } from "./webtoon.js"
 import { createNotificationCenter } from "./notifications.js"
@@ -37,6 +38,7 @@ import { setupOcr } from "./controllers/ocr.js"
 import { setupExports } from "./controllers/export.js"
 import { setupDialogs } from "./controllers/dialogs.js"
 import { setupGestures } from "./controllers/gestures.js"
+import { setupShortcuts } from "./controllers/shortcuts.js"
 import { setupChat } from "./controllers/chat.js"
 import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credential-settings.js"
 
@@ -83,8 +85,7 @@ byId("toggle-theme")?.addEventListener("click", () => {
 let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
-let nudgeSnapshot = null
-let nudgeTimer = null
+let shortcuts = null
 
 // One live form session is one action, so its deferred checkpoint keeps a name the timeline and
 // the one-click undo can show instead of the generic fallback.
@@ -115,15 +116,7 @@ function editorSnapshot() {
 }
 
 function commitNudgeCheckpoint() {
-  if (nudgeTimer) {
-    clearTimeout(nudgeTimer)
-    nudgeTimer = null
-  }
-  if (!nudgeSnapshot) return false
-  const before = nudgeSnapshot
-  nudgeSnapshot = null
-  checkpoint(before, NUDGE_META)
-  return true
+  return shortcuts ? shortcuts.commitNudge() : false
 }
 
 // The open form edit and the pending nudge are both actions of their own, so every path that
@@ -201,7 +194,7 @@ function applyHistorySnapshot(snapshot) {
 }
 
 function pendingHistoryEdit() {
-  return Boolean(formEditSnapshot || nudgeSnapshot || nudgeTimer)
+  return Boolean(formEditSnapshot || shortcuts?.hasPendingNudge())
 }
 
 // A notification's one-click undo must hit the exact action it describes. Once unrelated
@@ -714,6 +707,7 @@ function syncSplitCompare(page) {
   compareCanvas.hidden = !active
   handle.hidden = !active
   handle.setAttribute("aria-valuenow", String(Math.round(state.splitPos)))
+  handle.setAttribute("aria-valuetext", `Rèm ở ${Math.round(state.splitPos)}%`)
   if (active && page?.image) {
     const w = page.image.naturalWidth
     const h = page.image.naturalHeight
@@ -847,10 +841,13 @@ byId("save-preset").onclick = () => {
   const index = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
   if (index < 0) state.presets.push(preset)
   else state.presets[index] = preset
-  saveGlobalPresets(state.presets)
+  state.presets = saveGlobalPresets(state.presets)
   renderPresets()
-  byId("style-preset").value = String(index < 0 ? state.presets.length - 1 : index)
-  status("Đã lưu mẫu toàn cục " + name + ".")
+  const savedIndex = state.presets.findIndex((item) => item.name.toLowerCase() === name.toLowerCase())
+  byId("style-preset").value = String(savedIndex >= 0 ? savedIndex : 0)
+  status(savedIndex >= 0
+    ? "Đã lưu mẫu toàn cục " + name + "."
+    : `Đã đủ ${MAX_GLOBAL_PRESETS} mẫu dàn chữ; mẫu mới không được lưu.`)
 }
 
 byId("apply-preset").onclick = () => {
@@ -907,8 +904,7 @@ byId("presets-file")?.addEventListener("change", async (event) => {
     const imported = parsePresetsJson(await file.text())
     commitLiveFormCheckpoint()
     checkpoint(undefined, { label: `Nhập ${imported.length} mẫu dàn chữ`, kind: "preset" })
-    state.presets = mergePresets(state.presets, imported)
-    saveGlobalPresets(state.presets)
+    state.presets = saveGlobalPresets(mergePresets(state.presets, imported))
     for (const preset of imported) registerFontName(preset.style.font)
     renderFontOptions()
     renderPresets()
@@ -1478,42 +1474,6 @@ byId("split-compare")?.addEventListener("click", () => {
   status(state.splitCompare ? "Đang bật thanh kéo so sánh gốc (kéo rèm hoặc nhấn Shift+\\ để tắt)." : "Đã tắt thanh kéo so sánh.")
 })
 
-const splitHandle = byId("split-handle")
-if (splitHandle) {
-  let draggingSplit = false
-  const updateSplitFromClientX = (clientX) => {
-    const rect = stage.getBoundingClientRect()
-    if (!rect.width) return
-    state.splitPos = clamp(Math.round(((clientX - rect.left) / rect.width) * 100), 0, 100)
-    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
-    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
-  }
-  splitHandle.addEventListener("pointerdown", (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    draggingSplit = true
-    splitHandle.setPointerCapture?.(event.pointerId)
-    updateSplitFromClientX(event.clientX)
-  })
-  splitHandle.addEventListener("pointermove", (event) => {
-    if (!draggingSplit) return
-    event.preventDefault()
-    updateSplitFromClientX(event.clientX)
-  })
-  const stopSplit = () => { draggingSplit = false }
-  splitHandle.addEventListener("pointerup", stopSplit)
-  splitHandle.addEventListener("pointercancel", stopSplit)
-  splitHandle.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
-    event.preventDefault()
-    event.stopPropagation()
-    const step = event.shiftKey ? 10 : 2
-    state.splitPos = clamp(state.splitPos + (event.key === "ArrowRight" ? step : -step), 0, 100)
-    stage.style.setProperty("--split-pos", `${state.splitPos}%`)
-    splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
-  })
-}
-
 byId("script-file").onchange = async (event) => {
   const file = event.target.files[0]
   event.target.value = ""
@@ -1809,98 +1769,6 @@ byId("cleanup-expand").onchange = () => {
   render()
 }
 
-// Global keyboard shortcuts.
-document.addEventListener("keydown", (event) => {
-  const editingText = Boolean(event.target.closest("input, textarea, select, [contenteditable]"))
-  const key = event.key.toLowerCase()
-  if (event.ctrlKey || event.metaKey) {
-    if (event.altKey) return
-    if ((key === "h" || key === "f") && !event.shiftKey) {
-      event.preventDefault()
-      dialogs.openFind()
-      return
-    }
-    if (key === "h" && event.shiftKey) {
-      event.preventDefault()
-      toggleHistoryPanel(true)
-      return
-    }
-    if (editingText) return
-    if (key === "z" || key === "y") {
-      event.preventDefault()
-      restoreHistory(key === "y" || event.shiftKey ? "redo" : "undo")
-      return
-    }
-    if (key === "d" && selectedBox()) {
-      event.preventDefault()
-      duplicateSelectedBox()
-      return
-    }
-    return
-  }
-  if (editingText) return
-  // The history panel handles its own arrows and Enter, so nudging, Space-panning or deleting a
-  // box from inside the timeline must not happen. Undo and redo shortcuts still work up above.
-  if (event.target.closest("#history-panel")) return
-  if (event.key === " " && !event.repeat && selectedPage()) {
-    event.preventDefault()
-    gestures.setSpaceHeld(true)
-    return
-  }
-  if ((event.key === "\\" || event.key === "|") && selectedPage()) {
-    event.preventDefault()
-    if (event.shiftKey || event.key === "|") {
-      state.splitCompare = !state.splitCompare
-      if (state.splitCompare) state.compareOriginal = false
-    } else {
-      state.compareOriginal = !state.compareOriginal
-      if (state.compareOriginal) state.splitCompare = false
-    }
-    renderCanvas()
-    return
-  }
-  if (event.key === "?") {
-    event.preventDefault()
-    dialogs.openShortcuts()
-    return
-  }
-  if ((event.key === "Delete" || event.key === "Backspace") && (state.boxId || state.selectedBoxIds.size)) {
-    event.preventDefault()
-    deleteSelectedBoxes()
-    return
-  }
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && event.target !== stage) {
-    const page = selectedPage()
-    const targets = page && state.selectedBoxIds.size > 1
-      ? page.boxes.filter((item) => state.selectedBoxIds.has(item.id))
-      : [selectedBox()].filter(Boolean)
-    if (!targets.length || projectBusy()) return
-    event.preventDefault()
-    const stepPx = event.shiftKey ? 10 : 1
-    const dx = (event.key === "ArrowRight" ? stepPx : event.key === "ArrowLeft" ? -stepPx : 0) / page.image.naturalWidth
-    const dy = (event.key === "ArrowDown" ? stepPx : event.key === "ArrowUp" ? -stepPx : 0) / page.image.naturalHeight
-    if (formEditSnapshot) commitLiveFormCheckpoint()
-    if (!nudgeSnapshot) nudgeSnapshot = editorSnapshot()
-    for (const item of targets) Object.assign(item, nudgeBox(item, dx, dy))
-    renderCanvas()
-    if (nudgeTimer) clearTimeout(nudgeTimer)
-    nudgeTimer = setTimeout(commitNudgeCheckpoint, 600)
-  }
-})
-
-document.addEventListener("keyup", (event) => {
-  if (event.key === " " && gestures.getSpaceHeld()) {
-    gestures.setSpaceHeld(false)
-  }
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
-    commitNudgeCheckpoint()
-  }
-})
-window.addEventListener("blur", () => {
-  if (gestures.getSpaceHeld()) gestures.setSpaceHeld(false)
-  commitNudgeCheckpoint()
-})
-
 const notifications = createNotificationCenter({ byId })
 const notify = (options) => notifications.notify(options)
 
@@ -2128,6 +1996,16 @@ const projects = setupProjects({
 })
 const dialogs = setupDialogs({
   ...shared, selectPage, selectBox, listButton, commitLiveForm: commitLiveFormCheckpoint,
+})
+shortcuts = setupShortcuts({
+  state, stage, gestures, dialogs,
+  selectedPage, selectedBox, projectBusy, editorSnapshot,
+  commitLiveForm: commitLiveFormCheckpoint,
+  formEditing: () => Boolean(formEditSnapshot),
+  checkpoint, renderCanvas,
+  restoreHistory, duplicateSelectedBox, deleteSelectedBoxes,
+  toggleHistoryPanel,
+  nudgeMeta: NUDGE_META,
 })
 setupTasks(byId)
 setupOcr(shared)

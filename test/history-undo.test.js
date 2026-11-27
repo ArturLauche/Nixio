@@ -358,10 +358,12 @@ test("main.js routes both raw cleanup notifications through the guarded undo", a
   assert.match(main, /gesturing: gestures\.hasGesture\(\)/)
   assert.match(main, /pending: pendingHistoryEdit\(\)/)
   assert.match(main, /const snapshots = \[state, \.\.\.history\.snapshots\(\)\]/)
-  // Ordinary toolbar and keyboard undo/redo stay untouched.
+  // Ordinary toolbar and keyboard undo/redo stay untouched. The keyboard handler lives in the
+  // shortcuts controller since the modal and Space guards moved there.
   assert.match(main, /byId\("undo"\)\.onclick = \(\) => restoreHistory\("undo"\)/)
   assert.match(main, /byId\("redo"\)\.onclick = \(\) => restoreHistory\("redo"\)/)
-  assert.match(main, /restoreHistory\(key === "y" \|\| event\.shiftKey \? "redo" : "undo"\)/)
+  const shortcuts = await readFile(new URL("../src/controllers/shortcuts.js", import.meta.url), "utf8")
+  assert.match(shortcuts, /restoreHistory\(key === "y" \|\| event\.shiftKey \? "redo" : "undo"\)/)
 })
 
 

@@ -558,6 +558,49 @@ export function setupGestures({
     }
   })
 
+  const splitHandle = byId("split-handle")
+  if (splitHandle) {
+    let draggingSplit = false
+    const applySplitPos = (value) => {
+      state.splitPos = clamp(Math.round(value), 0, 100)
+      stage.style.setProperty("--split-pos", `${state.splitPos}%`)
+      splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
+      splitHandle.setAttribute("aria-valuetext", `Rèm ở ${state.splitPos}%`)
+    }
+    const updateSplitFromClientX = (clientX) => {
+      const rect = stage.getBoundingClientRect()
+      if (!rect.width) return
+      applySplitPos(((clientX - rect.left) / rect.width) * 100)
+    }
+    splitHandle.addEventListener("pointerdown", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      draggingSplit = true
+      splitHandle.focus?.({ preventScroll: true })
+      splitHandle.setPointerCapture?.(event.pointerId)
+      updateSplitFromClientX(event.clientX)
+    })
+    splitHandle.addEventListener("pointermove", (event) => {
+      if (!draggingSplit) return
+      event.preventDefault()
+      updateSplitFromClientX(event.clientX)
+    })
+    const stopSplit = () => { draggingSplit = false }
+    splitHandle.addEventListener("pointerup", stopSplit)
+    splitHandle.addEventListener("pointercancel", stopSplit)
+    splitHandle.addEventListener("keydown", (event) => {
+      const key = event.key
+      const arrow = key === "ArrowLeft" || key === "ArrowUp" || key === "ArrowRight" || key === "ArrowDown"
+      if (!arrow && key !== "Home" && key !== "End") return
+      event.preventDefault()
+      event.stopPropagation()
+      if (key === "Home") return applySplitPos(0)
+      if (key === "End") return applySplitPos(100)
+      const step = event.shiftKey ? 10 : 2
+      applySplitPos(state.splitPos + ((key === "ArrowRight" || key === "ArrowDown") ? step : -step))
+    })
+  }
+
   return {
     hasGesture: () => Boolean(gesture),
     cancelPendingPaint() {

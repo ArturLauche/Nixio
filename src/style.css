@@ -829,6 +829,12 @@ details[open] > summary::after { transform: rotate(90deg); }
 }
 .split-badge-before { right: 8px; }
 .split-badge-after { left: 8px; }
+.split-hint {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  padding: 2px 7px; border-radius: 4px; white-space: nowrap;
+  background: rgba(17, 20, 24, .82); color: #ffffff;
+  font-size: .68rem; font-weight: 600; pointer-events: none; user-select: none;
+}
 .stage.split-comparing .overlays { pointer-events: none; opacity: .2; }
 
 /* Bottom Status Bar */
