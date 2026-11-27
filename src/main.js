@@ -16,6 +16,9 @@ import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
+import {
+  clampRect, geometryFromPixels, geometryPixels, resizeHandleLabel, resizeHandles, rotationHandleLabel,
+} from "./keyboard-geometry.js"
 import { applyBoxText, boxLabel, boxTextError } from "./box-text.js"
 import { createTranslationMemoryStore } from "./translation-memory.js"
 import { createQaReviewStore } from "./qa-review.js"
@@ -113,6 +116,10 @@ let syncTranslationMemory = () => {}
 const FORM_EDIT_META = { label: "Sửa khung thoại", kind: "form" }
 // A held arrow key is one action too: the debounced checkpoint carries the name of the whole nudge.
 const NUDGE_META = { label: "Đẩy khung bằng phím", kind: "nudge" }
+// The same rule for the other keyboard geometry gestures, so the timeline names the keys that made
+// the change instead of calling every one of them a nudge.
+const RESIZE_META = { label: "Co giãn khung bằng phím", kind: "gesture" }
+const ROTATE_META = { label: "Xoay khung bằng phím", kind: "gesture" }
 // Timeline chips: every kind a checkpoint records today gets a short label, so a row never shows a
 // bare kind next to its own specific name.
 const historyKindLabels = {
@@ -126,7 +133,6 @@ const distributeLabels = { horizontal: "ngang", vertical: "dọc" }
 const selectedPage = () => state.pages.find((page) => page.id === state.pageId)
 const selectedBox = () => selectedPage()?.boxes.find((box) => box.id === state.boxId)
 const selectedIndex = () => state.pages.findIndex((page) => page.id === state.pageId)
-const resizeHandleNames = ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
 
 function editorSnapshot() {
   return copyEditor({
@@ -829,15 +835,26 @@ function renderCanvas() {
     })
     rectStyle(outline, box)
     if (showsTransformHandles({ marks, tool, placing: state.placing, compareOriginal: state.compareOriginal })) {
-      for (const handle of resizeHandleNames) {
+      // The handles are the keyboard's resize controls: each is a focusable button named after the
+      // edge it moves, and its stable focus key keeps focus on the same handle across a rebuild.
+      for (const handle of resizeHandles) {
         const dot = document.createElement("span")
         dot.className = "resize-handle"
         dot.dataset.handle = handle
+        dot.dataset.focusKey = `handle:${box.id}:${handle}`
+        dot.setAttribute("role", "button")
+        dot.setAttribute("tabindex", "0")
+        dot.setAttribute("aria-label", resizeHandleLabel(handle))
+        dot.title = `${resizeHandleLabel(handle)} — mũi tên để co giãn 1 px (Shift: 10 px)`
         outline.append(dot)
       }
       const rot = document.createElement("span")
       rot.className = "rotate-handle"
-      rot.title = "Kéo để xoay (giữ Shift theo nấc 15°)"
+      rot.dataset.focusKey = `rotate:${box.id}`
+      rot.setAttribute("role", "button")
+      rot.setAttribute("tabindex", "0")
+      rot.setAttribute("aria-label", rotationHandleLabel())
+      rot.title = "Kéo để xoay (giữ Shift theo nấc 15°); mũi tên trái/phải khi đang chọn: xoay 15°"
       outline.append(rot)
     }
     return outline
@@ -1349,6 +1366,20 @@ function toggleSelectBox(box) {
   renderInspector()
 }
 
+// The geometry fields are pixels on the page, so they are rewritten from the model whenever the
+// inspector or a keyboard gesture changes the box.
+function syncGeometryFields() {
+  const page = selectedPage()
+  const box = selectedBox()
+  if (!page || !box) return
+  const px = geometryPixels(box, { width: page.image.naturalWidth, height: page.image.naturalHeight })
+  byId("box-x").value = px.x
+  byId("box-y").value = px.y
+  byId("box-w").value = px.w
+  byId("box-h").value = px.h
+  byId("box-rotation").value = box.rotation
+}
+
 function renderInspector() {
   const restoreFocus = holdFocus(byId("boxes"), byId("queue"))
   const page = selectedPage()
@@ -1388,7 +1419,6 @@ function renderInspector() {
     byId("box-font").value = box.font
     byId("box-color").value = box.color
     byId("box-align").value = box.align
-    byId("box-rotation").value = box.rotation
     byId("box-bold").checked = Boolean(box.bold)
     byId("box-italic").checked = Boolean(box.italic)
     byId("box-uppercase").checked = Boolean(box.uppercase)
@@ -1410,6 +1440,7 @@ function renderInspector() {
     const idx = boxes.findIndex((item) => item.id === box.id)
     byId("box-layer-down").disabled = idx <= 0 || projectBusy()
     byId("box-layer-up").disabled = idx < 0 || idx >= boxes.length - 1 || projectBusy()
+    syncGeometryFields()
   }
   byId("boxes").replaceChildren(...boxes.map((item) => {
     const li = document.createElement("li")
@@ -1697,6 +1728,24 @@ function applyFormToBox(box, { requireText = false } = {}) {
   box.fillShape = byId("box-fill-shape").value
   box.fillColor = byId("box-fill-color").value
   box.cleanup = byId("box-cleanup").checked
+  // A geometry field still showing the model is left alone: rounding to whole pixels would
+  // otherwise pull the box every time an unrelated field of the form is edited.
+  const page = selectedPage()
+  if (page) {
+    const size = { width: page.image.naturalWidth, height: page.image.naturalHeight }
+    const shown = geometryPixels(box, size)
+    const read = (key, span) => {
+      const field = byId(`box-${key}`)
+      const typed = field?.value.trim()
+      const value = Number(typed)
+      if (!typed || !Number.isFinite(value) || value === shown[key]) return box[key]
+      return value / Math.max(1, span)
+    }
+    Object.assign(box, clampRect({
+      x: read("x", size.width), y: read("y", size.height),
+      w: read("w", size.width), h: read("h", size.height),
+    }))
+  }
   if (box.cleanup) freezeCleanup(box)
   return true
 }
@@ -2127,16 +2176,19 @@ const dialogs = setupDialogs({
   editorSnapshot, onStyleGuideChange: syncTranslationActions,
 })
 const recordNudge = (before) => checkpoint(before, NUDGE_META)
+const recordResize = (before) => checkpoint(before, RESIZE_META)
+const recordRotate = (before) => checkpoint(before, ROTATE_META)
 
 shortcuts = setupShortcuts({
-  state, stage, gestures, dialogs,
+  state, byId, stage, pageCanvas, gestures, dialogs,
   selectedPage, selectedBox, projectBusy, editorSnapshot,
   commitLiveForm: commitLiveFormCheckpoint,
   formEditing: () => Boolean(formEditSnapshot),
   renderCanvas,
+  syncGeometry: syncGeometryFields,
   restoreHistory, duplicateSelectedBox, deleteSelectedBoxes,
   toggleHistoryPanel,
-  recordNudge,
+  recordNudge, recordResize, recordRotate,
 })
 setupTasks(byId)
 setupOcr(shared)

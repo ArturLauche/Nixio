@@ -393,6 +393,18 @@
               <select id="box-align"><option value="center">Giữa</option><option value="left">Trái / Trên</option><option value="right">Phải / Dưới</option></select>
             </label>
           </details>
+          <details class="prop-group" id="box-geometry">
+            <summary>Vị trí &amp; Kích thước</summary>
+            <div class="two-fields">
+              <label class="field" for="box-x">X (px)<input id="box-x" type="number" step="1" required></label>
+              <label class="field" for="box-y">Y (px)<input id="box-y" type="number" step="1" required></label>
+            </div>
+            <div class="two-fields">
+              <label class="field" for="box-w">Rộng (px)<input id="box-w" type="number" min="1" step="1" required></label>
+              <label class="field" for="box-h">Cao (px)<input id="box-h" type="number" min="1" step="1" required></label>
+            </div>
+            <p class="muted">Phím G mở nhóm này. Mũi tên trên tay cầm co giãn khung 1 px (giữ Shift: 10 px).</p>
+          </details>
           <details class="prop-group">
             <summary>Viền, Đổ bóng &amp; Uốn chữ SFX</summary>
             <div class="two-fields">
@@ -595,7 +607,11 @@
       <div><dt>Shift + Bấm khung</dt><dd>Chọn nhiều khung để kéo / căn hàng</dd></div>
       <div><dt>Alt + Kéo khung</dt><dd>Tạm tắt hút lưới căn thẳng hàng</dd></div>
       <div><dt>Alt + Bấm (Cọ sao chép)</dt><dd>Chọn điểm nguồn sao chép nền</dd></div>
-      <div><dt>Mũi tên (khi chọn khung)</dt><dd>Dịch khung 1 px (giữ Shift: 10 px)</dd></div>
+      <div><dt>Mũi tên (khi chọn khung)</dt><dd>Dịch khung 1 px (giữ Shift: 10 px), hút theo lưới căn thẳng hàng (giữ Alt: tắt hút)</dd></div>
+      <div><dt>Tab tới tay cầm rồi mũi tên</dt><dd>Co giãn khung 1 px (giữ Shift: 10 px); cả nhóm đang chọn co giãn theo</dd></div>
+      <div><dt>Mũi tên trên tay cầm xoay</dt><dd>Xoay khung 15° (giữ Shift: 45°)</dd></div>
+      <div><dt>G</dt><dd>Mở ô toạ độ khung: X, Y, rộng, cao</dd></div>
+      <div><dt>Esc (trong thao tác phím)</dt><dd>Huỷ lần dịch / co giãn / xoay vừa làm</dd></div>
       <div><dt>Delete / Backspace</dt><dd>Xóa khung đang chọn</dd></div>
       <div><dt>Enter (trên ảnh)</dt><dd>Thêm khung chữ ở giữa trang</dd></div>
     </dl>
