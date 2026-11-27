@@ -154,10 +154,11 @@ stateDiagram-v2
     failed --> idle
 ```
 
-- Desktop: `autosave()` chạy mỗi 20 giây khi `nativeReady` và không busy/gesture, bỏ qua khi `savedRevision === revision`; khi đóng app và worker sẵn sàng, renderer thử ghi các sửa đổi chưa lưu nếu tác vụ hiện tại cho phép ([src/controllers/project.js:325-357](../src/controllers/project.js)).
+- Mỗi lần hoàn tất ghi đều được đối chiếu với **ảnh chụp phiên** `{projectId, generation, revision}`; chỉ khi `projectId` và `generation` còn trùng thì `savedRevision`/`lastWebSnapshot` mới được cập nhật. `generation` tăng mỗi lần thay phiên biên tập (mở tệp, mở bản phục hồi, dự án mới), nên một lần ghi hoàn tất muộn không thể đánh dấu phiên kế tiếp là đã lưu; lần ghi cũ vẫn giữ nguyên bản của nó và một lần ghi mới được xếp ngay cho thế hệ mới ([src/controllers/project.js](../src/controllers/project.js)).
+- Desktop: `autosave()` chạy mỗi 20 giây khi `nativeReady` và không busy/gesture, bỏ qua khi `savedRevision === revision`; khi đóng app, renderer chờ các lần ghi đang chạy, ưu tiên `autosave()` qua worker, rồi đến bản tự lưu trình duyệt dự phòng, và chỉ hỏi bỏ thay đổi khi cả hai đều thất bại. Cửa sổ chỉ đóng khi thay đổi đã bền vững (`revision === savedRevision` hoặc `revision === diskRevision`) hoặc người dùng xác nhận bỏ; sự kiện đóng lặp lại được gộp bằng cờ `closing` và bị hủy nếu đang có tác vụ chạy.
 - Snapshot autosave đặt tại `userData/projects/<projectId>/<timestamp>-<uuid>.khungthoai` do `RecoveryCatalog.prepare` cấp; `committed()` ghi `metadata.json` qua file tạm + rename và xóa snapshot vượt quá 10 ([desktop/recovery-catalog.cjs:41-62](../desktop/recovery-catalog.cjs)).
 - Đọc snapshot cũ đi qua `catalog.resolve(projectId, snapshotId)` — ID snapshot phải khớp pattern chặt, không nhận path tự do ([desktop/recovery-catalog.cjs:73-81](../desktop/recovery-catalog.cjs)).
-- Web: cùng nhịp 20 giây nhưng ghi snapshot IndexedDB (`saveWebSnapshot`), không qua worker ([src/controllers/project.js:409-439](../src/controllers/project.js)).
+- Web (và desktop chưa có worker): cùng nhịp 20 giây nhưng ghi snapshot IndexedDB (`saveWebSnapshot`), không qua worker. Khóa gồm `snapshot:<savedAt>:<projectId>:<writer>[:<epoch>]` cho blob và `meta:` cùng hậu tố cho bản ghi nhẹ, nên hai tab/dự án không ghi đè nhau; mỗi lần ghi dọn còn tối đa 3 bản mỗi dự án và 8 bản tổng. Bản ghi `latest` của phiên bản cũ được chuyển vào khóa mới trong cùng transaction rồi xóa; `fonts` không bị chạm. `onversionchange` đóng kết nối và mở lại khi tab khác nâng cấp schema, `onblocked` trả lý do `blocked` để UI hướng dẫn đóng tab cũ; `BroadcastChannel` chỉ để làm mới danh sách, không phải điều kiện đúng đắn.
 
 ## 5. Ranh giới tin cậy IPC
 
@@ -182,7 +183,7 @@ Mô tả theo hướng phòng thủ: mỗi hàng là một điểm mà dữ li�
 | Dữ liệu dự án persist | File `.khungthoai` do `ProjectStorage` ghi atomic; nội dung do renderer dựng | Blob `KHUNGTHOAI\n` + uint32 độ dài manifest + JSON manifest ≤16 MiB (`version: 2`, đọc được `version: 1`) + bytes ảnh từng trang; validate từng field ở `src/project.js`, sai cấu trúc → `invalidProject()`. |
 | Catalog & snapshot phục hồi | `RecoveryCatalog` trong main process sở hữu `userData/projects/<id>/` và `metadata.json` | Tối đa 10 snapshot `.khungthoai` mỗi `projectId` + bản legacy `recovery.khungthoai[.bak]`; path không bao giờ do renderer tự chọn. |
 | Trạng thái phiên renderer | `EditHistory` (Undo/Redo ≤40) và DOM/canvas | Lịch sử chỉ sống trong bộ nhớ renderer. Tệp dự án lưu trạng thái chỉnh sửa hiện tại và `translationJob`; job đang chạy được lưu ở trạng thái chờ. Ảnh/File dùng chung tham chiếu, chỉ dữ liệu editable bị clone ([src/history.js](../src/history.js)). |
-| Fallback trình duyệt | IndexedDB (`src/web-storage.js`) + Canvas/JSZip/inpaint JS | Cùng nhịp autosave 20s; không có worker C#, không có filesystem — `desktop` là `undefined` nên mọi nhánh `desktop?.` tự tắt. |
+| Fallback trình duyệt | IndexedDB (`src/web-storage.js`) + Canvas/JSZip/inpaint JS | Cùng nhịp autosave 20s; không có worker C#, không có filesystem — `desktop` là `undefined` nên mọi nhánh `desktop?.` tự tắt. Store `snapshots` chứa cặp bản ghi blob + meta theo khóa `snapshot:`/`meta:` (schema 2, dùng chung DB v2 nên không cần nâng cấp khi migrate `latest`), tối đa 3 bản/dự án và 8 bản tổng. |
 
 ## 7. Checklist thêm một operation
 
