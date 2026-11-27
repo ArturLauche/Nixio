@@ -346,6 +346,9 @@ label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
   text-underline-offset: .18em;
 }
 .field, .choice { margin-top: 7px; margin-bottom: 7px; }
+.field-error { color: var(--danger); font-size: .78rem; }
+.field-error:empty { display: none; }
+#box-text[aria-invalid="true"] { border-color: var(--danger); }
 textarea, select, input:not([type="file"],[type="checkbox"],[type="range"]) {
   width: 100%;
   min-width: 0;

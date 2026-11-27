@@ -16,6 +16,7 @@ import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
+import { applyBoxText, boxLabel, boxTextError } from "./box-text.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -784,7 +785,7 @@ function renderCanvas() {
     outline.className = "outline"
     outline.setAttribute("role", "button")
     outline.setAttribute("tabindex", "0")
-    outline.setAttribute("aria-label", box.text)
+    outline.setAttribute("aria-label", boxLabel(box))
     outline.dataset.box = box.id
     outline.dataset.focusKey = "box:" + box.id
     // The primary keeps its own marker inside a multi-selection, so the group highlight never hides
@@ -1351,6 +1352,9 @@ function renderInspector() {
   if (box) {
     registerFontName(box.font)
     renderFontOptions()
+    // A box the user emptied keeps an empty field, and the complaint from a rejected save belongs
+    // to the box it was raised on, not to the next one.
+    setBoxTextError("")
     byId("box-text").value = box.text
     byId("box-size").value = box.size
     byId("box-font").value = box.font
@@ -1381,7 +1385,7 @@ function renderInspector() {
   }
   byId("boxes").replaceChildren(...boxes.map((item) => {
     const li = document.createElement("li")
-    const button = listButton(item.text, (event) => {
+    const button = listButton(boxLabel(item), (event) => {
       if (event.shiftKey) toggleSelectBox(item)
       else selectBox(item)
     })
@@ -1629,10 +1633,20 @@ byId("add-box").onclick = () => {
   }
 }
 
+// The inline message next to the text field, shared by the rejected save and the live edit that
+// clears it again, so the field never carries a stale complaint.
+function setBoxTextError(message) {
+  const error = byId("box-text-error")
+  if (!error) return
+  error.textContent = message ?? ""
+  if (message) byId("box-text").setAttribute("aria-invalid", "true")
+  else byId("box-text").removeAttribute("aria-invalid")
+}
+
 function applyFormToBox(box, { requireText = false } = {}) {
-  const trimmed = byId("box-text").value.trim()
-  if (requireText && !trimmed) return false
-  if (trimmed) box.text = trimmed
+  const text = byId("box-text").value
+  if (requireText && boxTextError(text)) return false
+  applyBoxText(box, text)
   box.font = byId("box-font").value
   box.size = clamp(Number(byId("box-size").value) || box.size, 8, 400)
   box.lineHeight = clamp(Number(byId("box-line-height").value) || 1.15, .8, 2.2)
@@ -1676,13 +1690,23 @@ byId("box-warp").addEventListener("change", () => {
 })
 form.addEventListener("input", liveUpdateForm)
 form.addEventListener("change", liveUpdateForm)
+byId("box-text").addEventListener("input", () => {
+  if (!boxTextError(byId("box-text").value)) setBoxTextError("")
+})
 
 form.onsubmit = (event) => {
   event.preventDefault()
   const box = selectedBox()
   if (!box || projectBusy()) return
-  const text = byId("box-text").value.trim()
-  if (!text) return status("Hãy nhập nội dung khung.", true)
+  // An empty field is a draft, not a saved box: the save refuses it, keeps the caret in the field
+  // and explains why inline instead of restoring the line the user just deleted.
+  const error = boxTextError(byId("box-text").value)
+  if (error) {
+    setBoxTextError(error)
+    byId("box-text").focus()
+    return
+  }
+  setBoxTextError("")
   if (!commitLiveFormCheckpoint()) checkpoint(undefined, { label: "Lưu khung thoại", kind: "form" })
   applyFormToBox(box, { requireText: true })
   renderPages()
