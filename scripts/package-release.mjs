@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto"
 import {
   chmodSync,
+  closeSync,
   cpSync,
   createReadStream,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -251,6 +255,116 @@ export function buildInnoSetupScript({ version, sourceDir, outputDir, outputBase
   ].join("\r\n")
 }
 
+export const MAC_APP_BUNDLE = `${APP_BINARY}.app`
+export const MAC_ARCHITECTURES = ["arm64", "x64"]
+export const MAC_TARGETS = ["app", "dmg", "zip"]
+export const MAC_BUNDLE_ID = "com.khungthoai.editor"
+const MAC_SIGNING_KEYS = { appleId: "APPLE_ID", password: "APPLE_APP_SPECIFIC_PASSWORD", teamId: "APPLE_TEAM_ID" }
+const MACHO_MAGIC = new Set([0xfeedface, 0xfeedfacf, 0xcafebabe, 0xcefaedfe, 0xcffaedfe])
+
+function plistDict(entries) {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    "<dict>",
+    ...Object.entries(entries).flatMap(([key, value]) => [`\t<key>${key}</key>`, `\t<${value ? "true" : "false"}/>`]),
+    "</dict>",
+    "</plist>",
+    "",
+  ].join("\n")
+}
+
+// The hardened runtime needs these grants for Chromium's JIT, the bundled .NET worker and the
+// network/file channels the main process already exposes behind IPC.
+export function macEntitlements() {
+  return plistDict({
+    "com.apple.security.cs.allow-jit": true,
+    "com.apple.security.cs.allow-unsigned-executable-memory": true,
+    "com.apple.security.cs.allow-dyld-environment-variables": true,
+    "com.apple.security.cs.disable-library-validation": true,
+    "com.apple.security.network.client": true,
+    "com.apple.security.files.user-selected.read-write": true,
+  })
+}
+
+// Renderer, GPU and helper processes cannot carry their own grants: they inherit the parent's.
+export function macInheritedEntitlements() {
+  return plistDict({
+    "com.apple.security.cs.allow-jit": true,
+    "com.apple.security.cs.allow-unsigned-executable-memory": true,
+    "com.apple.security.inherit": true,
+  })
+}
+
+export function macPackagerOptions() {
+  return { appBundleId: MAC_BUNDLE_ID, appCategoryType: "public.app-category.graphics-design" }
+}
+
+// The worker resolver and @electron/packager call macOS "darwin", while the RID advertised by
+// desktop-build.mjs and the C# worker is "osx"; keep both spellings in one place.
+export function releaseTarget(rid) {
+  const [family, arch] = String(rid ?? "").split("-")
+  const platformName = { linux: "linux", win: "win32", osx: "darwin" }[family]
+  if (!platformName || !["x64", "arm64"].includes(arch)) return null
+  return { rid: `${family}-${arch}`, family, arch, platformName }
+}
+
+export function macArtifactNames({ version, arch }) {
+  const stem = `${APP_BINARY}-${normalizeVersion(version)}-mac-${arch}`
+  return { app: MAC_APP_BUNDLE, dmg: `${stem}.dmg`, zip: `${stem}.zip` }
+}
+
+export function buildMacCodesignArgs({ identity, target, entitlements }) {
+  return ["--force", "--timestamp", "--options", "runtime", "--entitlements", entitlements, "--sign", identity, target]
+}
+
+export function buildMacDmgCodesignArgs({ identity, target }) {
+  return ["--force", "--timestamp", "--sign", identity, target]
+}
+
+export function buildMacDmgArgs({ appPath, outputFile, volumeName = APP_NAME }) {
+  return ["create", "-volname", volumeName, "-srcfolder", appPath, "-ov", "-format", "UDZO", outputFile]
+}
+
+export function buildMacZipArgs({ appPath, outputFile }) {
+  return ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, outputFile]
+}
+
+export function macSigningConfig(env = process.env) {
+  const identity = String(env?.CODESIGN_IDENTITY ?? "").trim()
+  const notarize = String(env?.MAC_NOTARIZE ?? "").trim() === "1"
+  if (notarize && !identity) {
+    throw new Error(
+      "Không thể notarise bản macOS khi chưa đặt CODESIGN_IDENTITY. " +
+      "Đặt biến môi trường CODESIGN_IDENTITY (\"Developer ID Application: ...\") rồi chạy lại.",
+    )
+  }
+  return { identity, notarize }
+}
+
+export function macNotarizeCredentials(env = process.env) {
+  const values = {}
+  const missing = []
+  for (const [key, name] of Object.entries(MAC_SIGNING_KEYS)) {
+    const value = String(env?.[name] ?? "").trim()
+    if (value) values[key] = value
+    else missing.push(name)
+  }
+  if (missing.length) {
+    throw new Error(
+      `Thiếu thông tin xác thực notarisation (${missing.join(", ")}). ` +
+      "Đặt biến môi trường APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD và APPLE_TEAM_ID trước khi chạy notarisation.",
+    )
+  }
+  return values
+}
+
+export function buildMacNotarytoolArgs({ target, env = process.env }) {
+  const { appleId, password, teamId } = macNotarizeCredentials(env)
+  return ["notarytool", "submit", "--apple-id", appleId, "--password", password, "--team-id", teamId, "--wait", target]
+}
+
 export async function sha256File(filePath) {
   return new Promise((resolve, reject) => {
     const hash = createHash("sha256")
@@ -401,14 +515,89 @@ function packageWindows({ version, arch, sourceDir, outDir }) {
   return outputs
 }
 
-async function main() {
-  const [rid = `${process.platform === "win32" ? "win" : "linux"}-${process.arch}`, rawVersion] = process.argv.slice(2)
-  const version = normalizeVersion(rawVersion || process.env.RELEASE_VERSION || pkg.version)
-  const [family, arch] = rid.split("-")
-  if (!["linux", "win"].includes(family) || !["x64", "arm64"].includes(arch)) {
-    throw new Error("Usage: node scripts/package-release.mjs <linux-x64|win-x64> [version]")
+function isMachO(filePath) {
+  const descriptor = openSync(filePath, "r")
+  try {
+    const head = Buffer.alloc(4)
+    if (readSync(descriptor, head, 0, 4, 0) < 4) return false
+    return MACHO_MAGIC.has(head.readUInt32BE(0)) || MACHO_MAGIC.has(head.readUInt32LE(0))
+  } finally {
+    closeSync(descriptor)
   }
-  const platformName = family === "win" ? "win32" : "linux"
+}
+
+// Nested bundles and the bundled .NET worker are sealed into the app, so they are signed first.
+function signableTargets(directory) {
+  const found = []
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue
+    const child = path.join(directory, entry.name)
+    if (entry.isDirectory()) {
+      found.push(...signableTargets(child))
+      if (/\.(app|framework|xpc)$/.test(entry.name)) found.push(child)
+    } else if (isMachO(child)) {
+      found.push(child)
+    }
+  }
+  return found
+}
+
+function signMacBundle({ appPath, identity, entitlements, inheritedEntitlements }) {
+  for (const target of signableTargets(appPath)) {
+    run("codesign", buildMacCodesignArgs({ identity, target, entitlements: inheritedEntitlements }))
+  }
+  run("codesign", buildMacCodesignArgs({ identity, target: appPath, entitlements }))
+}
+
+function packageMac({ version, arch, sourceDir, outDir }) {
+  const names = macArtifactNames({ version, arch })
+  const appPath = path.join(sourceDir, names.app)
+  if (!existsSync(appPath)) {
+    throw new Error(`Packaged macOS app not found at ${appPath}. Run \`npm run desktop:package -- osx-${arch}\` first.`)
+  }
+  const { identity, notarize } = macSigningConfig(process.env)
+  const stageRoot = path.join(root, "release-stage", `osx-${arch}`)
+  mkdirSync(stageRoot, { recursive: true })
+  const entitlements = path.join(stageRoot, "entitlements.mac.plist")
+  const inheritedEntitlements = path.join(stageRoot, "entitlements.mac.inherit.plist")
+  writeFileSync(entitlements, macEntitlements(), "utf8")
+  writeFileSync(inheritedEntitlements, macInheritedEntitlements(), "utf8")
+
+  // Unsigned fallback: without a Developer ID the app still runs locally after an explicit
+  // Gatekeeper bypass, and CI keeps publishing the .dmg/.zip for manual verification.
+  if (identity) {
+    signMacBundle({ appPath, identity, entitlements, inheritedEntitlements })
+  } else {
+    console.warn("CODESIGN_IDENTITY chưa đặt — bỏ qua bước ký, bản .app/.dmg sẽ không được ký.")
+  }
+
+  if (notarize) {
+    run("xcrun", buildMacNotarytoolArgs({ target: appPath }))
+    run("xcrun", ["stapler", "staple", appPath])
+  } else {
+    console.warn("MAC_NOTARIZE chưa bật — bỏ qua notarisation, Gatekeeper sẽ cảnh báo khi mở bản tải về.")
+  }
+
+  const dmgFile = path.join(outDir, names.dmg)
+  const zipFile = path.join(outDir, names.zip)
+  rmSync(dmgFile, { force: true })
+  rmSync(zipFile, { force: true })
+  run("hdiutil", buildMacDmgArgs({ appPath, outputFile: dmgFile }))
+  run("ditto", buildMacZipArgs({ appPath, outputFile: zipFile }))
+  if (identity) run("codesign", buildMacDmgCodesignArgs({ identity, target: dmgFile }))
+  rmSync(stageRoot, { recursive: true, force: true })
+  return [dmgFile, zipFile]
+}
+
+async function main() {
+  const defaultFamily = { win32: "win", darwin: "osx", linux: "linux" }[process.platform] ?? "linux"
+  const [rid = `${defaultFamily}-${process.arch}`, rawVersion] = process.argv.slice(2)
+  const version = normalizeVersion(rawVersion || process.env.RELEASE_VERSION || pkg.version)
+  const target = releaseTarget(rid)
+  if (!target) {
+    throw new Error("Usage: node scripts/package-release.mjs <linux-x64|win-x64|osx-x64|osx-arm64> [version]")
+  }
+  const { family, arch, platformName } = target
   const sourceDir = path.join(root, "desktop-dist", `${APP_BINARY}-${platformName}-${arch}`)
   if (!existsSync(sourceDir)) {
     throw new Error(`Packaged desktop app not found at ${sourceDir}. Run \`npm run desktop:package -- ${rid}\` first.`)
@@ -418,7 +607,9 @@ async function main() {
 
   const artifacts = family === "linux"
     ? packageLinux({ version, arch, sourceDir, outDir })
-    : packageWindows({ version, arch, sourceDir, outDir })
+    : family === "win"
+      ? packageWindows({ version, arch, sourceDir, outDir })
+      : packageMac({ version, arch, sourceDir, outDir })
 
   for (const file of artifacts) {
     const sizeMb = (statSync(file).size / (1024 * 1024)).toFixed(1)

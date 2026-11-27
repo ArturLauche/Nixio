@@ -3,6 +3,7 @@ import { packager } from "@electron/packager"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
+import { macPackagerOptions } from "./package-release.mjs"
 
 const root = fileURLToPath(new URL("..", import.meta.url))
 const platformByRid = { linux: "linux", win: "win32", osx: "darwin" }
@@ -32,6 +33,7 @@ if (mode === "app") {
     executableName: "Khung-Thoai",
     platform,
     arch,
+    ...(platform === "darwin" ? macPackagerOptions() : {}),
     asar: true,
     overwrite: true,
     out: path.join(root, "desktop-dist"),
