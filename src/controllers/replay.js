@@ -82,7 +82,17 @@ export function setupReplay({ byId, projectId = () => "", notify = () => {}, wri
     play.type = "button"
     play.className = "button"
     play.textContent = "Phát lại"
-    play.onclick = () => { open(record.id) }
+    // A click that cannot replay anything has to say why, or the button looks broken.
+    play.onclick = async () => {
+      const result = await open(record.id)
+      if (!result?.ok) {
+        notify?.({
+          kind: "error",
+          title: "Không phát lại được lượt này",
+          message: result?.message || "Bản ghi lượt không đọc được.",
+        })
+      }
+    }
     item.append(label, play)
     return item
   }

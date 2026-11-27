@@ -198,3 +198,27 @@ test("/replay resolves the newest record or a named one", () => {
   assert.deepEqual(parseSlashCommand("/replay turn-abc"), { kind: "replay", id: "turn-abc" })
   assert.match(SLASH_COMMANDS_HELP, /\/replay \[id\|latest\]/)
 })
+
+test("a play button with nothing to play says so instead of doing nothing (#review)", async () => {
+  installBrowserGlobals()
+  const ids = ["chat-replay", "chat-replay-list", "chat-replay-empty", "chat-replay-trace", "chat-replay-export", "chat-replay-clear"]
+  const elements = new Map(ids.map((id) => [id, fakeElement(id === "chat-replay-list" ? "ol" : "div")]))
+  const notifications = []
+  const panel = setupReplay({
+    byId: (id) => elements.get(id) ?? null,
+    projectId: () => "proj-a",
+    notify: (notification) => notifications.push(notification),
+  })
+  panel.save(recordFor({ id: "turn-gone" }))
+  const listed = elements.get("chat-replay-list").children
+  assert.equal(listed.length, 1)
+
+  // The record is gone by the time the row is clicked: a stored transcript was cleared elsewhere.
+  const { clearProjectTurnRecords } = await import("../src/chat-storage.js")
+  clearProjectTurnRecords("proj-a")
+  listed[0].children[1].click()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(notifications.length, 1)
+  assert.equal(notifications[0].kind, "error")
+  assert.match(notifications[0].message, /turn-gone/)
+})
