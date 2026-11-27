@@ -24,7 +24,7 @@ Dự án được xây dựng độc lập sau khi khảo sát luồng công kha
 
 ---
 
-## Cài đặt bản phát hành chính thức (Windows & Linux)
+## Cài đặt bản phát hành chính thức (Windows, macOS & Linux)
 
 Tải bộ cài tích hợp sẵn runtime **.NET 10** tự chứa tại trang [GitHub Releases](https://github.com/wiothemilo-lang/Nixio/releases):
 
@@ -32,6 +32,9 @@ Tải bộ cài tích hợp sẵn runtime **.NET 10** tự chứa tại trang [G
 |---|---|---|
 | **Windows 10 / 11 (x64)** | `Khung-Thoai-*-win-x64-setup.exe` | Chạy trình cài đặt Inno Setup (không cần quyền Admin mặc định, tự liên kết tệp `.khungthoai`) |
 | **Windows 10 / 11 (Portable)** | `Khung-Thoai-*-win-x64-portable.zip` | Giải nén và mở `Khung-Thoai.exe` |
+| **macOS 12+ (Apple Silicon)** | `Khung-Thoai-*-mac-arm64.dmg` | Mở `.dmg` và kéo **Khung Thoại** vào `Applications` |
+| **macOS 12+ (Intel)** | `Khung-Thoai-*-mac-x64.dmg` | Mở `.dmg` và kéo **Khung Thoại** vào `Applications` |
+| **macOS (Portable)** | `Khung-Thoai-*-mac-arm64.zip` / `Khung-Thoai-*-mac-x64.zip` | Giải nén và mở `Khung-Thoai.app` |
 | **Ubuntu / Debian / Mint / Pop!_OS (x64)** | `khung-thoai_*_amd64.deb` | `sudo apt install ./khung-thoai_*_amd64.deb` *(tương thích cả Debian 11/12 và Ubuntu 22.04/24.04 `t64`)* |
 | **Fedora Linux (x64)** | `khung-thoai-*-1.x86_64.rpm` | `sudo dnf install ./khung-thoai-*-1.x86_64.rpm` |
 | **Linux khác (Portable x64)** | `khung-thoai-*-linux-x64.tar.gz` | Giải nén và chạy `./Khung-Thoai` |
@@ -40,6 +43,7 @@ Tải bộ cài tích hợp sẵn runtime **.NET 10** tự chứa tại trang [G
 > - **Ubuntu / Debian**: `sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-jpn tesseract-ocr-jpn-vert`
 > - **Fedora**: `sudo dnf install tesseract tesseract-langpack-eng tesseract-langpack-jpn tesseract-langpack-jpn_vert`
 > - **Windows 10 / 11**: `winget install UB-Mannheim.TesseractOCR` (hoặc tải từ [UB-Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki))
+> - **macOS**: `brew install tesseract tesseract-lang`
 
 Kiểm tra toàn vẹn tệp tải về bằng `SHA256SUMS.txt` đi kèm bản phát hành (`sha256sum -c SHA256SUMS.txt`).
 
@@ -70,14 +74,40 @@ npm run desktop:native                  # Biên dịch lõi C# (.NET 10 SDK) và
 npm run desktop                         # Build web và mở app Electron
 npm run desktop:package -- linux-x64    # Đóng gói Electron + runtime .NET vào desktop-dist/
 npm run desktop:package -- win-x64      # Tương tự cho Windows x64
+npm run desktop:package -- osx-arm64    # macOS Apple Silicon (.app trong desktop-dist/Khung-Thoai-darwin-arm64/)
+npm run desktop:package -- osx-x64      # macOS Intel
 ```
 
-Tạo gói cài đặt phát hành (`.deb`, `.rpm`, `.tar.gz` trên Linux; `.exe` Inno Setup 6 & `.zip` trên Windows — kết quả nằm trong `release-dist/`):
+Tạo gói cài đặt phát hành (`.deb`, `.rpm`, `.tar.gz` trên Linux; `.exe` Inno Setup 6 & `.zip` trên Windows; `.app`, `.dmg` & `.zip` trên macOS — kết quả nằm trong `release-dist/`):
 
 ```sh
 npm run desktop:release -- linux-x64    # Yêu cầu dpkg-deb, rpmbuild, tar
 npm run desktop:release -- win-x64      # Yêu cầu Inno Setup 6 (ISCC.exe)
+npm run desktop:release -- osx-arm64    # Yêu cầu macOS: ditto, hdiutil, codesign, xcrun notarytool
+npm run desktop:release -- osx-x64
 ```
+
+#### Ký và notarisation bản macOS
+
+`scripts/package-release.mjs` ký `.app` với Hardened Runtime bằng entitlements sinh ra lúc đóng gói, đối chiếu với hai tệp đã commit: `desktop/assets/entitlements.mac.plist` (app) và `desktop/assets/entitlements.mac.inherit.plist` (helper/renderer + worker C#). Các bundle lồng nhau và worker C# được ký trước bằng quyền kế thừa, sau đó mới ký app; tiếp theo là `.dmg` bằng `hdiutil` và `.zip` bằng `ditto`. Bước notarisation (`xcrun notarytool submit --wait` + `xcrun stapler staple`) chỉ chạy khi bật `MAC_NOTARIZE=1` và đọc thông tin xác thực từ biến môi trường:
+
+| Biến môi trường | Ý nghĩa |
+|---|---|
+| `CODESIGN_IDENTITY` | Chuỗi định danh Developer ID, ví dụ `Developer ID Application: Khung Thoai (ABCDE12345)` |
+| `MAC_NOTARIZE` | Đặt `1` để notarise; bỏ trống để chỉ ký cục bộ |
+| `APPLE_ID` | Apple ID của tài khoản developer |
+| `APPLE_APP_SPECIFIC_PASSWORD` | Mật khẩu ứng dụng riêng cho `notarytool` |
+| `APPLE_TEAM_ID` | Team ID 10 ký tự |
+
+Thiếu thông tin xác thực thì lệnh dừng ngay bằng lỗi tiếng Việt (`Thiếu thông tin xác thực notarisation (APPLE_ID, …)`) thay vì đẩy lên một bản `.dmg` không notarise.
+
+**Nhánh không ký (unsigned)**: nếu không đặt `CODESIGN_IDENTITY`, bước ký và notarisation được bỏ qua, `.app`/`.dmg`/`.zip` vẫn được tạo và ghi cảnh báo `CODESIGN_IDENTITY chưa đặt — bỏ qua bước ký`. Người dùng cuối mở bản này bằng chuột phải → **Open**, hoặc gỡ cờ cách ly một lần:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Khung-Thoai.app
+```
+
+Bật `MAC_NOTARIZE=1` mà thiếu `CODESIGN_IDENTITY` cũng dừng bằng lỗi tiếng Việt tương ứng — không có bản notarise nào được tạo từ app chưa ký.
 
 ---
 
@@ -107,7 +137,10 @@ Nixio/
 │   ├── native-worker.cjs, worker.cjs, task-queue.cjs, project-files.cjs, recovery-catalog.cjs
 │   ├── web-search.cjs          # DuckDuckGo + Jisho + Wikipedia (DNS IP Pinning chống SSRF/DNS Rebinding & decompression bomb)
 │   ├── updater.cjs             # Kiểm tra GitHub Releases API phía tiến trình chính
-│   └── assets/icon.svg         # Icon vector ứng dụng
+│   └── assets/
+│       ├── icon.svg                        # Icon vector ứng dụng
+│       ├── entitlements.mac.plist          # Hardened Runtime entitlements cho .app macOS
+│       └── entitlements.mac.inherit.plist  # Quyền kế thừa cho helper/renderer & worker C#
 ├── native/                     # Lõi xử lý ảnh & lưu trữ C#/.NET 10 (KhungThoai.Redraw.csproj)
 │   ├── PatchMatchInpaint.cs    # Multi-Scale Gradient-Aware SIMD PatchMatch + EM Voting + Colour Adaptation + Content-Aware Cleanup
 │   ├── PoissonBlend.cs         # Multigrid SOR Poisson Seamless Blending & Seamless Clone Stamp (Parallel.For)
@@ -115,15 +148,15 @@ Nixio/
 ├── docs/
 │   └── architecture.md         # Sơ đồ RPC KTR1, máy trạng thái tác vụ/phục hồi, bảng ranh giới tin cậy IPC, checklist thêm operation
 ├── scripts/
-│   ├── desktop-build.mjs       # Build native C# + Vite + @electron/packager
-│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe
-│   ├── desktop-smoke.mjs       # Kiểm thử E2E Playwright cho bản Electron đóng gói
+│   ├── desktop-build.mjs       # Build native C# + Vite + @electron/packager (.app trên macOS)
+│   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe; .app, .dmg + ký & notarise macOS
+│   ├── desktop-smoke.mjs       # Kiểm thử E2E Playwright cho bản Electron đóng gói (giải mã đường dẫn .app trên macOS)
 │   ├── benchmark.mjs           # Đối chứng chất lượng redraw/OCR
 │   └── agent-eval.mjs          # Chấm output AI offline bằng fixture vàng (glossary, ID, tool, token)
 ├── test/                       # 36 bộ unit test & integration test (Node.js test runner)
 └── .github/workflows/
-    ├── verify.yml              # CI Node 24 build, test C#/Node, benchmark, visual, eval & smoke test trên Linux + Windows
-    └── release.yml             # CD Node 24 tự động đóng gói & xuất bản GitHub Release khi gắn tag v*.*.*
+    ├── verify.yml              # CI Node 24 build, test C#/Node, benchmark, visual, eval & smoke test trên Linux + Windows + macOS
+    └── release.yml             # CD Node 24 tự động đóng gói (.deb/.rpm/.tar.gz/.exe/.zip/.dmg) & xuất bản GitHub Release khi gắn tag v*.*.*
 ```
 
 ---
@@ -248,8 +281,8 @@ Chạy toàn bộ bộ test bằng Node.js 22.12+:
 npm test
 ```
 
-- **CI (`.github/workflows/verify.yml`)**: Chạy trên GitHub Actions Node 24 (`ubuntu-latest` và `windows-latest`), thực thi 36 bộ unit/integration test (Node + C#), bộ đối chứng chất lượng ảnh/OCR (`npm run benchmark -- --output artifacts/benchmark.json`), so khớp baseline giao diện biên tập/thư viện trên Linux (`npm run test:visual`), chấm output AI offline bằng fixture vàng (`npm run eval:agent -- --output artifacts/agent-eval.json`, chạy tuần tự sau bước visual) và kiểm thử luồng Electron đóng gói bằng Playwright (`npm run test:desktop -- --packaged`). Xem [nguồn và cách bổ sung mẫu ảnh](test/fixtures/comic/README.md), [quy trình baseline giao diện](test/visual/README.md) và [fixture đánh giá AI](test/eval/fixtures/README.md).
-- **CD (`.github/workflows/release.yml`)**: Khi đẩy tag `v*.*.*` (hoặc chạy tay qua `workflow_dispatch`), tự động build, smoke-test trên Linux & Windows, đóng gói `.deb`, `.rpm`, `.tar.gz`, `.exe` (Inno Setup 6), `.zip`, tạo `SHA256SUMS.txt` và xuất bản GitHub Release.
+- **CI (`.github/workflows/verify.yml`)**: Chạy trên GitHub Actions Node 24 (`ubuntu-latest`, `windows-latest` và `macos-15`), thực thi 36 bộ unit/integration test (Node + C#), bộ đối chứng chất lượng ảnh/OCR (`npm run benchmark -- --output artifacts/benchmark.json`), so khớp baseline giao diện biên tập/thư viện trên Linux (`npm run test:visual`), chấm output AI offline bằng fixture vàng (`npm run eval:agent -- --output artifacts/agent-eval.json`, chạy tuần tự sau bước visual) và kiểm thử luồng Electron đóng gói bằng Playwright (`npm run test:desktop -- --packaged`). Xem [nguồn và cách bổ sung mẫu ảnh](test/fixtures/comic/README.md), [quy trình baseline giao diện](test/visual/README.md) và [fixture đánh giá AI](test/eval/fixtures/README.md).
+- **CD (`.github/workflows/release.yml`)**: Khi đẩy tag `v*.*.*` (hoặc chạy tay qua `workflow_dispatch`), tự động build, smoke-test trên Linux, Windows & macOS, đóng gói `.deb`, `.rpm`, `.tar.gz`, `.exe` (Inno Setup 6), `.zip`, `.app` + `.dmg` (`macos-15` arm64 và `macos-15-intel` x64, ký Hardened Runtime và notarise khi có secrets `MACOS_CODESIGN_IDENTITY`/`APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`), tạo `SHA256SUMS.txt` và xuất bản GitHub Release.
 
 36 bộ test trong `test/`:
 - `placement.test.js` & `ocr.test.js`: Chuẩn hóa tọa độ OCR, gom dòng dọc/ngang và quy tắc ghép khung.
@@ -260,6 +293,6 @@ npm test
 - `retouch.test.js`, `retouch-export.test.js`, `inpaint.test.js` & `cleanup.test.js`: Hút màu, cọ paint/clone/seamless-clone/erase, giữ kết quả inpaint & seamless clone qua Undo/Xuất, Inpaint JS fallback không chạm ngoài mặt nạ, cache lớp retouch và thuật toán nới/thu mặt nạ cửa sổ trượt.
 - `project.test.js`, `recovery-catalog.test.js`, `task-queue.test.js` & `workflow.test.js`: Lưu/mở `.khungthoai` v1/v2, danh mục phục hồi theo dự án, hàng đợi tác vụ có hủy và khôi phục lỗi worker, lịch sử Undo/Redo, đồng bộ `translationNotes`/skill và tiếp tục dịch chương.
 - `redraw.test.js`, `native-redraw.test.js`, `native-processing.test.js` & `benchmark.test.js`: Hàng đợi redraw, phục hồi screentone/gradient, PatchMatch SIMD + Poisson seamless inpaint, `seamless_clone` & `content_aware_cleanup` C#, làm sạch raw C# đa luồng, mặt nạ, PNG/ZIP, lưu tệp nguyên tử và benchmark chất lượng từ worker C# (tự động kích hoạt sau khi chạy `npm run desktop:native`).
-- `agent-harness.test.js`, `agent-context.test.js`, `harness-pro.test.js`, `linter-vision.test.js`, `terminology-graph.test.js`, `web-search.test.js`, `updater.test.js`, `notifications.test.js` & `release-packaging.test.js`: Pipeline Harness song song/tuần tự, AI Vision (`inspect_page_image`) & tỉa ảnh đính kèm cũ, đồ thị thuật ngữ (alias/biến thể/dạng cấm/quan hệ, resolver, migration glossary phẳng) & QA Linter 0-token (`lint_chapter_qa`), SSE streaming (Gemini & OpenAI/DeepSeek-R1), `Context Budget Meter`, turn box diffs, Web-Taint Write Gate, DNS IP Pinning chống SSRF/decompression bomb, nén lịch sử, chống lặp công cụ, tự thử lại LLM, hồ sơ kỹ năng, lệnh nhanh slash, `ask_user`, Plan Mode, Todo list, kiểm tra cập nhật SemVer, Trung tâm Thông báo và sinh cấu hình đóng gói `.deb`/`.rpm`/Inno Setup `.exe`.
+- `agent-harness.test.js`, `agent-context.test.js`, `harness-pro.test.js`, `linter-vision.test.js`, `terminology-graph.test.js`, `web-search.test.js`, `updater.test.js`, `notifications.test.js`, `release-packaging.test.js` & `release-macos.test.js`: Pipeline Harness song song/tuần tự, AI Vision (`inspect_page_image`) & tỉa ảnh đính kèm cũ, đồ thị thuật ngữ (alias/biến thể/dạng cấm/quan hệ, resolver, migration glossary phẳng) & QA Linter 0-token (`lint_chapter_qa`), SSE streaming (Gemini & OpenAI/DeepSeek-R1), `Context Budget Meter`, turn box diffs, Web-Taint Write Gate, DNS IP Pinning chống SSRF/decompression bomb, nén lịch sử, chống lặp công cụ, tự thử lại LLM, hồ sơ kỹ năng, lệnh nhanh slash, `ask_user`, Plan Mode, Todo list, kiểm tra cập nhật SemVer, Trung tâm Thông báo, sinh cấu hình đóng gói `.deb`/`.rpm`/Inno Setup `.exe` và cấu hình macOS (`.app`/`.dmg`/`.zip` cho arm64 & x64, entitlements Hardened Runtime khớp tệp đã commit, lỗi tiếng Việt khi thiếu thông tin notarisation, quy ước tên tệp phát hành).
 - `visual-diff.test.js` & `scripts/visual-regression.mjs`: So khớp ảnh chụp biên tập Sáng/Tối và Thư viện với baseline PNG đã commit trên Linux, ngưỡng sai lệch theo nền tảng, artifact diff trong CI và lệnh cập nhật baseline chỉ dành cho người vận hành (`VISUAL_BASELINE_APPROVAL=1`, từ chối chạy trong CI).
 - `test/eval/agent-eval.test.js` & `scripts/agent-eval.mjs`: Chấm output AI hoàn toàn offline bằng corpus fixture vàng có version (`test/eval/fixtures/`), tái dùng parser, translation routing, `runAgentTurn` và `lintChapter` thật với provider giả lập cùng stub tool registry: tuân glossary, độ phủ ID, precision/recall/thứ tự tool, số bước và token/case (nhãn simulated); chặn mọi endpoint ngoài fixture và làm CI đỏ khi regression.

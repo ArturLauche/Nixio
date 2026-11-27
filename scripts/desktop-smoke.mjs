@@ -9,7 +9,13 @@ import JSZip from "jszip"
 const require = createRequire(import.meta.url)
 const root = path.resolve(import.meta.dirname, "..")
 const packaged = process.argv.includes("--packaged")
-const executablePath = packaged ? path.join(root, "desktop-dist", "Khung-Thoai-" + process.platform + "-" + process.arch, "Khung-Thoai" + (process.platform === "win32" ? ".exe" : "")) : require("electron")
+// @electron/packager wraps the macOS build in a bundle; Linux and Windows run the binary directly.
+function packagedExecutable() {
+  const bundle = path.join(root, "desktop-dist", "Khung-Thoai-" + process.platform + "-" + process.arch)
+  if (process.platform === "darwin") return path.join(bundle, "Khung-Thoai.app", "Contents", "MacOS", "Khung-Thoai")
+  return path.join(bundle, "Khung-Thoai" + (process.platform === "win32" ? ".exe" : ""))
+}
+const executablePath = packaged ? packagedExecutable() : require("electron")
 const directory = await mkdtemp(path.join(os.tmpdir(), "khung-thoai-smoke-"))
 const environment = { ...process.env }
 delete environment.ELECTRON_RUN_AS_NODE
