@@ -1,5 +1,10 @@
 import { imageMimeType, imageTypes } from "./io.js"
 import { validateRetouchStroke } from "./retouch.js"
+import {
+  translationMemoryEntryLimit,
+  translationMemoryVersion,
+  validateTranslationMemoryEntry,
+} from "./translation-memory.js"
 
 export const projectExtension = ".khungthoai"
 export const projectPageLimit = 50
@@ -110,6 +115,24 @@ function projectContext(context) {
   return { signature: context.signature, lines: context.lines.map(({ source, text }) => ({ source, text })) }
 }
 
+// The translation memory is a project-level record: a file without one (version 1 and 2) opens with
+// an empty store, and one invalid pair rejects the file instead of silently losing pairs.
+function projectTranslationMemory(memory) {
+  if (memory === undefined) return undefined
+  if (memory?.version !== translationMemoryVersion ||
+      !Array.isArray(memory.entries) || memory.entries.length > translationMemoryEntryLimit) {
+    throw invalidProject()
+  }
+  return {
+    version: memory.version,
+    entries: memory.entries.map((entry) => {
+      const valid = validateTranslationMemoryEntry(entry)
+      if (!valid) throw invalidProject()
+      return valid
+    }),
+  }
+}
+
 function projectPage(page) {
   const { name, type, size, boxes, unplaced, retouchStrokes, translationContext, translationJob } = page ?? {}
   if (!isText(name) || !name || !imageTypes.has(type) || !Number.isSafeInteger(size) || size <= 0 ||
@@ -134,7 +157,7 @@ function projectPage(page) {
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId }) {
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, translationMemory }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
   settings = { "translation-glossary": "", ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
@@ -144,8 +167,10 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
       !presets.every((preset) => isText(preset?.name) && preset.name.trim())) {
     throw invalidProject()
   }
+  const memory = projectTranslationMemory(translationMemory)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
+    ...(memory && { translationMemory: memory }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
   }
 }
@@ -156,7 +181,13 @@ export function writeProject(project) {
     ...(retouchStrokes?.length && { retouchStrokes }),
     translationContext, translationJob,
   }))
-  const manifest = encoder.encode(JSON.stringify({ version: 2, ...projectData({ ...project, pages }) }))
+  const data = projectData({ ...project, pages })
+  // A file only claims the version it needs: a project without remembered pairs stays readable by
+  // builds that predate the translation memory.
+  const manifest = encoder.encode(JSON.stringify({
+    version: data.translationMemory?.entries.length ? 3 : 2,
+    ...data,
+  }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")
   const header = new Uint8Array(headerSize)
   header.set(magic)
@@ -200,7 +231,7 @@ export async function readProject(file) {
     throw invalidProject()
   }
   if (!Number.isInteger(manifest?.version) || manifest.version < 1) throw invalidProject()
-  if (![1, 2].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
+  if (![1, 2, 3].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
   const project = projectData(manifest)
   if (project.pages.reduce((total, page) => total + page.size, offset) !== file.size) throw invalidProject()
   const pages = project.pages.map(({ name, type, size, ...page }) => {
