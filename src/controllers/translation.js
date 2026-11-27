@@ -1,10 +1,7 @@
-import { alignScript, translateImage } from "../gemini.js"
 import {
-  alignScriptOpenAi,
-  translateImageOpenAi,
-  validateEndpointUrl,
-} from "../openai-compat.js"
-import {
+  imageTranslatorForProvider,
+  remainingTranslations,
+  scriptAlignerForProvider,
   translateBoxesForProvider,
   translationNotes,
   translationSignature,
@@ -22,6 +19,7 @@ import {
   resumeWork,
   staleBoxes,
 } from "../incremental-translation.js"
+import { resolveProvider } from "../provider-registry.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
 import { glossaryStatusText, parseTerminologyGraph } from "../terminology-graph.js"
 import { groupDialogue } from "../io.js"
@@ -324,9 +322,7 @@ export function setupTranslation({
   // stays Vietnamese while the renderer never repeats main's own wording or a raw provider header.
   function providerFailureText(error, provider) {
     if (error?.code === PROVIDER_BRIDGE_CODES.CREDENTIAL) {
-      return provider === "gemini"
-        ? "Chưa có khóa API Gemini trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
-        : "Chưa có khóa API cho endpoint này trong kho bảo mật. Hãy lưu khóa ở mục Dịch ảnh & LLM."
+      return resolveProvider({ provider }).credential.vaultMessage
     }
     return error?.message || String(error)
   }
@@ -335,16 +331,10 @@ export function setupTranslation({
     // On the desktop main attaches the stored key, so the password fields are never read for a
     // request: an unconfigured provider is rejected by main instead of by a value left on screen. A
     // browser has no vault and keeps using the field for this session only.
-    const vaultKeys = vaultOwnsKeys || providerCredentialsInMain()
-    if (settings.provider === "openai") {
-      validateEndpointUrl(settings.baseUrl)
-      if (!settings.llmModel) throw new Error("Hãy nhập tên Model LLM.")
-      return vaultKeys ? settings : { ...settings, apiKey: byId("llm-key").value.trim() }
-    }
-    if (vaultKeys) return settings
-    const key = byId("gemini-key").value.trim()
-    if (!key) throw new Error("Hãy nhập khóa API Gemini.")
-    return { ...settings, key }
+    return resolveProvider(settings).prepareCredential(settings, {
+      vaultKeys: vaultOwnsKeys || providerCredentialsInMain(),
+      readField: (id) => byId(id).value.trim(),
+    })
   }
 
   // Earlier dialogue from the page before this one, when it was translated with the same settings.
@@ -673,10 +663,8 @@ export function setupTranslation({
     if (work.full.length) await processPages(work.full, imageTranslator, "dịch")
   }
 
-  const imageTranslator = (page, settings) =>
-    settings.provider === "openai" ? translateImageOpenAi(page, settings) : translateImage(page, settings)
-  const scriptAligner = (page, settings, lines) =>
-    settings.provider === "openai" ? alignScriptOpenAi(page, settings, lines) : alignScript(page, settings, lines)
+  const imageTranslator = (page, settings) => imageTranslatorForProvider(settings.provider)(page, settings)
+  const scriptAligner = (page, settings, lines) => scriptAlignerForProvider(settings.provider)(page, settings, lines)
 
   // The field stays one editable textarea; the status line reads the terminology graph out of
   // it so aliases, variants and relations are visible while typing instead of only in the model.

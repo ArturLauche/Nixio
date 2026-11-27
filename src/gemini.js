@@ -4,12 +4,8 @@ import { extractJsonObject, readLines, readProviderJson, readRequestedTranslatio
 import { readModelOcrBox } from "./placement.js"
 import { callProvider } from "./provider-bridge.js"
 import { estimatePromptChars, normalizeUsage } from "./token-accounting.js"
+import { providerModels } from "./provider-registry.js"
 
-const modelOptions = {
-  auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
-  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite"],
-  "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite"],
-}
 const recognitionCache = new WeakMap()
 const ocrSchema = lineSchema("box_2d", {
   type: "array", items: { type: "integer", minimum: 0, maximum: 1000 },
@@ -131,7 +127,7 @@ async function recognize(file, image, settings, request) {
 async function recognizeImage(page, settings) {
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   const report = settings.report
-  const models = modelOptions[settings.model] ?? modelOptions.auto
+  const models = providerModels("gemini", settings)
   const request = {
     key: settings.key,
     models,
@@ -207,7 +203,7 @@ export async function translateBoxesGemini(page, boxes, settings) {
   if (!boxes.length) return []
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   settings.report?.("Đang dịch các khung hiện có bằng Gemini…")
-  const models = modelOptions[settings.model] ?? modelOptions.auto
+  const models = providerModels("gemini", settings)
   const request = {
     key: settings.key,
     models,
