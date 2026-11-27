@@ -67,6 +67,9 @@ test("desktop fetch pins resolved IPs, rejects internal DNS answers and re-check
     if (url.startsWith("https://hop.example.com/empty")) {
       return { status: 200, location: null, text: "" }
     }
+    if (url.startsWith("https://hop.example.com/binary")) {
+      return { status: 200, location: null, text: "%PDF-1.7", contentType: "application/pdf", binary: true }
+    }
     return { status: 200, location: null, text: "Nội dung công khai" }
   }
 
@@ -113,9 +116,58 @@ test("desktop fetch pins resolved IPs, rejects internal DNS answers and re-check
     /Hết thời gian chờ/,
   )
 
+  // Non-text bodies are refused instead of being parsed as markup.
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://hop.example.com/binary", { lookup, request }),
+    /không phải văn bản \(application\/pdf\)/,
+  )
+
   assert.equal(await desktopSearch.resolvePublicAddress("93.184.216.34"), "93.184.216.34")
   await assert.rejects(desktopSearch.resolvePublicAddress("169.254.169.254"), /IP nội bộ/)
   await assert.rejects(desktopSearch.resolvePublicAddress("nip.example.com", { lookup }), /IP nội bộ/)
+})
+
+test("desktop fetch applies one deadline for the whole redirect chain, not per hop", async () => {
+  const lookup = async () => [{ address: "93.184.216.34", family: 4 }]
+  let hops = 0
+  // Every hop finishes well inside the deadline (25ms < 40ms), but the chain must still
+  // be cut off once the overall budget is spent.
+  const slowRedirect = (url, { signal }) => {
+    hops++
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        const aborted = new Error("aborted")
+        aborted.name = "AbortError"
+        reject(aborted)
+        return
+      }
+      const timer = setTimeout(() => resolve({ status: 302, location: `https://hop.example.com/step${hops}` }), 25)
+      signal?.addEventListener("abort", () => {
+        clearTimeout(timer)
+        const aborted = new Error("aborted")
+        aborted.name = "AbortError"
+        reject(aborted)
+      }, { once: true })
+    })
+  }
+  const startedAt = Date.now()
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://hop.example.com/start", { lookup, request: slowRedirect, timeoutMs: 40 }),
+    /Hết thời gian chờ/,
+  )
+  const elapsed = Date.now() - startedAt
+  assert.ok(elapsed < 1000, `chuỗi phải bị cắt sớm, thực tế ${elapsed}ms`)
+  // With a per-hop timeout the chain would have walked all 6 hops (~150ms).
+  assert.ok(hops >= 2 && hops <= 4, `số hop đã gọi: ${hops}`)
+})
+
+test("isTextualContentType only accepts textual and JSON/XML payloads", () => {
+  for (const type of ["text/html; charset=utf-8", "text/plain", "application/json", "application/ld+json", "application/xhtml+xml", "application/atom+xml", ""]) {
+    assert.equal(desktopSearch.isTextualContentType(type), true, type)
+  }
+  for (const type of ["image/png", "application/pdf", "application/octet-stream", "application/zip", "font/woff2"]) {
+    assert.equal(desktopSearch.isTextualContentType(type), false, type)
+  }
 })
 
 test("decodeBody handles gzip/deflate/brotli bodies and refuses decompression bombs", () => {
