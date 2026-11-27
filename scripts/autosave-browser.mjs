@@ -134,6 +134,25 @@ try {
     assert.deepEqual([...first.errors, ...second.errors], [])
   })
 
+  await scenario("one tab's repeated saves replace only its own slot", async (context) => {
+    const first = await openTab(context)
+    const second = await openTab(context)
+    assert.equal((await call(first, "save", { projectId: projectA, revision: 1, payload: "first" })).ok, true)
+    for (let index = 0; index < 6; index += 1) {
+      assert.equal((await call(second, "save", { projectId: projectB, revision: index + 1, payload: `second-${index}` })).ok, true)
+    }
+
+    const snapshots = await call(first, "list")
+    assert.equal(snapshots.length, 2, "each page instance keeps exactly one slot")
+    const projectAView = snapshots.find((item) => item.projectId === projectA)
+    const projectBView = snapshots.find((item) => item.projectId === projectB)
+    assert.ok(projectAView && projectBView)
+    assert.equal(projectBView.revision, 6)
+    assert.ok((await call(first, "loadText", projectAView.id)).body.endsWith("first"), "the slow tab keeps its snapshot")
+    assert.ok((await call(first, "loadText", projectBView.id)).body.endsWith("second-5"))
+    assert.deepEqual([...first.errors, ...second.errors], [])
+  })
+
   await scenario("the legacy latest record and stored fonts survive the migration", async (context) => {
     const first = await openTab(context)
     const seeded = await call(first, "seedLegacy", { projectId: projectC, pageCount: 3 })

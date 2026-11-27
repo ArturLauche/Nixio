@@ -10,6 +10,9 @@ const legacyKey = "latest"
 const schema = 2
 const blobPrefix = "snapshot:"
 const metaPrefix = "meta:"
+// Every page instance owns one slot and a write replaces it, so these caps only
+// ever bound distinct sessions. A snapshot of another session is never evicted
+// to make room: the new write is refused instead.
 const maxSnapshots = 8
 const maxSnapshotsPerProject = 3
 const writerStorageKey = "khung-thoai:web-writer"
@@ -28,9 +31,10 @@ function validWriter(value) {
   return typeof value === "string" && /^[0-9a-z-]{8,64}$/i.test(value)
 }
 
-// A tab keeps one writer id for its whole session so reloading reuses the same
-// snapshot slot, while a separate tab (or a duplicated tab that shares
-// sessionStorage) is detected through the per-page epoch.
+// A tab keeps one writer id in sessionStorage so a reload is recognisably the
+// same tab, while a duplicated tab (which copies sessionStorage) is told apart
+// by the per-page epoch. Both are stored so no page instance can overwrite
+// another one's recovery slot.
 function writer() {
   if (writerId) return writerId
   try {
@@ -50,10 +54,6 @@ function writer() {
 
 function epoch() {
   return (epochId ??= crypto.randomUUID())
-}
-
-export function webWriterId() {
-  return writer()
 }
 
 function stamp(value) {
@@ -88,7 +88,6 @@ function metaRecord(record, key) {
     writer: record.writer,
     revision: record.revision,
     legacy: Boolean(record.legacy),
-    shared: Boolean(record.shared),
   }
 }
 
@@ -239,23 +238,58 @@ function readRecord(db, key) {
   })
 }
 
+// One readwrite transaction reconciles the whole store, so the key scan and the
+// decision it feeds cannot interleave with another tab's write. A page instance
+// may replace its own slot and the slot of an older page instance of the same
+// tab; every other session's snapshot is left untouched. When the bounded
+// capacity has no room left, the write is refused instead of evicting someone
+// else's last recoverable snapshot.
 function writeSnapshot(db, record, key) {
   return transaction(db, "readwrite", (store, capture) => {
-    const write = (target) => {
-      store.put(record, target)
-      store.put(metaRecord(record, target), metaKey(target))
-      capture(target)
+    const keys = []
+    const cursor = store.openKeyCursor(IDBKeyRange.bound(blobPrefix, blobPrefix + "\uffff"))
+    cursor.onsuccess = () => {
+      const point = cursor.result
+      if (point) {
+        keys.push(point.primaryKey)
+        point.continue()
+        return
+      }
+      const entries = keys
+        .map((value) => ({ key: value, parts: parseSnapshotKey(value) }))
+        .filter((entry) => entry.parts)
+      const projectKey = record.projectId || "legacy"
+      const present = entries.some((entry) => entry.key === key)
+      // This page instance replaces its own earlier writes. Earlier page
+      // instances of the same tab (a reload, or a duplicated tab that copied
+      // sessionStorage) keep the newest of their slots recoverable; anything
+      // older belongs to a page instance that is already gone.
+      const lineage = entries.filter(
+        (entry) =>
+          entry.key !== key &&
+          entry.parts.writer === record.writer &&
+          entry.parts.projectKey === projectKey,
+      )
+      const mine = lineage.filter((entry) => entry.parts.epoch === record.epoch)
+      const older = lineage
+        .filter((entry) => entry.parts.epoch !== record.epoch)
+        .sort((a, b) => b.parts.savedAt - a.parts.savedAt || (a.key < b.key ? 1 : -1))
+      const superseded = [...mine, ...older.slice(1)]
+      const total = entries.length - superseded.length + (present ? 0 : 1)
+      const project =
+        entries.filter((entry) => entry.parts.projectKey === projectKey).length -
+        superseded.filter((entry) => entry.parts.projectKey === projectKey).length +
+        (present ? 0 : 1)
+      if (total > maxSnapshots) return capture({ rejected: "capacity" })
+      if (project > maxSnapshotsPerProject) return capture({ rejected: "project-capacity" })
+      store.put(record, key)
+      store.put(metaRecord(record, key), metaKey(key))
+      for (const entry of superseded) {
+        store.delete(entry.key)
+        store.delete(metaKey(entry.key))
+      }
+      capture({ key })
     }
-    const existing = store.get(key)
-    existing.onsuccess = () => {
-      const previous = existing.result
-      // A duplicated tab shares our writer id but runs a different page
-      // instance: keep its snapshot in a separate, recoverable slot.
-      const collides = previous && previous.epoch && record.epoch && previous.epoch !== record.epoch
-      if (collides) record.shared = true
-      write(collides ? key + ":" + record.epoch : key)
-    }
-    existing.onerror = () => write(key)
   })
 }
 
@@ -287,40 +321,6 @@ function snapshotKeys(db) {
   })
 }
 
-async function prune(db, keepKey) {
-  const keys = await snapshotKeys(db)
-  if (!keys?.length) return
-  const entries = keys
-    .map((key) => ({ key, parts: parseSnapshotKey(key) }))
-    .filter((entry) => entry.parts)
-    .sort((a, b) => b.parts.savedAt - a.parts.savedAt)
-  const keep = entries.find((entry) => entry.key === keepKey)
-  const kept = []
-  const perProject = new Map()
-  const drop = []
-  if (keep) {
-    kept.push(keep)
-    perProject.set(keep.parts.projectKey, 1)
-  }
-  for (const entry of entries) {
-    if (entry.key === keepKey) continue
-    const used = perProject.get(entry.parts.projectKey) ?? 0
-    if (kept.length >= maxSnapshots || used >= maxSnapshotsPerProject) {
-      drop.push(entry.key)
-      continue
-    }
-    kept.push(entry)
-    perProject.set(entry.parts.projectKey, used + 1)
-  }
-  if (!drop.length) return
-  await transaction(db, "readwrite", (store) => {
-    for (const key of drop) {
-      store.delete(key)
-      store.delete(metaKey(key))
-    }
-  })
-}
-
 async function migrateLegacy(db) {
   const record = await readRecord(db, legacyKey)
   if (!record?.blob) return
@@ -339,16 +339,15 @@ async function migrateLegacy(db) {
     revision: 0,
     generation: 0,
     legacy: true,
-    shared: false,
   }
   const key = snapshotKey(savedAt, migrated.projectId, "legacy")
-  const written = await transaction(db, "readwrite", (store, capture) => {
+  // The single old record is converted in place; it is never dropped to make
+  // room, because an older session may be the only copy the user has.
+  await transaction(db, "readwrite", (store) => {
     store.put(migrated, key)
     store.put(metaRecord(migrated, key), metaKey(key))
     store.delete(legacyKey)
-    capture(key)
   })
-  if (written) await prune(db, written)
 }
 
 async function ready() {
@@ -388,13 +387,13 @@ export async function saveWebSnapshot(blob, meta = {}) {
     revision: Number.isFinite(meta.revision) ? meta.revision : 0,
     generation: Number.isFinite(meta.generation) ? meta.generation : 0,
     legacy: false,
-    shared: false,
   }
-  const key = await writeSnapshot(db, record, snapshotKey(savedAt, projectId, record.writer))
-  if (!key) return { ok: false, reason: "error" }
-  await prune(db, key)
+  const key = snapshotKey(savedAt, projectId, record.writer, record.epoch)
+  const outcome = await writeSnapshot(db, record, key)
+  if (!outcome) return { ok: false, reason: "error" }
+  if (outcome.rejected) return { ok: false, reason: outcome.rejected }
   emitChange()
-  return { ok: true, id: key, savedAt }
+  return { ok: true, id: outcome.key, savedAt }
 }
 
 export async function listWebSnapshots() {
@@ -412,11 +411,26 @@ export async function listWebSnapshots() {
       size: Number.isFinite(item.size) ? item.size : 0,
       revision: Number.isFinite(item.revision) ? item.revision : 0,
       legacy: Boolean(item.legacy),
-      shared: Boolean(item.shared),
       writer: item.writer ?? null,
       mine: item.writer === writer(),
     }))
     .sort((a, b) => b.savedAt - a.savedAt)
+}
+
+// Reads the exact record a caller believes is durable. The controller relies on
+// this instead of a BroadcastChannel notification, which another tab may never
+// deliver, and instead of trusting that a successful write is still stored.
+export async function webSnapshotAvailable(id, expected = {}) {
+  if (typeof id !== "string" || !id) return false
+  const db = await ready()
+  if (!db) return false
+  const record = await readRecord(db, id)
+  if (!record?.blob) return false
+  if (expected.projectId && record.projectId !== expected.projectId) return false
+  if (Number.isFinite(expected.revision) && record.revision !== expected.revision) return false
+  if (Number.isFinite(expected.generation) && Number.isFinite(record.generation) && record.generation !== expected.generation)
+    return false
+  return true
 }
 
 export async function loadWebSnapshot(id) {
@@ -450,24 +464,6 @@ export async function clearWebSnapshot(id) {
       store.delete(metaKey(key))
     }
     if (includeLegacy) store.delete(legacyKey)
-    capture(true)
-  })
-  if (cleared) emitChange()
-  return Boolean(cleared)
-}
-
-export async function clearWebSnapshotsForProject(projectId) {
-  if (!projectId) return false
-  const db = await ready()
-  if (!db) return false
-  const keys = (await snapshotKeys(db)) ?? []
-  const targets = keys.filter((key) => parseSnapshotKey(key)?.projectKey === projectId)
-  if (!targets.length) return true
-  const cleared = await transaction(db, "readwrite", (store, capture) => {
-    for (const key of targets) {
-      store.delete(key)
-      store.delete(metaKey(key))
-    }
     capture(true)
   })
   if (cleared) emitChange()

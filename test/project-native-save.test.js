@@ -108,3 +108,28 @@ test("a manual native save keeps the session durable so closing needs no prompt"
   assert.equal(harness.confirm.calls.length, 0)
   assert.equal(harness.calls.commits.filter((mode) => mode === "project").length, 1)
 })
+
+test("a manual native save leaves another tab's browser recovery record intact", async () => {
+  const otherTab = await import("../src/web-storage.js?tab=native-other")
+  const api = await boot()
+  const projectId = harness.state.projectId
+  const seeded = await harness.resolve(
+    otherTab.saveWebSnapshot(new Blob([new Uint8Array([1, 2, 3])]), {
+      projectId,
+      name: "tab-khac.khungthoai",
+      pageCount: 1,
+      revision: 4,
+    }),
+  )
+  assert.equal(seeded.ok, true)
+
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  harness.byId("save-project").onclick()
+  await waitFor(() => harness.calls.commits.includes("project"))
+
+  const kept = await harness.resolve(storage.listWebSnapshots())
+  assert.equal(kept.length, 1, "the file on disk never deletes a browser snapshot")
+  assert.equal(kept[0].id, seeded.id)
+  assert.equal(kept[0].revision, 4)
+})

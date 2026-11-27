@@ -115,7 +115,7 @@ test("a reload of the same tab keeps the previous page snapshot recoverable", as
   fake.drop(dbName)
   globalThis.sessionStorage = fakeSessionStorage("tab-shared-writer")
   // Both page instances write in the same millisecond, which is the only case
-  // where a shared writer id could overwrite the older slot.
+  // where a shared writer id could overwrite the older page's slot.
   const realNow = Date.now
   Date.now = () => 1790000000000
   try {
@@ -125,16 +125,21 @@ test("a reload of the same tab keeps the previous page snapshot recoverable", as
     await save(page2, projectA, "after-reload", { revision: 2 })
 
     const snapshots = await page2.listWebSnapshots()
-    assert.equal(snapshots.length, 2)
+    assert.equal(snapshots.length, 2, "the previous page instance keeps its own slot")
     assert.ok(snapshots.every((item) => item.mine), "the tab reuses one writer id")
-    const loaded = await Promise.all(
-      snapshots.map(async (item) => ({ shared: item.shared, body: await text(await page2.loadWebSnapshot(item.id)) })),
-    )
+    const bodies = await Promise.all(snapshots.map(async (item) => text(await page2.loadWebSnapshot(item.id))))
     assert.deepEqual(
-      loaded.map((item) => item.body).sort(),
+      [...bodies].sort(),
       [await text(projectBlob(projectA, 1, "after-reload")), await text(projectBlob(projectA, 1, "before-reload"))].sort(),
     )
-    assert.equal(loaded.filter((item) => item.shared).length, 1, "only the newer page moved to its own slot")
+    // A reload of the same tab must not grow the store: the next page instance
+    // replaces the oldest of the two, so the tab owns at most two slots.
+    const page3 = await openTab()
+    await save(page3, projectA, "third-page", { revision: 3 })
+    const after = await page3.listWebSnapshots()
+    assert.equal(after.length, 2)
+    const afterBodies = await Promise.all(after.map(async (item) => text(await page3.loadWebSnapshot(item.id))))
+    assert.ok(afterBodies.includes(await text(projectBlob(projectA, 1, "third-page"))))
   } finally {
     Date.now = realNow
     delete globalThis.sessionStorage
@@ -188,27 +193,152 @@ test("unreadable legacy records still recover and clear without leaving the old 
   assert.deepEqual([...fake.stores(dbName)[storeName].keys()], [])
 })
 
-test("the snapshot store is bounded per project and overall", async () => {
+test("saving again replaces the page's own slot instead of growing the store", async () => {
   fake.drop(dbName)
   const tab = await openTab()
   const realNow = Date.now
   let clock = realNow()
   Date.now = () => (clock += 10)
   try {
-    for (let index = 0; index < 5; index += 1) await save(tab, projectA, `a${index}`, { revision: index + 1 })
-    let snapshots = await tab.listWebSnapshots()
-    assert.equal(snapshots.length, 3, "at most three snapshots per project")
-    assert.deepEqual(snapshots.map((item) => item.revision), [5, 4, 3])
+    const first = await save(tab, projectA, "first", { revision: 1 })
+    const second = await save(tab, projectA, "second", { revision: 2 })
 
-    const others = Array.from({ length: 6 }, (_, index) => crypto.randomUUID())
-    for (const projectId of others) await save(tab, projectId, "other")
-    snapshots = await tab.listWebSnapshots()
-    assert.equal(snapshots.length, 8, "at most eight snapshots overall")
-    const projects = new Set(snapshots.map((item) => item.projectId))
-    assert.deepEqual([...projects].sort(), [projectA, ...others].sort().filter((id, index, all) => all.indexOf(id) === index))
+    const snapshots = await tab.listWebSnapshots()
+    assert.equal(snapshots.length, 1, "one page instance owns exactly one slot")
+    assert.equal(snapshots[0].id, second.id)
+    assert.equal(snapshots[0].revision, 2)
+    assert.equal(await text(await tab.loadWebSnapshot(second.id)), await text(projectBlob(projectA, 1, "second")))
+    assert.equal(await tab.loadWebSnapshot(first.id), null, "the superseded write is gone")
+    assert.equal(await tab.webSnapshotAvailable(first.id, { projectId: projectA, revision: 1 }), false)
+    assert.equal(await tab.webSnapshotAvailable(second.id, { projectId: projectA, revision: 2 }), true)
   } finally {
     Date.now = realNow
   }
+})
+
+test("another writer's repeated saves never rotate out a slow tab's snapshot", async () => {
+  fake.drop(dbName)
+  const slow = await openTab()
+  const fast = await openTab()
+  const saved = await save(slow, projectA, "slow-tab", { revision: 1, pageCount: 2 })
+
+  const realNow = Date.now
+  let clock = realNow()
+  Date.now = () => (clock += 10)
+  try {
+    // The fast tab keeps saving its own project, which used to evict the older
+    // snapshot of the slow tab once the global or per-project cap was reached.
+    for (let index = 0; index < 12; index += 1) await save(fast, projectB, `fast-${index}`, { revision: index + 1 })
+  } finally {
+    Date.now = realNow
+  }
+
+  const snapshots = await slow.listWebSnapshots()
+  assert.equal(snapshots.length, 2, "one slot for each writer, nothing rotated")
+  const kept = snapshots.find((item) => item.projectId === projectA)
+  assert.equal(kept.id, saved.id)
+  assert.equal(await text(await slow.loadWebSnapshot(kept.id)), await text(projectBlob(projectA, 2, "slow-tab")))
+  assert.equal(snapshots.find((item) => item.projectId === projectB).revision, 12)
+})
+
+test("capacity that cannot be safely reclaimed is refused without touching stored snapshots", async () => {
+  fake.drop(dbName)
+  const realNow = Date.now
+  let clock = realNow()
+  Date.now = () => (clock += 10)
+  try {
+    const tabs = await Promise.all(Array.from({ length: 9 }, () => openTab()))
+    const projects = Array.from({ length: 8 }, () => crypto.randomUUID())
+    const accepted = []
+    for (let index = 0; index < 8; index += 1) {
+      accepted.push(await save(tabs[index], projects[index], `project-${index}`))
+    }
+    assert.ok(accepted.every((item) => item.ok), "the first eight sessions fit")
+
+    const before = await tabs[0].listWebSnapshots()
+    const refused = await save(tabs[8], crypto.randomUUID(), "one-too-many")
+    assert.deepEqual(refused, { ok: false, reason: "capacity" })
+    const after = await tabs[0].listWebSnapshots()
+    assert.deepEqual(after.map((item) => item.id), before.map((item) => item.id), "nothing was evicted")
+    for (const item of before) assert.ok(await tabs[0].loadWebSnapshot(item.id), "every snapshot still loads")
+
+    // The same tab can still save: its own slot is replaced, not added.
+    const rewritten = await save(tabs[0], projects[0], "own-slot")
+    assert.equal(rewritten.ok, true, "replacing an owned slot needs no new capacity")
+    const rewrittenList = await tabs[0].listWebSnapshots()
+    assert.equal(rewrittenList.length, 8)
+    assert.ok(rewrittenList.some((item) => item.id === rewritten.id))
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test("a fourth session of one project is refused instead of replacing another tab", async () => {
+  fake.drop(dbName)
+  const tabs = await Promise.all(Array.from({ length: 4 }, () => openTab()))
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal((await save(tabs[index], projectA, `tab-${index}`, { revision: index + 1 })).ok, true)
+  }
+  const before = await tabs[0].listWebSnapshots()
+  assert.equal(before.length, 3)
+
+  const refused = await save(tabs[3], projectA, "fourth")
+  assert.deepEqual(refused, { ok: false, reason: "project-capacity" })
+  assert.deepEqual((await tabs[0].listWebSnapshots()).map((item) => item.id), before.map((item) => item.id))
+
+  // Fresh saves from an accepted session still work while the project is full.
+  assert.equal((await save(tabs[1], projectA, "tab-1-again", { revision: 9 })).ok, true)
+  assert.equal((await tabs[0].listWebSnapshots()).length, 3)
+})
+
+test("records written by the previous candidate are readable, counted and never replaced", async () => {
+  fake.drop(dbName)
+  await ensureStores()
+  // The earlier draft keyed each write by timestamp and writer only, so a reader
+  // must still understand those keys and treat them as another session.
+  const oldKey = `snapshot:01790000000000:${projectA}:55555555-6666-7777-8888-999999999999`
+  const oldBlob = projectBlob(projectA, 2, "older-candidate")
+  fake.seed(dbName, storeName, {
+    [oldKey]: {
+      schema: 1,
+      blob: oldBlob,
+      projectId: projectA,
+      name: "cu.khungthoai",
+      pageCount: 2,
+      savedAt: 1790000000000,
+      size: oldBlob.size,
+      writer: "55555555-6666-7777-8888-999999999999",
+      revision: 4,
+      generation: 0,
+      legacy: false,
+      shared: true,
+    },
+    [`meta:${oldKey.slice("snapshot:".length)}`]: {
+      schema: 1,
+      id: oldKey,
+      projectId: projectA,
+      name: "cu.khungthoai",
+      pageCount: 2,
+      savedAt: 1790000000000,
+      size: oldBlob.size,
+      writer: "55555555-6666-7777-8888-999999999999",
+      revision: 4,
+      legacy: false,
+      shared: true,
+    },
+  })
+
+  const tab = await openTab()
+  const snapshots = await tab.listWebSnapshots()
+  assert.equal(snapshots.length, 1)
+  assert.equal(snapshots[0].id, oldKey)
+  assert.equal(await text(await tab.loadWebSnapshot(oldKey)), await text(oldBlob))
+
+  // A new session of the same project has no claim on that record.
+  const saved = await save(tab, projectA, "current", { revision: 1 })
+  assert.equal(saved.ok, true)
+  const both = await tab.listWebSnapshots()
+  assert.deepEqual(both.map((item) => item.id).sort(), [oldKey, saved.id].sort())
 })
 
 test("an old connection blocks the upgrade, reports it, and recovers after it closes", async () => {
@@ -290,4 +420,22 @@ test("listing without IndexedDB degrades to no snapshots instead of throwing", a
   } finally {
     globalThis.indexedDB = indexedDb
   }
+})
+
+test("a saved marker is only confirmed for the exact stored revision", async () => {
+  fake.drop(dbName)
+  const tab = await openTab()
+  const saved = await tab.saveWebSnapshot(projectBlob(projectA, 1, "marker"), {
+    projectId: projectA,
+    name: "a.khungthoai",
+    pageCount: 1,
+    revision: 4,
+    generation: 2,
+  })
+  assert.equal(await tab.webSnapshotAvailable(saved.id, { projectId: projectA, revision: 4, generation: 2 }), true)
+  assert.equal(await tab.webSnapshotAvailable(saved.id, { projectId: projectA, revision: 5 }), false, "a newer edit is not covered")
+  assert.equal(await tab.webSnapshotAvailable(saved.id, { projectId: projectA, revision: 4, generation: 3 }), false, "a newer page instance is not covered")
+  assert.equal(await tab.webSnapshotAvailable(saved.id, { projectId: projectB, revision: 4 }), false, "another project is not covered")
+  assert.equal(await tab.webSnapshotAvailable("snapshot:missing", { revision: 4 }), false)
+  assert.equal(await tab.webSnapshotAvailable(null), false)
 })

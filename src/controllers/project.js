@@ -9,11 +9,11 @@ import {
 } from "../native.js"
 import {
   clearWebSnapshot,
-  clearWebSnapshotsForProject,
   listWebSnapshots,
   loadWebSnapshot,
   onWebSnapshotsChanged,
   saveWebSnapshot,
+  webSnapshotAvailable,
   webStorageState,
 } from "../web-storage.js"
 
@@ -44,6 +44,11 @@ export function setupProjects({
   let nativeReady = false
   let revision = 0
   let savedRevision = 0
+  // Which write produced `savedRevision`: a browser snapshot only proves
+  // durability while its exact record is still in IndexedDB.
+  let savedKind = null
+  let savedWebId = null
+  let downloadedRevision = -1
   let diskRevision = 0
   // Bumped whenever the editing session is replaced (open or new project) so a
   // write that finishes late can never mark the next session as saved.
@@ -61,8 +66,26 @@ export function setupProjects({
   let lastWebSnapshot = null
   const isCurrentSession = (snapshot) =>
     snapshot.projectId === state.projectId && snapshot.generation === generation
+  // A download only hands the blob to the browser: the save dialog can still be
+  // cancelled, so inside the desktop shell it never counts as a saved state.
+  const downloadSaved = () => !desktop && revision === downloadedRevision
   const currentSaved = () =>
-    revision === savedRevision || revision === diskRevision
+    revision === diskRevision ||
+    downloadSaved() ||
+    (savedKind !== null && revision === savedRevision)
+  // The close decision cannot use `currentSaved()` alone: a browser record may
+  // have been cleared by another tab, and a marker from an older page instance
+  // must not cover this one.
+  async function savedDurably() {
+    if (revision === diskRevision) return true
+    if (savedKind === null || revision !== savedRevision) return false
+    if (savedKind !== "web") return true
+    return webSnapshotAvailable(savedWebId, {
+      projectId: state.projectId,
+      generation,
+      revision,
+    })
+  }
   function projectBlob() {
     const settings = Object.fromEntries(
       projectSettings.map(({ id, value }) => [id, value]),
@@ -99,22 +122,31 @@ export function setupProjects({
         )
           return false
         status("Đã lưu dự án vào máy.")
-      } else {
-        saveFile(file, name + projectExtension)
-        status("Đã tạo tệp dự án.")
+        diskRevision = snapshotRevision
+        lastSaveReminderRev = snapshotRevision
+        refreshDirty()
+        // Recovery records of other tabs stay untouched: a manual save of this
+        // session says nothing about a diverging snapshot elsewhere.
+        await refreshWebRecovery()
+        notify?.({
+          kind: "success",
+          title: "Đã lưu dự án",
+          message: `${name}${projectExtension} đã được lưu an toàn.`,
+          key: "project-save",
+        })
+        return true
       }
-      diskRevision = snapshotRevision
+      saveFile(file, name + projectExtension)
+      status("Đã tạo tệp dự án.")
+      downloadedRevision = snapshotRevision
       lastSaveReminderRev = snapshotRevision
       refreshDirty()
       notify?.({
         kind: "success",
-        title: "Đã lưu dự án",
-        message: `${name}${projectExtension} đã được lưu an toàn.`,
+        title: "Đã tạo tệp dự án",
+        message: `Đã tạo ${name}${projectExtension} để tải xuống. Bản tự lưu trên trình duyệt vẫn được giữ để phục hồi.`,
         key: "project-save",
       })
-      // A file on disk supersedes the temporary browser snapshots of this project.
-      await clearWebSnapshotsForProject(state.projectId).catch(() => {})
-      await refreshWebRecovery()
       return true
     } catch (error) {
       status("Không lưu được dự án. " + error.message, true)
@@ -208,6 +240,9 @@ export function setupProjects({
       commitLiveForm?.()
       generation++
       lastWebSnapshot = null
+      savedKind = null
+      savedWebId = null
+      downloadedRevision = -1
       revision++
       history.clear()
       state.projectId = projectId
@@ -264,10 +299,15 @@ export function setupProjects({
   }
 
   function refreshDirty() {
+    // The label tracks the file the user asked for, not the autosave: a browser
+    // snapshot never turns it into "saved", and a download only does outside the
+    // desktop shell where no save dialog can cancel it.
     byId("project-dirty").textContent =
       displayName() +
       " · " +
-      (revision === diskRevision ? "Đã lưu" : "Còn thay đổi chưa lưu")
+      (revision === diskRevision || downloadSaved()
+        ? "Đã lưu"
+        : "Còn thay đổi chưa lưu")
   }
 
   async function showLibrary() {
@@ -338,6 +378,9 @@ export function setupProjects({
     projectName = undefined
     generation++
     lastWebSnapshot = null
+    savedKind = null
+    savedWebId = null
+    downloadedRevision = -1
     revision = savedRevision = diskRevision = 0
     projectSettings.forEach((field, index) => {
       field.value = defaultProjectSettings[index]
@@ -361,7 +404,7 @@ export function setupProjects({
       autosaving ||
       projectBusy() ||
       hasGesture() ||
-      savedRevision === revision
+      currentSaved()
     )
       return false
     autosaving = true
@@ -380,6 +423,8 @@ export function setupProjects({
         return false
       }
       savedRevision = snapshot.revision
+      savedKind = "native"
+      savedWebId = null
       byId("autosave-status").textContent =
         "Đã tự lưu lúc " + new Date().toLocaleTimeString("vi-VN")
       await refreshRecovery()
@@ -426,6 +471,10 @@ export function setupProjects({
       return "Tab khác đang giữ kho lưu trên trình duyệt. Đóng tab đó rồi thử lại."
     if (reason === "unsupported") return "Trình duyệt này không lưu được bản tạm."
     if (reason === "unavailable") return "Không mở được kho lưu trên trình duyệt."
+    if (reason === "project-capacity")
+      return "Dự án này đã có 3 bản tự lưu trên trình duyệt. Bỏ bớt một bản trong danh sách bản tự lưu rồi lưu lại."
+    if (reason === "capacity")
+      return "Kho lưu trên trình duyệt đã đầy 8 bản. Bỏ bớt một bản trong danh sách bản tự lưu rồi lưu lại."
     return "Không ghi được bản tạm trên trình duyệt."
   }
 
@@ -532,6 +581,13 @@ export function setupProjects({
       !webSnapshotDue()
     )
       return false
+    return Boolean(await writeWebSnapshot())
+  }
+
+  // Writes the form state that is on screen right now and only claims the
+  // revision that was actually written.
+  async function writeWebSnapshot() {
+    if (webAutosaving) return null
     webAutosaving = true
     const snapshot = { revision, projectId: state.projectId, generation }
     try {
@@ -545,7 +601,7 @@ export function setupProjects({
       if (!result.ok) {
         webStorageNote = webStorageMessage(result.reason)
         await refreshWebRecovery()
-        return false
+        return null
       }
       webStorageNote = ""
       if (!isCurrentSession(snapshot)) {
@@ -554,25 +610,45 @@ export function setupProjects({
         // waiting for the next timer or a pagehide that may never come.
         await refreshWebRecovery()
         queueWebAutosave()
-        return false
+        return null
       }
-      lastWebSnapshot = snapshot
+      lastWebSnapshot = { ...snapshot, id: result.id }
       savedRevision = snapshot.revision
+      savedKind = "web"
+      savedWebId = result.id
       await refreshWebRecovery()
-      return true
+      return result
     } catch {
       webStorageNote = webStorageMessage("error")
       await refreshWebRecovery()
-      return false
+      return null
     } finally {
       webAutosaving = false
       flushQueuedWebAutosave()
     }
   }
 
+  // Another tab may clear or replace the record this session counted as saved.
+  // The notification is best effort, so the marker is re-checked against the
+  // store rather than taken at face value.
+  async function refreshSavedMarker() {
+    if (savedKind !== "web" || !savedWebId) return
+    const available = await webSnapshotAvailable(savedWebId, {
+      projectId: state.projectId,
+      generation,
+      revision,
+    })
+    if (available) return
+    savedKind = null
+    savedWebId = null
+    lastWebSnapshot = null
+    refreshDirty()
+  }
+
   refreshWebRecovery()
   onWebSnapshotsChanged(() => {
     refreshWebRecovery()
+    refreshSavedMarker()
   })
   const heartbeat = setInterval(() => {
     autosave()
@@ -582,7 +658,10 @@ export function setupProjects({
   heartbeat?.unref?.()
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") webAutosave()
-    else refreshWebRecovery()
+    else {
+      refreshWebRecovery()
+      refreshSavedMarker()
+    }
   })
   window.addEventListener("pagehide", () => {
     webAutosave()
@@ -604,7 +683,12 @@ export function setupProjects({
       // The deleted snapshot is no longer durable, so the next flush has to write
       // a fresh one instead of trusting the old marker.
       lastWebSnapshot = null
+      if (savedKind === "web") {
+        savedKind = null
+        savedWebId = null
+      }
       await refreshWebRecovery()
+      refreshDirty()
       status(
         cleared
           ? "Đã xóa bản tự lưu trên trình duyệt."
@@ -623,15 +707,45 @@ export function setupProjects({
   }
 
   async function flushForClose() {
+    // The script text area and the setting fields are only copied into `state`
+    // here; without this the close could store an older draft than the screen.
+    commitLiveForm?.()
     await waitForWrites()
-    if (manualSave) await manualSave.catch(() => {})
-    if (currentSaved()) return "saved"
+    // A manual save still running after the bounded wait must not be awaited
+    // again: the decision moves on to the explicit discard question instead of
+    // hanging on the worker.
+    if (await savedDurably()) return "saved"
+    if (manualSave) return "unsaved"
     if (projectBusy()) return "busy"
-    if (nativeReady && (await autosave()) && currentSaved()) return "saved"
+    if (nativeReady && (await autosave()) && (await savedDurably())) return "saved"
     // Native autosave is unavailable, pending or failed: keep a durable browser
     // snapshot so closing the window cannot silently drop the edits.
-    if (await webAutosave({ fallback: true })) return "saved"
-    return currentSaved() ? "saved" : "unsaved"
+    if (await flushWebForClose()) return "saved"
+    return (await savedDurably()) ? "saved" : "unsaved"
+  }
+
+  // Writes the state that is on screen and refuses to report success until that
+  // exact revision is readable in the store. Edits that land during the write are
+  // flushed again instead of being covered by the older snapshot.
+  async function flushWebForClose() {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (webAutosaving) {
+        await waitForWrites(2000)
+        if (webAutosaving) return false
+      }
+      commitLiveForm?.()
+      if (projectBusy() || hasGesture()) return false
+      const target = revision
+      const result = await writeWebSnapshot()
+      if (!result) return false
+      if (revision !== target) continue
+      return webSnapshotAvailable(result.id, {
+        projectId: state.projectId,
+        generation,
+        revision: target,
+      })
+    }
+    return false
   }
 
   async function requestClose() {

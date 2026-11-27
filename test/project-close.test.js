@@ -7,7 +7,12 @@ import { createHarness, settingIds } from "../scripts/lib/autosave-harness.mjs"
 const harness = createHarness({ capabilities: null })
 const { setupProjects } = await import("../src/controllers/project.js")
 const storage = await import("../src/web-storage.js")
+// A second module instance is a different tab: its own writer id, epoch and
+// connection, all against the same fake IndexedDB.
+const otherTab = await import("../src/web-storage.js?tab=close-other")
 const { readProject, writeProject } = await import("../src/project.js")
+
+const dbName = "khung-thoai-autosave"
 
 async function boot() {
   harness.reset()
@@ -40,6 +45,67 @@ async function waitFor(check, timeout = 4000) {
     await harness.tick()
   }
   throw new Error("waitFor timed out")
+}
+
+// Advances real timers and promises without pumping the fake IndexedDB, so a
+// test can finish one side of a race while a storage write stays suspended.
+async function settleUntil(check, timeout = 4000) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    if (check()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error("settleUntil timed out")
+}
+
+async function waitForPendingWrite(timeout = 4000) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline && harness.pending() === 0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(harness.pending() > 0, "the fallback snapshot must be suspended in IndexedDB")
+}
+
+// Sessions and snapshots an older window wrote: foreign writers, distinct
+// projects, valid keys. They fill the store without touching the controller.
+function seedForeignSnapshots(count) {
+  const entries = {}
+  const keys = []
+  for (let index = 0; index < count; index += 1) {
+    const projectId = crypto.randomUUID()
+    const writer = crypto.randomUUID()
+    const savedAt = 1700000000000 + index * 10
+    const key = `snapshot:${String(savedAt).padStart(14, "0")}:${projectId}:${writer}:${crypto.randomUUID()}`
+    const blob = new Blob([`foreign-${index}`])
+    entries[key] = {
+      schema: 2,
+      blob,
+      projectId,
+      name: `phien-${index}.khungthoai`,
+      pageCount: 1,
+      savedAt,
+      size: blob.size,
+      writer,
+      epoch: crypto.randomUUID(),
+      revision: index + 1,
+      generation: 0,
+      legacy: false,
+    }
+    entries[`meta:${key.slice("snapshot:".length)}`] = {
+      schema: 2,
+      id: key,
+      projectId,
+      name: `phien-${index}.khungthoai`,
+      pageCount: 1,
+      savedAt,
+      size: blob.size,
+      writer,
+      revision: index + 1,
+      legacy: false,
+    }
+    keys.push(key)
+  }
+  harness.fake.seed(dbName, "snapshots", entries)
+  return keys
 }
 
 test("closing with unsaved edits and no worker asks before discarding, then closes on confirmation", async () => {
@@ -191,19 +257,149 @@ test("importing the same project again during a save still saves the new dirty g
     ),
   ]
   projectFile.onchange()
-  await waitFor(() => harness.lastStatus()?.text?.startsWith("Đã mở dự án"))
+  // Let the reload finish on real timers only, so the suspended snapshot is
+  // still in flight and provably lands after the new generation exists.
+  await settleUntil(() => harness.lastStatus()?.text?.startsWith("Đã mở dự án"))
   assert.equal(harness.state.projectId, projectId)
   // The replace-session dialog belongs to the import, not to the close decision.
   harness.confirm.calls.length = 0
 
+  // The stale completion must not claim the reloaded page instance: the flush
+  // it schedules writes the new generation instead of trusting the old marker.
+  await harness.drive(() => harness.pending() === 0)
   await waitFor(async () => (await snapshots()).some((item) => item.revision >= 3))
   const saved = await snapshots()
   assert.ok(saved.every((item) => item.projectId === projectId), "same portable project id")
-  assert.ok(saved.length >= 2, "the earlier snapshot stays recoverable")
+  assert.equal(saved.length, 1, "one page instance keeps exactly one recoverable slot")
+  assert.equal(saved[0].revision, 3, "the reloaded generation owns the slot")
 
   harness.desktop.closeHandler()
   await waitFor(() => harness.calls.closeWindow === 1)
   assert.equal(harness.confirm.calls.length, 0)
+})
+
+test("a download is not a durable save for the desktop fallback close", async () => {
+  const api = await boot()
+  harness.state.pages = harness.pages(1)
+  api.changed()
+
+  harness.byId("save-project").onclick()
+  await waitFor(() => harness.lastStatus()?.text === "Đã tạo tệp dự án.")
+  // The save dialog of the shell can still be cancelled, so the session must
+  // keep showing unsaved edits and must not lose the recovery record.
+  assert.match(harness.byId("project-dirty").textContent, /Còn thay đổi chưa lưu/)
+  assert.deepEqual(await snapshots(), [])
+
+  harness.desktop.closeHandler()
+  await waitFor(() => harness.calls.closeWindow === 1)
+  assert.equal(harness.confirm.calls.length, 0, "the close wrote a verified browser snapshot")
+  const saved = await snapshots()
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].projectId, harness.state.projectId)
+})
+
+test("a manual save keeps another tab's diverging recovery snapshot", async () => {
+  const api = await boot()
+  const projectId = harness.state.projectId
+  const seeded = await harness.resolve(
+    otherTab.saveWebSnapshot(
+      writeProject({
+        projectId,
+        pages: harness.pages(2),
+        presets: [],
+        queue: [],
+        settings: Object.fromEntries(settingIds.map((id) => [id, ""])),
+        currentPage: 0,
+        fit: true,
+      }),
+      { projectId, name: "tab-khac.khungthoai", pageCount: 2, revision: 7 },
+    ),
+  )
+  assert.equal(seeded.ok, true)
+
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  harness.byId("save-project").onclick()
+  await waitFor(() => harness.lastStatus()?.text === "Đã tạo tệp dự án.")
+
+  const kept = await snapshots()
+  assert.equal(kept.length, 1, "the manual save deleted nothing")
+  assert.equal(kept[0].id, seeded.id)
+  assert.equal(kept[0].revision, 7)
+  assert.equal(await harness.resolve(otherTab.loadWebSnapshot(seeded.id)) instanceof File, true)
+})
+
+test("a snapshot cleared by another tab stops counting as the saved marker", async () => {
+  const api = await boot()
+  const projectId = harness.state.projectId
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  harness.intervals.at(-1)()
+  await waitFor(async () => (await snapshots()).length === 1)
+  const [first] = await snapshots()
+
+  // Another tab clears the record and the notification is delayed or lost, so
+  // the marker has to be re-checked against the store on the next focus.
+  assert.equal(await harness.resolve(otherTab.clearWebSnapshot(first.id)), true)
+  assert.equal(await harness.resolve(otherTab.webSnapshotAvailable(first.id)), false)
+  harness.documentListeners.get("visibilitychange")?.()
+  await harness.drive(() => harness.pending() === 0)
+
+  // With the marker dropped the next autosave writes again instead of skipping.
+  harness.intervals.at(-1)()
+  await waitFor(async () => (await snapshots()).length === 1)
+  const [fresh] = await snapshots()
+  assert.notEqual(fresh.id, first.id, "the stale marker was not reused")
+  assert.equal(await harness.resolve(storage.webSnapshotAvailable(fresh.id, {
+    projectId,
+    revision: 1,
+  })), true)
+
+  harness.desktop.closeHandler()
+  await waitFor(() => harness.calls.closeWindow === 1)
+  assert.equal(harness.confirm.calls.length, 0)
+})
+
+test("editing during the close fallback closes only on the current revision", async () => {
+  const api = await boot()
+  harness.state.pages = harness.pages(1)
+  api.changed()
+
+  harness.desktop.closeHandler()
+  await waitForPendingWrite()
+  // The user keeps editing while the fallback snapshot is being written.
+  harness.state.pages = harness.pages(2)
+  api.changed()
+
+  await waitFor(() => harness.calls.closeWindow === 1)
+  assert.equal(harness.confirm.calls.length, 0)
+  const saved = await snapshots()
+  assert.equal(saved.length, 1, "the same page instance keeps one slot")
+  assert.equal(saved[0].revision, 2, "the stored record covers the edit made during the write")
+  assert.equal(saved[0].pageCount, 2)
+})
+
+test("a full store leaves the session dirty and asks before discarding at close", async () => {
+  const api = await boot()
+  harness.state.pages = harness.pages(1)
+  api.changed()
+  const seeded = seedForeignSnapshots(8)
+
+  harness.confirm.value = false
+  harness.desktop.closeHandler()
+  await waitFor(() => harness.lastStatus()?.text?.includes("Đã hủy đóng app"))
+  assert.equal(harness.calls.closeWindow, 0)
+  assert.equal(harness.confirm.calls.length, 1)
+  assert.match(harness.byId("web-autosave-status").textContent, /đầy 8 bản/)
+  assert.match(harness.byId("project-dirty").textContent, /Còn thay đổi chưa lưu/)
+  assert.deepEqual((await snapshots()).map((item) => item.id).sort(), seeded.slice().sort())
+
+  // Only an explicit discard closes the window while nothing can be written.
+  harness.confirm.value = true
+  harness.desktop.closeHandler()
+  await waitFor(() => harness.calls.closeWindow === 1)
+  assert.equal(harness.confirm.calls.length, 2)
+  assert.deepEqual((await snapshots()).map((item) => item.id).sort(), seeded.slice().sort())
 })
 
 test("recovery lists each snapshot, keeps the chosen one and clears only that one", async () => {
