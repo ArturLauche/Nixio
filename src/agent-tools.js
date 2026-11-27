@@ -935,6 +935,14 @@ export function createAgentTools({
     requiresApproval(name, args) {
       return byName.get(name)?.requiresApproval?.(args) === true
     },
+    needsApproval(name, args, { confirmBulkEdits = false, forceWriteApproval = false } = {}) {
+      const tool = byName.get(name)
+      if (!tool) return false
+      // Once the model has read untrusted web content in this turn, every mutation needs a
+      // human decision (prompt-injection containment), not just the bulk/destructive ones.
+      if (forceWriteApproval && tool.category === "write") return true
+      return Boolean(confirmBulkEdits && tool.requiresApproval?.(args) === true)
+    },
     getRuntimeSnapshot,
     getTodos() {
       return currentTodos
@@ -950,7 +958,7 @@ export function createAgentTools({
       currentTodos = []
       currentPlan = null
     },
-    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, signal } = {}) {
+    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal } = {}) {
       const tool = byName.get(name)
       if (!tool) return { ok: false, error: `Công cụ không tồn tại: ${name}` }
       if (!isEnabled(tool, { allowEdits, allowWebSearch, planMode })) {
@@ -962,7 +970,17 @@ export function createAgentTools({
             : `Công cụ "${name}" đang bị tắt bởi thiết lập quyền của người dùng.`,
         }
       }
-      if (confirmBulkEdits && tool.requiresApproval?.(args) && onApproveTool) {
+      const approvalRequired = (forceWriteApproval && tool.category === "write")
+        || Boolean(confirmBulkEdits && tool.requiresApproval?.(args) === true)
+      if (approvalRequired) {
+        // Fail closed: never mutate without a real approver when approval is required.
+        if (!onApproveTool) {
+          return {
+            ok: false,
+            category: tool.category,
+            error: `Cần người dùng phê duyệt thao tác "${name}" nhưng giao diện hiện không hỗ trợ hộp thoại duyệt.`,
+          }
+        }
         const decision = await onApproveTool({ name, args, signal })
         if (!decision?.approved) {
           return {
@@ -970,7 +988,7 @@ export function createAgentTools({
             category: tool.category,
             error: decision?.reason
               ? `Người dùng từ chối thao tác "${name}": ${decision.reason}`
-              : `Người dùng đã từ chối thực thi thao tác hàng loạt "${name}".`,
+              : `Người dùng đã từ chối thực thi thao tác "${name}".`,
           }
         }
       }
