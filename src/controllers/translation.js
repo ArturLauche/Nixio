@@ -258,6 +258,7 @@ export function setupTranslation({
       source: byId("source-language").value,
       target: byId("target-language").value,
       notes: byId("translation-notes").value.trim(),
+      styleGuide: state.styleGuide,
       skillPrompt: resolveSkillPrompt(byId("chat-skill")?.value, byId("chat-skill-custom")?.value),
       direction: byId("direction").value,
       glossary: byId("translation-glossary").value.trim(),

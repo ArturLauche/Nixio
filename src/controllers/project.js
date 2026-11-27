@@ -100,6 +100,7 @@ export function setupProjects({
       fit: state.fit,
       // The pairs travel with the project: a reopened file can reuse them without the provider.
       translationMemory: translationMemory?.snapshot?.(),
+      styleGuide: state.styleGuide,
     })
   }
 
@@ -225,6 +226,7 @@ export function setupProjects({
         state.pages.length ||
         revision !== diskRevision ||
         state.queue.length ||
+        state.styleGuide ||
         projectSettings.some(
           ({ value }, index) => value !== defaultProjectSettings[index],
         )
@@ -259,6 +261,7 @@ export function setupProjects({
       // A file that predates the memory carries no pairs, so the store is replaced with whatever
       // this project has: never with the previous project's pairs.
       translationMemory?.replace?.(project.translationMemory)
+      state.styleGuide = project.styleGuide ?? null
       state.zoom = null
       state.selectedBoxIds?.clear()
       updateFitLabel()
@@ -397,6 +400,7 @@ export function setupProjects({
     state.projectId = crypto.randomUUID()
     projectName = undefined
     translationMemory?.clear?.()
+    state.styleGuide = null
     generation++
     lastWebSnapshot = null
     savedKind = null
