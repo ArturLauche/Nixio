@@ -75,23 +75,25 @@ internal static class LocalOcr
             NativeProgress.Emit(75, "Tesseract đang nhận dạng chữ");
             var tsv = await Run(path, "stdout", "-l", language, "--psm", psm.ToString(), "tsv");
             NativeProgress.Emit(90, "Ghép dòng và chuẩn hóa tọa độ");
-            var groups = new Dictionary<string, List<string[]>>();
+            var groups = new Dictionary<string, List<(string[] Cells, double Confidence)>>();
             foreach (var row in tsv.Split('\n').Skip(1))
             {
                 var cells = row.TrimEnd('\r').Split('\t', 12);
+                // "NaN"/"Infinity" parse successfully but cannot be serialized in the reply.
                 if (cells.Length != 12 || cells[0] != "5" || string.IsNullOrWhiteSpace(cells[11]) ||
-                    !double.TryParse(cells[10], CultureInfo.InvariantCulture, out var confidence) || confidence < 0) continue;
+                    !double.TryParse(cells[10], CultureInfo.InvariantCulture, out var confidence) ||
+                    !double.IsFinite(confidence) || confidence < 0) continue;
                 var key = string.Join("-", cells.Take(5));
                 if (!groups.TryGetValue(key, out var words)) groups[key] = words = [];
-                words.Add(cells);
+                words.Add((cells, confidence));
             }
             var lines = new JsonArray();
             foreach (var words in groups.Values)
             {
-                var left = words.Min(word => int.Parse(word[6]));
-                var top = words.Min(word => int.Parse(word[7]));
-                var right = words.Max(word => int.Parse(word[6]) + int.Parse(word[8]));
-                var bottom = words.Max(word => int.Parse(word[7]) + int.Parse(word[9]));
+                var left = words.Min(word => int.Parse(word.Cells[6]));
+                var top = words.Min(word => int.Parse(word.Cells[7]));
+                var right = words.Max(word => int.Parse(word.Cells[6]) + int.Parse(word.Cells[8]));
+                var bottom = words.Max(word => int.Parse(word.Cells[7]) + int.Parse(word.Cells[9]));
                 var l = Normalize(left, scaledWidth);
                 var t = Normalize(top, scaledHeight);
                 var r = Normalize(right, scaledWidth);
@@ -107,13 +109,13 @@ internal static class LocalOcr
                 var normRight = Math.Clamp(rr, normLeft + 1, 1000);
                 var normBottom = Math.Clamp(rb, normTop + 1, 1000);
                 var joined = language.StartsWith("jpn") || language.StartsWith("chi")
-                    ? string.Join("", words.Select(word => word[11]))
-                    : JoinWords(words.Select(word => word[11]));
+                    ? string.Join("", words.Select(word => word.Cells[11]))
+                    : JoinWords(words.Select(word => word.Cells[11]));
                 lines.Add((JsonNode)new JsonObject {
                     ["id"] = "L" + (lines.Count + 1),
                     ["text"] = joined,
                     ["box"] = new JsonArray(normLeft, normTop, normRight, normBottom),
-                    ["confidence"] = words.Average(word => double.Parse(word[10], CultureInfo.InvariantCulture)),
+                    ["confidence"] = words.Average(word => word.Confidence),
                 });
             }
             return new JsonObject { ["lines"] = lines, ["width"] = width, ["height"] = height };
