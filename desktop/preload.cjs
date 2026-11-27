@@ -26,4 +26,8 @@ contextBridge.exposeInMainWorld("khungThoaiDesktop", {
   appInfo: () => invoke("app-info"),
   checkUpdate: () => invoke("check-update"),
   openExternal: (url) => invoke("open-external", url),
+  credentialStatus: (provider, endpoint) => invoke("credential-status", provider, endpoint),
+  // Write-only: the key travels in and only a status and an opaque handle come back.
+  credentialSave: (provider, endpoint, secret) => invoke("credential-save", provider, endpoint, secret),
+  credentialRemove: (provider, endpoint) => invoke("credential-remove", provider, endpoint),
 })

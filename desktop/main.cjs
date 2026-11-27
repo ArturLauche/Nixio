@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell } = require("electron")
+const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell, safeStorage } = require("electron")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const { NativeWorker } = require("./native-worker.cjs")
@@ -6,6 +6,8 @@ const { TaskQueue } = require("./task-queue.cjs")
 const { ProjectFiles } = require("./project-files.cjs")
 const { webSearch, fetchUrl, isSafePublicHttpsUrl } = require("./web-search.cjs")
 const { checkForUpdates } = require("./updater.cjs")
+const { CredentialStore } = require("./credential-store.cjs")
+const { CREDENTIAL_CHANNELS, CredentialService, sanitizeCredentialError, trustedChannel } = require("./credential-ipc.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -92,11 +94,15 @@ app.whenReady().then(() => {
   projects = new ProjectFiles(worker, app.getPath("userData"), () => mainWindow, dialog, (options, data) => tasks.submit(require("node:crypto").randomUUID(), "png", options, data))
   const trusted = (event) => event.sender === mainWindow?.webContents && !event.senderFrame?.parent &&
     event.senderFrame?.url.split("#", 1)[0] === entry
-  const handle = (channel, action) => ipcMain.handle(channel, async (event, ...args) => {
-    if (!trusted(event)) return { error: "Untrusted desktop frame." }
-    try { return { value: await action(...args) } }
-    catch (error) { return { error: error.message } }
+  const handle = (channel, action, onError) => ipcMain.handle(channel, trustedChannel(trusted, action, onError))
+  // API keys live in the OS vault under userData and never reach the renderer: these channels only
+  // accept a newly typed key and return status plus opaque handles.
+  const credentials = new CredentialService({
+    store: new CredentialStore({ userData: app.getPath("userData"), safeStorage, platform: process.platform }),
   })
+  handle(CREDENTIAL_CHANNELS.status, (provider, endpoint) => credentials.status(provider, endpoint), sanitizeCredentialError)
+  handle(CREDENTIAL_CHANNELS.save, (provider, endpoint, secret) => credentials.save(provider, endpoint, secret), sanitizeCredentialError)
+  handle(CREDENTIAL_CHANNELS.remove, (provider, endpoint) => credentials.remove(provider, endpoint), sanitizeCredentialError)
   handle("khung-thoai:redraw-texture", (input) => imageWorker.available ? imageWorker.redraw(input) : undefined)
   handle("khung-thoai:native", (operation, options, data, taskId) => {
     if (!["capabilities", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
