@@ -80,11 +80,10 @@ export function setupProjects({
     if (revision === diskRevision) return true
     if (savedKind === null || revision !== savedRevision) return false
     if (savedKind !== "web") return true
-    return webSnapshotAvailable(savedWebId, {
-      projectId: state.projectId,
-      generation,
-      revision,
-    })
+    const marker = lastWebSnapshot
+    if (!marker || marker.id !== savedWebId || !isCurrentSession(marker) || marker.revision !== revision) return false
+    return await webSnapshotAvailable(marker.id, marker) &&
+      lastWebSnapshot === marker && isCurrentSession(marker) && marker.revision === revision
   }
   function projectBlob() {
     const settings = Object.fromEntries(
@@ -633,12 +632,10 @@ export function setupProjects({
   // store rather than taken at face value.
   async function refreshSavedMarker() {
     if (savedKind !== "web" || !savedWebId) return
-    const available = await webSnapshotAvailable(savedWebId, {
-      projectId: state.projectId,
-      generation,
-      revision,
-    })
-    if (available) return
+    const marker = lastWebSnapshot
+    if (!marker || marker.id !== savedWebId) return
+    const available = await webSnapshotAvailable(marker.id, marker)
+    if (available || lastWebSnapshot !== marker) return
     savedKind = null
     savedWebId = null
     lastWebSnapshot = null
@@ -679,7 +676,9 @@ export function setupProjects({
   const clearWebBtn = byId("clear-web-recovery")
   if (clearWebBtn) {
     clearWebBtn.onclick = async () => {
-      const cleared = await clearWebSnapshot(byId("web-recovery-select")?.value || undefined)
+      const id = byId("web-recovery-select")?.value
+      if (!id) return
+      const cleared = await clearWebSnapshot(id)
       // The deleted snapshot is no longer durable, so the next flush has to write
       // a fresh one instead of trusting the old marker.
       lastWebSnapshot = null
@@ -735,15 +734,8 @@ export function setupProjects({
       }
       commitLiveForm?.()
       if (projectBusy() || hasGesture()) return false
-      const target = revision
-      const result = await writeWebSnapshot()
-      if (!result) return false
-      if (revision !== target) continue
-      return webSnapshotAvailable(result.id, {
-        projectId: state.projectId,
-        generation,
-        revision: target,
-      })
+      if (!(await writeWebSnapshot())) return false
+      if (await savedDurably()) return true
     }
     return false
   }
@@ -759,7 +751,7 @@ export function setupProjects({
         return
       }
       if (
-        outcome !== "saved" &&
+        (outcome !== "saved" || !currentSaved()) &&
         !window.confirm(
           "Chưa lưu được thay đổi vào máy hay trình duyệt. Vẫn đóng app và bỏ các thay đổi chưa lưu?",
         )

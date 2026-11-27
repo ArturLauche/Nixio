@@ -86,6 +86,7 @@ function metaRecord(record, key) {
     savedAt: record.savedAt,
     size: record.size,
     writer: record.writer,
+    epoch: record.epoch,
     revision: record.revision,
     legacy: Boolean(record.legacy),
   }
@@ -240,8 +241,7 @@ function readRecord(db, key) {
 
 // One readwrite transaction reconciles the whole store, so the key scan and the
 // decision it feeds cannot interleave with another tab's write. A page instance
-// may replace its own slot and the slot of an older page instance of the same
-// tab; every other session's snapshot is left untouched. When the bounded
+// may replace only its own slot; every other page instance’s snapshot is left untouched. When the bounded
 // capacity has no room left, the write is refused instead of evicting someone
 // else's last recoverable snapshot.
 function writeSnapshot(db, record, key) {
@@ -260,26 +260,15 @@ function writeSnapshot(db, record, key) {
         .filter((entry) => entry.parts)
       const projectKey = record.projectId || "legacy"
       const present = entries.some((entry) => entry.key === key)
-      // This page instance replaces its own earlier writes. Earlier page
-      // instances of the same tab (a reload, or a duplicated tab that copied
-      // sessionStorage) keep the newest of their slots recoverable; anything
-      // older belongs to a page instance that is already gone.
-      const lineage = entries.filter(
-        (entry) =>
-          entry.key !== key &&
-          entry.parts.writer === record.writer &&
-          entry.parts.projectKey === projectKey,
+      // sessionStorage may be copied when a tab duplicates. Only an exact
+      // epoch match proves this page instance owns the earlier recovery.
+      const superseded = entries.filter(({ key: previous, parts }) =>
+        previous !== key && parts.projectKey === projectKey &&
+        parts.writer === record.writer && parts.epoch === record.epoch,
       )
-      const mine = lineage.filter((entry) => entry.parts.epoch === record.epoch)
-      const older = lineage
-        .filter((entry) => entry.parts.epoch !== record.epoch)
-        .sort((a, b) => b.parts.savedAt - a.parts.savedAt || (a.key < b.key ? 1 : -1))
-      const superseded = [...mine, ...older.slice(1)]
-      const total = entries.length - superseded.length + (present ? 0 : 1)
-      const project =
-        entries.filter((entry) => entry.parts.projectKey === projectKey).length -
-        superseded.filter((entry) => entry.parts.projectKey === projectKey).length +
-        (present ? 0 : 1)
+      const added = present ? 0 : 1
+      const total = entries.length - superseded.length + added
+      const project = entries.filter(({ parts }) => parts.projectKey === projectKey).length - superseded.length + added
       if (total > maxSnapshots) return capture({ rejected: "capacity" })
       if (project > maxSnapshotsPerProject) return capture({ rejected: "project-capacity" })
       store.put(record, key)
@@ -412,7 +401,7 @@ export async function listWebSnapshots() {
       revision: Number.isFinite(item.revision) ? item.revision : 0,
       legacy: Boolean(item.legacy),
       writer: item.writer ?? null,
-      mine: item.writer === writer(),
+      mine: item.writer === writer() && item.epoch === epoch(),
     }))
     .sort((a, b) => b.savedAt - a.savedAt)
 }

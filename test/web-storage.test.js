@@ -126,20 +126,24 @@ test("a reload of the same tab keeps the previous page snapshot recoverable", as
 
     const snapshots = await page2.listWebSnapshots()
     assert.equal(snapshots.length, 2, "the previous page instance keeps its own slot")
-    assert.ok(snapshots.every((item) => item.mine), "the tab reuses one writer id")
+    assert.equal(snapshots.filter((item) => item.mine).length, 1)
     const bodies = await Promise.all(snapshots.map(async (item) => text(await page2.loadWebSnapshot(item.id))))
     assert.deepEqual(
       [...bodies].sort(),
       [await text(projectBlob(projectA, 1, "after-reload")), await text(projectBlob(projectA, 1, "before-reload"))].sort(),
     )
-    // A reload of the same tab must not grow the store: the next page instance
-    // replaces the oldest of the two, so the tab owns at most two slots.
     const page3 = await openTab()
     await save(page3, projectA, "third-page", { revision: 3 })
     const after = await page3.listWebSnapshots()
-    assert.equal(after.length, 2)
+    assert.equal(after.length, 3)
     const afterBodies = await Promise.all(after.map(async (item) => text(await page3.loadWebSnapshot(item.id))))
-    assert.ok(afterBodies.includes(await text(projectBlob(projectA, 1, "third-page"))))
+    assert.deepEqual(
+      [...afterBodies].sort(),
+      [...bodies, await text(projectBlob(projectA, 1, "third-page"))].sort(),
+    )
+    const page4 = await openTab()
+    assert.deepEqual(await save(page4, projectA, "fourth", { revision: 4 }), { ok: false, reason: "project-capacity" })
+    assert.deepEqual(await page3.listWebSnapshots(), after)
   } finally {
     Date.now = realNow
     delete globalThis.sessionStorage
