@@ -32,6 +32,7 @@ export function setupShortcuts({
   recordNudge,
   recordResize,
   recordRotate,
+  pageSelection,
 }) {
   let pending = null
 
@@ -119,6 +120,13 @@ export function setupShortcuts({
         toggleHistoryPanel?.(true)
         return
       }
+      // Ctrl/Cmd+A inside the page list selects the whole chapter for the bulk bar; the only
+      // inputs there are row checkboxes, so this stays clear of text fields.
+      if (key === "a" && pageSelection?.owns?.(event.target)) {
+        event.preventDefault()
+        pageSelection.selectAll()
+        return
+      }
       if (editingText) return
       if (key === "z" || key === "y") {
         event.preventDefault()
@@ -138,6 +146,13 @@ export function setupShortcuts({
     if (event.target.closest("#history-panel")) return
     if (event.key === "Escape" && cancelGesture()) {
       event.preventDefault()
+      return
+    }
+    // Escape drops the additive page selection wherever focus sits; dialogs and text fields keep
+    // their own Escape behaviour through the guards above.
+    if (event.key === "Escape" && pageSelection?.count() > 0) {
+      event.preventDefault()
+      pageSelection.clear()
       return
     }
     // The geometry fields sit behind a details group, so the shortcut opens it before taking focus.

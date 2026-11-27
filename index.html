@@ -77,6 +77,21 @@
           <button type="button" id="open-webtoon" class="button full" title="Ghép dọc hoặc cắt thông minh trang Webtoon/Manhwa theo rãnh trống">Ghép &amp; Cắt Webtoon</button>
         </div>
         <ol id="pages" class="page-list" aria-label="Thứ tự trang"></ol>
+        <div id="page-bulk-bar" class="page-bulk-bar" hidden>
+          <p id="page-bulk-count" class="muted" role="status"></p>
+          <div class="page-bulk-actions">
+            <button type="button" id="bulk-translate" class="button" title="Dịch các trang đã chọn (Ctrl+click / Shift+click / phím cách)">Dịch</button>
+            <button type="button" id="bulk-duplicate" class="button">Nhân bản</button>
+            <button type="button" id="bulk-move-up" class="button" title="Đưa các trang đã chọn lên một bậc">↑ Lên</button>
+            <button type="button" id="bulk-move-down" class="button" title="Đưa các trang đã chọn xuống một bậc">↓ Xuống</button>
+            <button type="button" id="bulk-export" class="button">Xuất ZIP</button>
+            <button type="button" id="bulk-delete" class="button danger">Xóa</button>
+          </div>
+          <div class="page-bulk-actions">
+            <button type="button" id="bulk-select-all" class="button">Chọn tất cả</button>
+            <button type="button" id="bulk-clear" class="button">Bỏ chọn</button>
+          </div>
+        </div>
       </section>
 
       <section class="side-section">
@@ -661,15 +676,18 @@
   </dialog>
   <dialog id="zip-dialog">
     <form method="dialog">
-      <h2>Xuất toàn bộ trang</h2>
+      <h2 id="zip-dialog-title">Xuất toàn bộ trang</h2>
       <label class="field" for="export-profile">Hồ sơ xuất theo nền tảng
         <select id="export-profile"></select>
       </label>
       <p id="export-profile-summary" class="muted" role="status" aria-live="polite"></p>
       <label class="field" for="zip-format">Định dạng
-        <select id="zip-format"><option value="profile">ZIP ảnh theo hồ sơ (chia mảnh)</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+        <select id="zip-format"><option value="profile">ZIP ảnh theo hồ sơ (chia mảnh)</option><option value="png">ZIP ảnh PNG</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
       </label>
       <p class="muted">Gói ảnh chia mảnh kèm <code>manifest.json</code> ghi thứ tự từng mảnh.</p>
+      <label class="field" for="zip-name">Tên tệp ZIP (không bắt buộc)
+        <input id="zip-name" type="text" placeholder="khung-thoai" autocomplete="off" spellcheck="false">
+      </label>
       <div class="form-actions">
         <button value="cancel" class="button">Hủy</button>
         <button value="export" class="button primary">Tải ZIP</button>

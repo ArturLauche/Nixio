@@ -421,14 +421,31 @@ export function setupExports({
   }
 
   const zipDialog = byId("zip-dialog")
-  byId("export-all").onclick = () => {
+  // The dialog snapshots its page list when it opens: the bulk bar's subset stays fixed even if
+  // the selection changes while the user picks a format, and "Xuất tất cả" keeps meaning the whole
+  // chapter at close time.
+  let zipPages = null
+  function openZipExport(pages = null) {
+    zipPages = pages ? [...pages] : null
+    byId("zip-name").value = ""
+    byId("zip-dialog-title").textContent = pages?.length
+      ? `Xuất ${pages.length} trang đã chọn`
+      : "Xuất toàn bộ trang"
     zipDialog.returnValue = ""
     syncProfileSummary()
     zipDialog.showModal()
   }
+  byId("export-all").onclick = () => openZipExport()
   zipDialog.addEventListener("close", () => {
-    if (zipDialog.returnValue !== "export") return
+    if (zipDialog.returnValue !== "export") {
+      zipPages = null
+      return
+    }
     const format = byId("zip-format").value
+    const pages = zipPages ?? state.pages
+    zipPages = null
+    const customName = byId("zip-name").value.trim()
+    const zipName = `${customName ? filenameStem(customName) : "khung-thoai"}-${format}.zip`
     let profile
     try {
       profile = activeProfile()
@@ -439,22 +456,22 @@ export function setupExports({
     const run = () =>
       performExport(
         async () => {
-          const pages = copyEditor({ pages: state.pages }).pages
+          const snapshot = copyEditor({ pages }).pages
           if (format === "profile") {
-            sliceCount = await exportProfileZip(pages, profile)
+            sliceCount = await exportProfileZip(snapshot, profile)
             return
           }
           // The native path composites one fixed order, so a stack with a reordered or translucent
           // layer is exported by the renderer instead, exactly as the canvas shows it.
-          if (format === "png" && isNativeReady() && pages.every(layersNativeFriendly)) {
+          if (format === "png" && isNativeReady() && snapshot.every(layersNativeFriendly)) {
             const transfer = await desktop.projectBegin(
               "zip",
-              "khung-thoai-png.zip",
+              zipName,
             )
             if (!transfer) return false
             try {
-              for (const [index, page] of pages.entries()) {
-                status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
+              for (const [index, page] of snapshot.entries()) {
+                status(`Đang xuất PNG bằng C# ${index + 1}/${snapshot.length}…`)
                 const { options, data } = await nativePageLayers(page)
                 const name =
                   String(index + 1).padStart(2, "0") +
@@ -479,8 +496,8 @@ export function setupExports({
           }
           const { default: JSZip } = await import("jszip")
           const zip = new JSZip()
-          for (const [index, page] of pages.entries()) {
-            status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
+          for (const [index, page] of snapshot.entries()) {
+            status(`Đang xuất trang ${index + 1} / ${snapshot.length}…`)
             const name =
               String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
             zip.file(
@@ -490,16 +507,16 @@ export function setupExports({
           }
           saveFile(
             await zip.generateAsync({ type: "blob" }),
-            "khung-thoai-" + format + ".zip",
+            zipName,
           )
         },
         () =>
           format === "profile"
             ? `Đã xuất ${sliceCount} mảnh theo hồ sơ ${profile.name}.`
-            : `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${state.pages.length} trang.`,
+            : `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${pages.length} trang.`,
       )
     // The profile decides whether the preflight report runs before the archive is built.
-    if (profile.preflight) requestExport(state.pages, run)
+    if (profile.preflight) requestExport(pages, run)
     else run()
   })
 
@@ -522,4 +539,6 @@ export function setupExports({
       status(`Đã xuất kịch bản (${format.toUpperCase()}).`)
     }
   }
+
+  return { openZipExport }
 }

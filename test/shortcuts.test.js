@@ -310,3 +310,41 @@ test("G opens and focuses the geometry fields but never interrupts typing", () =
   assert.equal(field("box-geometry").open, true, "the fields are revealed before they take focus")
   assert.deepEqual(calls.focused, ["box-x"])
 })
+
+test("Escape clears the page selection and Ctrl+A inside the page list selects all (#74)", () => {
+  const listeners = installDom()
+  const { deps } = makeDeps()
+  const pageListTarget = { closest: (selector) => (selector === "#pages" ? {} : null) }
+  const selection = {
+    size: 2,
+    cleared: 0,
+    selectedAll: 0,
+    count() { return this.size },
+    clear() { this.cleared++; this.size = 0 },
+    selectAll() { this.selectedAll++ },
+    owns: (target) => target === pageListTarget,
+  }
+  setupShortcuts({ ...deps, pageSelection: selection })
+
+  const escape = keyEvent("Escape", { target: pageListTarget })
+  press(listeners, escape)
+  assert.equal(escape.defaultPrevented, true)
+  assert.equal(selection.cleared, 1)
+  assert.equal(selection.size, 0)
+
+  const secondEscape = keyEvent("Escape", { target: pageListTarget })
+  press(listeners, secondEscape)
+  assert.equal(secondEscape.defaultPrevented, false, "nothing left to clear")
+  assert.equal(selection.cleared, 1)
+
+  selection.size = 1
+  const selectAll = keyEvent("a", { target: pageListTarget, ctrlKey: true })
+  press(listeners, selectAll)
+  assert.equal(selectAll.defaultPrevented, true)
+  assert.equal(selection.selectedAll, 1)
+
+  const outside = keyEvent("a", { target: plainTarget, ctrlKey: true })
+  press(listeners, outside)
+  assert.equal(outside.defaultPrevented, false, "Ctrl+A outside the page list keeps its native meaning")
+  assert.equal(selection.selectedAll, 1)
+})
