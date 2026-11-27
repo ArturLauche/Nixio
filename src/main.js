@@ -732,12 +732,12 @@ function renderCanvas() {
   stage.classList.toggle("eyedropper", tool === "eyedropper")
   stage.classList.toggle("bubble", tool === "bubble")
   stage.classList.toggle("cleaning", tool !== "text" && tool !== "pan" && tool !== "eyedropper" && tool !== "bubble")
-  gestures.updateZoomDisplay()
   if (!page) {
     overlays.replaceChildren()
     pageCanvas.width = 1
     pageCanvas.height = 1
     syncSplitCompare(null)
+    gestures.updateZoomDisplay()
     return
   }
   const stageWidth = state.zoom
@@ -746,6 +746,8 @@ function renderCanvas() {
   stage.style.width = stageWidth + "px"
   stage.style.maxWidth = state.fit && !state.zoom ? "100%" : "none"
   stage.style.flexShrink = state.fit && !state.zoom ? "1" : "0"
+  // The zoom readout reports the measured scale, so it has to run after the stage is resized.
+  gestures.updateZoomDisplay()
   paintPreview(page)
 
   const multiCount = state.selectedBoxIds.size

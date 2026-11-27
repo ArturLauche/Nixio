@@ -403,3 +403,92 @@ test("translation setup reads provider, endpoint, and target settings from the f
   assert.equal(settings.notes, "ghi chú")
   assert.equal(typeof settings.skillPrompt, "string")
 })
+
+function setupZoom({ state, page, canvasWidth }) {
+  const { byId } = createById()
+  const pageCanvas = fakeElement()
+  let scale = canvasWidth / page.image.naturalWidth
+  const viewport = fakeElement()
+  viewport.scrollLeft = 0
+  viewport.scrollTop = 0
+  viewport.getBoundingClientRect = () => ({ left: 0, top: 0, width: 720, height: 520 })
+  pageCanvas.getBoundingClientRect = () => ({
+    left: -viewport.scrollLeft,
+    top: -viewport.scrollTop,
+    width: Math.round(page.image.naturalWidth * scale),
+    height: Math.round(page.image.naturalHeight * scale),
+  })
+  const renders = []
+  return controllers("gestures").then(({ setupGestures }) => {
+    const api = setupGestures({
+      ...baseArguments(byId, state),
+      state,
+      selectedPage: () => page,
+      stage: fakeElement(),
+      overlays: fakeElement(),
+      pageCanvas,
+      viewport,
+      editorSnapshot: () => ({}),
+      toggleSelectBox() {},
+      addBox() {},
+      freezeCleanup() {},
+      rectStyle: (element, rect) => rect,
+      paintPreview() {},
+      renderCleanupOverlay() {},
+      renderCanvas() {
+        scale = state.zoom ?? scale
+        renders.push(state.zoom)
+      },
+      renderInspector() {},
+      changePage() {},
+    })
+    return { api, byId, viewport, pageCanvas, renders }
+  })
+}
+
+test("zoom-out follows the measured scale instead of snapping up from Fit", async () => {
+  const state = { pages: [], zoom: null, fit: true }
+  const page = { id: "p1", name: "page-1", boxes: [], image: { naturalWidth: 4000, naturalHeight: 6000 } }
+  const { byId, renders } = await setupZoom({ state, page, canvasWidth: 720 })
+
+  byId("zoom-out").onclick()
+  assert.ok(state.zoom < 0.18, `zoom-out from the 18% fit shrinks the page, got ${state.zoom}`)
+  assert.equal(renders.length, 1)
+  assert.equal(state.fit, false)
+
+  state.zoom = null
+  state.fit = true
+  byId("zoom-in").onclick()
+  assert.equal(state.zoom, 0.25, "zoom-in still picks the next step above the measured scale")
+})
+
+test("the zoom readout shows the measured scale while the page is fitted", async () => {
+  const state = { pages: [], zoom: null, fit: true }
+  const page = { id: "p1", name: "page-1", boxes: [], image: { naturalWidth: 4000, naturalHeight: 6000 } }
+  const { api, byId } = await setupZoom({ state, page, canvasWidth: 720 })
+
+  api.updateZoomDisplay()
+  assert.equal(byId("zoom-level").textContent, "18%", "Fit reports the real percentage, not a label")
+  state.zoom = 1.25
+  api.updateZoomDisplay()
+  assert.equal(byId("zoom-level").textContent, "125%")
+})
+
+test("ctrl+wheel keeps the image point under the cursor after zooming", async () => {
+  const state = { pages: [], zoom: null, fit: true }
+  const page = { id: "p1", name: "page-1", boxes: [], image: { naturalWidth: 4000, naturalHeight: 6000 } }
+  const { viewport, pageCanvas } = await setupZoom({ state, page, canvasWidth: 2000 })
+
+  const cursor = { clientX: 1000, clientY: 500 }
+  const area = pageCanvas.getBoundingClientRect()
+  const before = { x: (cursor.clientX - area.left) / area.width, y: (cursor.clientY - area.top) / area.height }
+  let prevented = false
+  viewport.dispatch("wheel", { ...cursor, ctrlKey: true, deltaY: -100, preventDefault() { prevented = true } })
+
+  assert.equal(prevented, true)
+  assert.ok(state.zoom > 0.5, `the wheel zooms in, got ${state.zoom}`)
+  const after = pageCanvas.getBoundingClientRect()
+  assert.ok(Math.abs((cursor.clientX - after.left) / after.width - before.x) < 1e-9, "x anchor holds")
+  assert.ok(Math.abs((cursor.clientY - after.top) / after.height - before.y) < 1e-9, "y anchor holds")
+  assert.ok(viewport.scrollLeft > 0 && viewport.scrollTop > 0, "the viewport scrolls to keep the anchor")
+})
