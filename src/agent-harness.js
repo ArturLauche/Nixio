@@ -263,7 +263,7 @@ export async function runAgentTurn({
   allowEdits = true,
   allowWebSearch = true,
   planMode = false,
-  confirmBulkEdits = false,
+  confirmBulkEdits = true,
   skillPrompt = "",
   maxSteps = 10,
   maxRetries = 2,
@@ -312,6 +312,9 @@ export async function runAgentTurn({
   let totalPrunedChars = compacted.charsSaved
   let editsMade = 0
   let retriesUsed = 0
+  // Set once this turn has pulled untrusted web content into the model context. From then on
+  // every write is gated behind an explicit human approval, whatever confirmBulkEdits says.
+  let webContentSeen = false
 
   // Build provider-specific message thread from clean chat history ({ role: "user"|"assistant", text }).
   const geminiContents = workingHistory.map((msg) => ({
@@ -387,12 +390,15 @@ export async function runAgentTurn({
       geminiContents.push(reply.rawModelContent)
     }
 
+    // A batch that itself reads the web must not be allowed to mutate in the same step.
+    const batchReadsWeb = reply.toolCalls.some((call) => tools.categoryOf?.(call.name) === "web")
     const settled = await executeToolBatch(reply.toolCalls, {
       tools,
       allowEdits: effectiveAllowEdits,
       allowWebSearch,
       planMode,
       confirmBulkEdits,
+      forceWriteApproval: webContentSeen || batchReadsWeb,
       maxParallel: 4,
       signal,
       onEvent,
@@ -402,6 +408,7 @@ export async function runAgentTurn({
     const guardReminders = []
     for (const entry of settled) {
       toolTrace.push(entry)
+      if (entry.ok && entry.category === "web") webContentSeen = true
       if (entry.ok && entry.category === "write") editsMade++
       const guardHit = repeatGuard.observe(entry.name, entry.args)
       if (guardHit) {

@@ -5,8 +5,9 @@ import { executeToolBatch, TOOL_ABORTED_BEFORE_DISPATCH } from "../src/agent-pip
 import { createAgentTools } from "../src/agent-tools.js"
 import { EXTERNAL_WEB_CONTENT_NOTICE } from "../src/web-search.js"
 
-function makeHarnessContext() {
+function makeHarnessContext({ approve } = {}) {
   const glossaryField = { value: "先生 = Thầy", dispatchEvent() {} }
+  const approvals = []
   const state = {
     pages: [{
       id: "p1",
@@ -42,8 +43,19 @@ function makeHarnessContext() {
     makeBoxFn: (_page, rect, text) => ({ id: "b-new", ...rect, text, size: 24, font: "Arial", color: "#171717", align: "center", rotation: 0, fill: true }),
     autoFitBoxFn: () => 22,
     textOverflowsFn: (_page, box) => box.size > 25,
+    onApproveTool: async ({ name, args }) => {
+      approvals.push({ name, args })
+      return approve ? approve(name, args) : { approved: true }
+    },
   })
-  return { state, glossaryField, tools, getCheckpoints: () => checkpoints, getRenders: () => renders }
+  return {
+    state,
+    glossaryField,
+    tools,
+    getCheckpoints: () => checkpoints,
+    getRenders: () => renders,
+    getApprovals: () => approvals,
+  }
 }
 
 test("createAgentTools enforces read-only / web-search permissions and checkpoints every mutation", async () => {
@@ -74,7 +86,7 @@ test("createAgentTools enforces read-only / web-search permissions and checkpoin
 
 test("runAgentTurn executes multi-step Gemini functionCall -> functionResponse loop", async (t) => {
   const originalFetch = globalThis.fetch
-  const { tools, glossaryField } = makeHarnessContext()
+  const { tools, glossaryField, getApprovals } = makeHarnessContext()
   let callIndex = 0
   globalThis.fetch = async () => {
     callIndex++
@@ -128,6 +140,8 @@ test("runAgentTurn executes multi-step Gemini functionCall -> functionResponse l
   assert.equal(result.toolTrace[0].name, "web_search")
   assert.equal(result.toolTrace[1].name, "update_glossary")
   assert.ok(glossaryField.value.includes("五条悟 = Gojo Satoru"))
+  // Reading the web in this turn forces every later write through explicit approval.
+  assert.deepEqual(getApprovals().map((a) => a.name), ["update_glossary"])
   assert.match(result.answer, /Gojo Satoru/)
   assert.ok(events.includes("tool_start") && events.includes("tool_end") && events.includes("assistant"))
 })
@@ -235,4 +249,125 @@ test("web_search supports multi-query deduplication and fences web output with E
   const fetchRes = await tools.execute("fetch_url", { url: "https://en.wikipedia.org/wiki/Test" }, { allowWebSearch: true })
   assert.equal(fetchRes.ok, true)
   assert.ok(fetchRes.modelText.startsWith(EXTERNAL_WEB_CONTENT_NOTICE))
+})
+
+test("runAgentTurn approves bulk/destructive writes by default and forces approval after web content", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const settings = {
+    provider: "openai",
+    baseUrl: "http://localhost:11434/v1",
+    llmModel: "qwen2.5:7b",
+    source: "Japanese",
+    target: "Vietnamese",
+  }
+  const toolReply = (name, args) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{ id: "c_" + name, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+        },
+      }],
+    }),
+  })
+  const finalReply = {
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: "Đã xong." } }] }),
+  }
+  const script = (steps) => {
+    let index = 0
+    return async () => (index < steps.length ? steps[index++] : finalReply)
+  }
+
+  // Default (confirmBulkEdits omitted) now routes a destructive write through approval.
+  {
+    const { state, tools, getApprovals } = makeHarnessContext()
+    globalThis.fetch = script([toolReply("delete_box", { boxId: "b1" })])
+    await runAgentTurn({ userMessage: "Xóa khung b1", settings, tools })
+    assert.deepEqual(getApprovals().map((a) => a.name), ["delete_box"])
+    assert.equal(state.pages[0].boxes.length, 0)
+  }
+
+  // Explicit opt-out still skips approval for ordinary (non-bulk) edits.
+  {
+    const { tools, getApprovals } = makeHarnessContext()
+    globalThis.fetch = script([toolReply("update_box", { boxId: "b1", text: "Mới" })])
+    await runAgentTurn({ userMessage: "Sửa khung b1", settings, tools, confirmBulkEdits: false })
+    assert.equal(getApprovals().length, 0)
+  }
+
+  // ...but once the turn has read web content, even confirmBulkEdits: false cannot skip approval.
+  {
+    const { tools, getApprovals } = makeHarnessContext()
+    globalThis.fetch = script([
+      toolReply("web_search", { query: "manga" }),
+      toolReply("update_box", { boxId: "b1", text: "Nội dung lấy từ web" }),
+    ])
+    const result = await runAgentTurn({
+      userMessage: "Tra web rồi sửa khung",
+      settings,
+      tools,
+      confirmBulkEdits: false,
+      maxSteps: 4,
+    })
+    assert.deepEqual(getApprovals().map((a) => a.name), ["update_box"])
+    assert.equal(result.toolTrace[1].ok, true)
+  }
+
+  // A denied approval keeps the document untouched.
+  {
+    const { state, tools, getApprovals } = makeHarnessContext({ approve: () => ({ approved: false, reason: "Không đồng ý" }) })
+    globalThis.fetch = script([
+      toolReply("web_search", { query: "manga" }),
+      toolReply("update_box", { boxId: "b1", text: "Bị chặn" }),
+    ])
+    const result = await runAgentTurn({
+      userMessage: "Tra web rồi sửa khung",
+      settings,
+      tools,
+      confirmBulkEdits: false,
+      maxSteps: 4,
+    })
+    assert.equal(getApprovals().length, 1)
+    assert.equal(result.toolTrace[1].ok, false)
+    assert.equal(state.pages[0].boxes[0].text, "こんにちは")
+  }
+})
+
+test("tools.execute fails closed when a write needs approval but no approver is registered", async () => {
+  const state = {
+    pages: [{
+      id: "p1",
+      name: "01.png",
+      image: { naturalWidth: 800, naturalHeight: 1200 },
+      boxes: [{ id: "b1", text: "Giữ nguyên", x: 0.1, y: 0.1, w: 0.3, h: 0.1, size: 24, font: "Arial", color: "#000000", align: "center" }],
+      unplaced: [],
+    }],
+    queue: [],
+    pageId: "p1",
+    boxId: "b1",
+    selectedBoxIds: new Set(["b1"]),
+  }
+  const tools = createAgentTools({
+    state,
+    byId: () => null,
+    selectedPage: () => state.pages[0],
+    selectedIndex: () => 0,
+    checkpoint: () => {},
+    render: () => {},
+  })
+
+  const blocked = await tools.execute("update_box", { boxId: "b1", text: "Đổi" }, { allowEdits: true, forceWriteApproval: true })
+  assert.equal(blocked.ok, false)
+  assert.match(blocked.error, /phê duyệt/)
+  assert.equal(state.pages[0].boxes[0].text, "Giữ nguyên")
+
+  assert.equal(tools.needsApproval("update_box", {}, { forceWriteApproval: true }), true)
+  assert.equal(tools.needsApproval("update_box", {}, { confirmBulkEdits: false, forceWriteApproval: false }), false)
+  assert.equal(tools.needsApproval("delete_box", {}, { confirmBulkEdits: true }), true)
 })
