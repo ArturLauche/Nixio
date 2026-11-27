@@ -13,7 +13,7 @@ import {
 } from "./presets.js"
 import { applyTheme, loadTheme, saveTheme } from "./theme.js"
 
-import { copyEditor, EditHistory } from "./history.js"
+import { checkUndoToken, copyEditor, EditHistory } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
@@ -114,7 +114,7 @@ function commitLiveFormCheckpoint() {
 }
 
 function releaseUnusedImages() {
-  const snapshots = [state, ...history.past, ...history.future]
+  const snapshots = [state, ...history.snapshots()]
   const used = new Set(snapshots.flatMap(({ pages }) => pages.map(({ url }) => url)))
   for (const url of ownedUrls) {
     if (used.has(url)) continue
@@ -123,7 +123,7 @@ function releaseUnusedImages() {
   }
 }
 
-function checkpoint(snapshot) {
+function checkpoint(snapshot, meta) {
   if (!snapshot) {
     if (nudgeSnapshot) {
       commitNudgeCheckpoint()
@@ -132,15 +132,16 @@ function checkpoint(snapshot) {
       const pending = formEditSnapshot
       formEditSnapshot = null
       projects.changed()
-      history.record(pending)
+      const token = history.record(pending, meta)
       syncProjectActions()
-      return
+      return token
     }
     snapshot = editorSnapshot()
   }
   projects.changed()
-  history.record(snapshot)
+  const token = history.record(snapshot, meta)
   syncProjectActions()
+  return token
 }
 
 function syncSelectionAfterRestore() {
@@ -166,6 +167,32 @@ function restoreHistory(direction) {
   render()
   releaseUnusedImages()
   status(direction === "undo" ? "Đã hoàn tác." : "Đã làm lại.")
+}
+
+function pendingHistoryEdit() {
+  return Boolean(formEditSnapshot || nudgeSnapshot || nudgeTimer)
+}
+
+// A notification's one-click undo must hit the exact action it describes. Once unrelated
+// edits, timeline moves or an in-flight edit take over, it refuses instead of rewinding them.
+function undoCleanupAction(token) {
+  const check = checkUndoToken(history, token, {
+    busy: projectBusy(),
+    gesturing: gestures.hasGesture(),
+    pending: pendingHistoryEdit(),
+  })
+  if (!check.ok) {
+    status(check.message, true)
+    notify({
+      kind: "warning",
+      title: "Không thể hoàn tác thao tác đã chọn",
+      message: check.message,
+      key: "clean-raw-undo",
+    })
+    return false
+  }
+  restoreHistory("undo")
+  return true
 }
 
 function renderFontOptions() {
@@ -696,7 +723,7 @@ async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true,
   try {
     const { file, engine } = await cleanRawPageImage(page, options)
     const decoded = await openImage(file)
-    checkpoint()
+    const token = checkpoint(undefined, { label: `Làm sạch raw trang ${page.name}`, kind: "raw-cleanup" })
     page.file = decoded.file
     page.image = decoded.image
     page.url = decoded.url
@@ -707,7 +734,7 @@ async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true,
       title: "Đã làm sạch ảnh raw",
       message: `Trang ${page.name} đã được xử lý cân bằng giấy & khử nhiễu (${engine === "native-cs" ? "lõi C#" : "JS"}).`,
       key: `clean-raw-${page.id}`,
-      actions: [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }],
+      actions: [{ label: "Hoàn tác", onClick: () => undoCleanupAction(token) }],
     })
   } catch (error) {
     status("Không thể làm sạch ảnh raw. " + error.message, true)
@@ -730,6 +757,7 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
   const total = state.pages.length
   let cleaned = 0
   let engineLabel = "JS"
+  let token = null
   let recorded = false
   try {
     for (let i = 0; i < state.pages.length; i++) {
@@ -740,7 +768,7 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
       if (cleanRawController.signal.aborted) break
       const decoded = await openImage(file)
       if (!recorded) {
-        checkpoint()
+        token = checkpoint(undefined, { label: `Làm sạch raw cả chương (${total} trang)`, kind: "raw-cleanup" })
         recorded = true
       }
       page.file = decoded.file
@@ -762,7 +790,7 @@ async function runCleanRawChapter(options = { strength: 0.7, denoise: true, shar
         title: stopped ? "Đã dừng làm sạch raw" : "Hoàn tất làm sạch raw cả chương",
         message: `Đã xử lý ${cleaned}/${total} trang (${engineLabel}).`,
         key: "clean-raw-chapter",
-        actions: [{ label: "Hoàn tác", onClick: () => restoreHistory("undo") }],
+        actions: [{ label: "Hoàn tác", onClick: () => undoCleanupAction(token) }],
       })
     }
   } catch (error) {
