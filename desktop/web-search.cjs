@@ -6,7 +6,9 @@ const zlib = require("node:zlib")
 const MAX_FETCH_BYTES = 512 * 1024
 const MAX_HTML_DEPTH = 512
 const MAX_REDIRECTS = 5
-const TIMEOUT_MS = 12000
+// A single deadline covers the whole redirect chain, so 6 hops cannot stretch the wait
+// to MAX_REDIRECTS × a per-hop timeout.
+const CHAIN_TIMEOUT_MS = 20000
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const USER_AGENT = "KhungThoai/1.0 (Manga Editor Research Harness)"
 const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
@@ -96,6 +98,15 @@ function isSafePublicHttpsUrl(rawUrl) {
   }
   if (isPrivateIp(host)) return null
   return parsed.href
+}
+
+function isTextualContentType(contentType) {
+  const type = String(contentType || "").split(";")[0].trim().toLowerCase()
+  // A missing header is not a reason to reject: the parser decides what it can use.
+  if (!type) return true
+  if (type.startsWith("text/")) return true
+  if (type === "application/json" || type === "application/xml" || type === "application/xhtml+xml" || type === "application/javascript") return true
+  return type.endsWith("+json") || type.endsWith("+xml")
 }
 
 function defaultLookup(hostname) {
@@ -269,9 +280,16 @@ function requestOnce(targetUrl, { address, headers = {}, maxBytes = MAX_FETCH_BY
         empty(location)
         return
       }
+      const contentType = res.headers["content-type"] || ""
       if (status < 200 || status >= 300) {
         res.destroy()
         empty(null)
+        return
+      }
+      if (!isTextualContentType(contentType)) {
+        // Never buffer or parse binaries (images, PDFs, archives): stop before downloading.
+        res.destroy()
+        finish(resolve, { status, location: null, text: "", contentType, binary: true })
         return
       }
 
@@ -280,7 +298,7 @@ function requestOnce(targetUrl, { address, headers = {}, maxBytes = MAX_FETCH_BY
       const collect = () => {
         try {
           const body = decodeBody(Buffer.concat(chunks), res.headers["content-encoding"], maxBytes)
-          finish(resolve, { status, location: null, text: body.toString("utf8") })
+          finish(resolve, { status, location: null, text: body.toString("utf8"), contentType })
         } catch (error) {
           finish(reject, error)
         }
@@ -305,24 +323,25 @@ function requestOnce(targetUrl, { address, headers = {}, maxBytes = MAX_FETCH_BY
   })
 }
 
-async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYTES, signal, lookup, request } = {}) {
+async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYTES, signal, lookup, request, timeoutMs = CHAIN_TIMEOUT_MS } = {}) {
   const resolveAddress = lookup ?? defaultLookup
   const send = request ?? requestOnce
 
   let current = isSafePublicHttpsUrl(rawUrl)
   if (!current) throw new Error("Chỉ cho phép truy cập đường dẫn HTTPS công khai.")
 
+  // One deadline for the entire chain (all hops, not one timeout each).
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const chainSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
+
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     // Validate + pin on EVERY hop: DNS is re-resolved after each redirect and the socket
     // goes to that exact address, so an internal target cannot be reached via a rebound
     // name or a redirect chain.
     const address = await resolvePublicAddress(new URL(current).hostname, { lookup: resolveAddress })
-    const hopSignal = signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)])
-      : AbortSignal.timeout(TIMEOUT_MS)
     let response
     try {
-      response = await send(current, { address, headers, maxBytes, signal: hopSignal })
+      response = await send(current, { address, headers, maxBytes, signal: chainSignal })
     } catch (error) {
       if (!signal?.aborted && (error?.name === "AbortError" || error?.name === "TimeoutError")) {
         throw new Error("Hết thời gian chờ phản hồi từ máy chủ.")
@@ -339,6 +358,9 @@ async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYT
       throw new Error(REDIRECT_STATUSES.has(response.status)
         ? "Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn."
         : `Máy chủ trả mã lỗi ${response.status}.`)
+    }
+    if (response.binary) {
+      throw new Error(`Máy chủ trả về nội dung không phải văn bản (${response.contentType}).`)
     }
     return { url: current, text: String(response.text ?? "") }
   }
@@ -438,6 +460,7 @@ module.exports = {
   resolvePublicAddress,
   fetchTextLimited,
   decodeBody,
+  isTextualContentType,
   stripHtmlToText,
   parseDuckDuckGoHtml,
   webSearch,
