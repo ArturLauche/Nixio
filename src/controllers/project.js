@@ -38,6 +38,7 @@ export function setupProjects({
   renderFontOptions,
   notify,
   onProjectSwitch,
+  translationMemory,
 }) {
   const projectFile = byId("project-file")
   let projectName
@@ -97,6 +98,8 @@ export function setupProjects({
       settings,
       currentPage: selectedIndex(),
       fit: state.fit,
+      // The pairs travel with the project: a reopened file can reuse them without the provider.
+      translationMemory: translationMemory?.snapshot?.(),
     })
   }
 
@@ -253,6 +256,9 @@ export function setupProjects({
       state.queue = project.queue
       state.presets = mergePresets(loadGlobalPresets(), project.presets)
       state.fit = project.fit
+      // A file that predates the memory carries no pairs, so the store is replaced with whatever
+      // this project has: never with the previous project's pairs.
+      translationMemory?.replace?.(project.translationMemory)
       state.zoom = null
       state.selectedBoxIds?.clear()
       updateFitLabel()
@@ -390,6 +396,7 @@ export function setupProjects({
     state.selectedBoxIds?.clear()
     state.projectId = crypto.randomUUID()
     projectName = undefined
+    translationMemory?.clear?.()
     generation++
     lastWebSnapshot = null
     savedKind = null

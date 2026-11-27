@@ -17,6 +17,7 @@ import { holdFocus } from "./focus.js"
 import { compareMode, toggleCompare } from "./compare.js"
 import { outlineMarks, showsTransformHandles } from "./selection.js"
 import { applyBoxText, boxLabel, boxTextError } from "./box-text.js"
+import { createTranslationMemoryStore } from "./translation-memory.js"
 
 import { checkUndoToken, copyEditor, EditHistory, HISTORY_HEAD, HISTORY_START } from "./history.js"
 import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
@@ -49,6 +50,9 @@ import { CREDENTIAL_SETTINGS_CODES, migrateLegacyCredentials } from "./credentia
 
 const history = new EditHistory()
 const ownedUrls = new Set()
+// One translation memory per editing session: opening or creating a project replaces it, and the
+// project manifest is where its pairs are saved.
+const translationMemory = createTranslationMemoryStore()
 const byId = (id) => document.getElementById(id)
 const stage = byId("stage")
 const overlays = byId("overlays")
@@ -92,6 +96,9 @@ let nativeReady = false
 let nativeLanguages = []
 let formEditSnapshot = null
 let shortcuts = null
+// Set once the translation controller exists: `render()` also runs before it is created, and the
+// panel reads the store through this hook so the page on screen and its suggestions stay in step.
+let syncTranslationMemory = () => {}
 
 // One live form session is one action, so its deferred checkpoint keeps a name the timeline and
 // the one-click undo can show instead of the generic fallback.
@@ -611,6 +618,7 @@ function syncTranslationActions() {
     element.dataset.state = page.translationJob?.state ?? "pending"
     element.textContent = translationLabel(page, settings)
   })
+  syncTranslationMemory()
   chat?.refreshModelBadge()
 }
 
@@ -1440,6 +1448,7 @@ function render() {
   renderPages()
   renderCanvas()
   renderInspector()
+  syncTranslationMemory()
 }
 
 async function openImage(file) {
@@ -2071,12 +2080,14 @@ const translation = setupTranslation({
   ...shared,
   pageForScript,
   applyTranslation,
+  translationMemory,
   configWritesReady: credentialMigration,
   onSettingsChange: () => {
     syncTranslationActions()
     chat?.refreshModelBadge()
   },
 })
+syncTranslationMemory = () => translation.syncMemory()
 const projects = setupProjects({
   ...shared, projectSettings, defaultProjectSettings, history, openImage,
   selectPage, selectedIndex, updateFitLabel, releaseUnusedImages,
@@ -2085,6 +2096,7 @@ const projects = setupProjects({
   commitLiveForm: commitLiveFormCheckpoint,
   registerFontName,
   renderFontOptions,
+  translationMemory,
   onProjectSwitch: () => {
     chat?.syncProjectSession()
     translation.refreshGlossaryStatus()

@@ -10,6 +10,12 @@ import {
   translationNotes,
   translationSignature,
 } from "../translation.js"
+import {
+  boxStyleSignature,
+  createTranslationMemoryStore,
+  normalizeSourceText,
+  translationMemoryScope,
+} from "../translation-memory.js"
 import { resolveSkillPrompt } from "../agent-skills.js"
 import { glossaryStatusText, parseTerminologyGraph } from "../terminology-graph.js"
 import { groupDialogue } from "../io.js"
@@ -41,8 +47,12 @@ export function setupTranslation({
   configWritesReady,
   notify,
   notifyOverflowIfAny,
+  translationMemory,
 }) {
   let translationController
+  // The project owns the pairs; a caller that does not supply a store (tests, the browser panel
+  // alone) still gets a working memory for this session.
+  const memory = translationMemory ?? createTranslationMemoryStore()
 
   function loadStoredLlmConfig() {
     try {
@@ -247,6 +257,62 @@ export function setupTranslation({
     }
   }
 
+  // --- Translation memory panel (Nixio #63) ----------------------------------------------------
+  //
+  // The panel only ever reports the store and offers the near matches for the page on screen. The
+  // pairs themselves are applied by `translateExistingBoxes` below, so the count and the action here
+  // describe the same store the translation path reads.
+  function memoryScope() {
+    return translationMemoryScope(readTranslationSettings())
+  }
+
+  // A plan is recomputed only when something that can change its answer changed: the store, the
+  // page, or the text of its boxes. `render()` runs on every canvas frame, so this stays O(boxes).
+  let memoryPlanKey = null
+  let memoryPlan = { hits: [], suggestions: [], pending: [] }
+
+  function pageMemoryPlan(page) {
+    const settings = readTranslationSettings()
+    const key = [
+      memory.revision, page?.id ?? "", settings.source, settings.target, settings.glossary,
+      (page?.boxes ?? []).map((box) => box.text).join("\u0000"),
+    ].join("\u0001")
+    if (key !== memoryPlanKey) {
+      memoryPlanKey = key
+      memoryPlan = page
+        ? memory.plan(page.boxes, { scope: memoryScope(), page: page.name })
+        : { hits: [], suggestions: [], pending: [] }
+    }
+    return memoryPlan
+  }
+
+  function syncMemory() {
+    const summary = memory.summary(memoryScope())
+    const page = selectedPage()
+    const suggestions = page ? pageMemoryPlan(page).suggestions.length : 0
+    byId("translation-memory-status").textContent = summary.total
+      ? `Bộ nhớ dịch: ${summary.total} cặp đã lưu (${summary.reviewed} cặp đã duyệt)` +
+        (suggestions ? ` · ${suggestions} gợi ý từ bộ nhớ cho trang này.` : ".")
+      : "Bộ nhớ dịch: chưa có cặp nào trong dự án."
+    const button = byId("use-approved-translation")
+    button.disabled = !suggestions || projectBusy()
+    button.textContent = suggestions ? `Dùng bản đã duyệt (${suggestions})` : "Dùng bản đã duyệt"
+  }
+
+  // Accepting a suggestion writes the pair into the boxes and records it as reviewed, so the next
+  // identical line is reused without the provider ever being asked again.
+  function useApprovedTranslation() {
+    const page = selectedPage()
+    if (!page || projectBusy()) return
+    const plan = pageMemoryPlan(page)
+    if (!plan.suggestions.length) return status("Không có bản gần đúng nào trong bộ nhớ dịch cho trang này.", true)
+    checkpoint(undefined, { label: `Dùng bộ nhớ dịch cho trang ${page.name}`, kind: "translate" })
+    const accepted = memory.accept(plan.suggestions, { scope: memoryScope(), page: page.name })
+    const applied = memory.apply(plan.suggestions)
+    status(`Đã dùng ${applied} bản từ bộ nhớ dịch cho trang ${page.name} và duyệt ${accepted.length} cặp.`)
+    render()
+  }
+
   // Main answers a request that has no stored credential through a fixed code, so the article status
   // stays Vietnamese while the renderer never repeats main's own wording or a raw provider header.
   function providerFailureText(error, provider) {
@@ -283,6 +349,7 @@ export function setupTranslation({
       return status(error.message, true)
     }
     const signature = translationSignature(settings)
+    const scope = translationMemoryScope(settings)
     const previousPage = state.pages[state.pages.indexOf(pages[0]) - 1]
     let context =
       previousPage?.translationContext?.signature === signature
@@ -316,6 +383,12 @@ export function setupTranslation({
         if (lines.length) {
           placed += applyTranslation(page, lines)
           skipped += page.unplaced.length
+          // Page translation learns the same pairs the box path does, so a later identical line is
+          // already in the memory when the user asks for it there.
+          for (const { source, text } of lines) {
+            if (!source || !text) continue
+            memory.record({ source, target: text }, { scope, page: page.name })
+          }
           context = [
             ...context,
             ...lines
@@ -384,13 +457,29 @@ export function setupTranslation({
     const page = selectedPage()
     if (projectBusy() || !page) return
     if (!page.boxes.length) return status("Trang hiện tại chưa có khung chữ nào để dịch.", true)
+    // A translation overwrites the source text, and the memory is keyed on exactly that text, so the
+    // sources are read before anything writes to the boxes.
+    const settingsInput = readTranslationSettings()
+    const signature = translationSignature(settingsInput)
+    const scope = translationMemoryScope(settingsInput)
+    const sources = new Map(page.boxes.map((box) => [box.id, normalizeSourceText(box.text)]))
+    const plan = memory.plan(page.boxes, { scope, page: page.name })
+    // A page the memory already covers needs no key, no request and no spinner.
+    if (!plan.pending.length) {
+      checkpoint(undefined, { label: `Áp dụng bộ nhớ dịch cho trang ${page.name}`, kind: "translate" })
+      const applied = memory.apply(plan.hits)
+      page.translationJob = { kind: "translate", signature, state: "done" }
+      status(`Đã dùng bộ nhớ dịch cho ${applied}/${page.boxes.length} khung chữ, không gọi API.`)
+      render()
+      return
+    }
     let settings
     try {
-      settings = prepareCredentials(readTranslationSettings())
+      settings = prepareCredentials(settingsInput)
     } catch (error) {
       return status(error.message, true)
     }
-    const signature = translationSignature(settings)
+    const reused = memory.apply(plan.hits)
     const previousPage = state.pages[state.pages.indexOf(page) - 1]
     const context =
       previousPage?.translationContext?.signature === signature
@@ -405,15 +494,20 @@ export function setupTranslation({
     try {
       const report = (message) => status(page.name + " · " + message)
       const requestSettings = { ...settings, notes: translationNotes(settings), context, report, signal: translationController.signal }
-      const translated = await translateBoxesForProvider(settings.provider, page, page.boxes, requestSettings)
+      const translated = await translateBoxesForProvider(settings.provider, page, plan.pending, requestSettings)
       translationController.signal.throwIfAborted()
       const byBoxId = new Map(translated.map((item) => [item.boxId, item]))
-      let updated = 0
-      for (const box of page.boxes) {
+      let updated = reused
+      for (const box of plan.pending) {
         const match = byBoxId.get(box.id)
         if (!match?.text) continue
         box.text = match.text
         updated++
+        // A provider answer is remembered unreviewed: it is offered next time, not trusted silently.
+        memory.record(
+          { source: sources.get(box.id) ?? "", target: match.text },
+          { scope, page: page.name, style: boxStyleSignature(box) },
+        )
       }
       page.translationContext = {
         signature,
@@ -426,7 +520,8 @@ export function setupTranslation({
         ].slice(-8),
       }
       page.translationJob = { kind: "translate", signature, state: "done" }
-      status(`Đã dịch ${updated}/${page.boxes.length} khung chữ trên trang.`)
+      status(`Đã dịch ${updated}/${page.boxes.length} khung chữ trên trang` +
+        (reused ? `, dùng lại ${reused} cặp từ bộ nhớ dịch` : "") + ".")
       notifyOverflowIfAny?.(page, "sau khi dịch khung chữ")
     } catch (error) {
       const stopped = translationController.signal.aborted
@@ -462,6 +557,7 @@ export function setupTranslation({
   }
 
   byId("translate-boxes").onclick = translateExistingBoxes
+  byId("use-approved-translation").onclick = useApprovedTranslation
   byId("translate").onclick = () =>
     processPages([selectedPage()].filter(Boolean), imageTranslator, "dịch")
   byId("translate-all").onclick = () =>
@@ -490,6 +586,7 @@ export function setupTranslation({
 
   byId("translation-glossary")?.addEventListener("input", refreshGlossaryStatus)
   refreshGlossaryStatus()
+  syncMemory()
 
-  return { settings: readTranslationSettings, refreshGlossaryStatus }
+  return { settings: readTranslationSettings, refreshGlossaryStatus, syncMemory }
 }
