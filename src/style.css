@@ -214,6 +214,19 @@ label:has(> .sr-only:focus-visible), label:has(+ .sr-only:focus-visible) {
 }
 .header-export { white-space: nowrap; }
 
+/* Locale picker: the same dense shell as its neighbouring header buttons. */
+.header-locale select {
+  min-height: 28px;
+  border: 1px solid #2c3340;
+  border-radius: var(--radius-sm);
+  background: #1b2028;
+  color: #dde3ec;
+  font-size: .78rem;
+  font-weight: 560;
+  padding: 3px 6px;
+}
+.header-locale select:hover { background: #262d38; border-color: #3f495a; color: #ffffff; }
+
 /* 3-Pane Fixed-Height Workstation Shell */
 .editor-layout {
   display: grid;

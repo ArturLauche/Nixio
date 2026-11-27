@@ -1,3 +1,4 @@
+import { dateLocale, DEFAULT_LOCALE } from "../i18n.js"
 import { readProject, writeProject, projectExtension } from "../project.js"
 import { filenameStem, saveFile } from "../io.js"
 import { loadGlobalPresets, mergePresets } from "../presets.js"
@@ -39,6 +40,7 @@ export function setupProjects({
   notify,
   onProjectSwitch,
   translationMemory,
+  locale = () => DEFAULT_LOCALE,
 }) {
   const projectFile = byId("project-file")
   let projectName
@@ -354,7 +356,7 @@ export function setupProjects({
           restore.disabled = busy
           if (busy) restore.title = busyReason
           restore.textContent =
-            "Khôi phục " + new Date(snapshot.updatedAt).toLocaleString("vi-VN")
+            "Khôi phục " + new Date(snapshot.updatedAt).toLocaleString(dateLocale(locale()))
           restore.onclick = () => {
             byId("project-library").close()
             openNativeProject({
@@ -451,7 +453,7 @@ export function setupProjects({
       savedKind = "native"
       savedWebId = null
       byId("autosave-status").textContent =
-        "Đã tự lưu lúc " + new Date().toLocaleTimeString("vi-VN")
+        "Đã tự lưu lúc " + new Date().toLocaleTimeString(dateLocale(locale()))
       await refreshRecovery()
       return true
     } catch (error) {
@@ -518,7 +520,7 @@ export function setupProjects({
     return [
       snapshot.name,
       `${snapshot.pageCount} trang`,
-      new Date(snapshot.savedAt).toLocaleString("vi-VN"),
+      new Date(snapshot.savedAt).toLocaleString(dateLocale(locale())),
       snapshot.legacy ? "bản cũ" : null,
       snapshot.mine ? null : "phiên khác",
     ]
@@ -568,7 +570,7 @@ export function setupProjects({
       return
     }
     const newest = snapshots[0]
-    const time = new Date(newest.savedAt).toLocaleTimeString("vi-VN")
+    const time = new Date(newest.savedAt).toLocaleTimeString(dateLocale(locale()))
     statusLine.textContent =
       snapshots.length === 1
         ? `Bản tự lưu trên trình duyệt (${newest.pageCount} trang) lúc ${time}.`

@@ -1,3 +1,5 @@
+import { createTranslator, DEFAULT_LOCALE, formatTime } from "./i18n.js"
+
 const VALID_KINDS = new Set(["info", "success", "warning", "error", "update"])
 const DEFAULT_DURATIONS = {
   info: 5000,
@@ -151,15 +153,16 @@ const KIND_ICONS = {
   update: "↑",
 }
 
-function formatShortTime(ts) {
-  try {
-    return new Date(ts).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
-  } catch {
-    return ""
-  }
+function formatShortTime(ts, locale = DEFAULT_LOCALE) {
+  return formatTime(locale, ts, { hour: "2-digit", minute: "2-digit" })
 }
 
-export function createNotificationCenter({ byId, store = new NotificationStore() }) {
+export function createNotificationCenter({
+  byId,
+  store = new NotificationStore(),
+  locale = () => DEFAULT_LOCALE,
+  t = createTranslator(DEFAULT_LOCALE).t,
+}) {
   const toastContainer = byId("toast-container")
   const panel = byId("notifications-panel")
   const listEl = byId("notifications-list")
@@ -264,7 +267,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         const close = document.createElement("button")
         close.type = "button"
         close.className = "toast-close"
-        close.setAttribute("aria-label", "Đóng thông báo")
+        close.setAttribute("aria-label", t("notifications.itemClose"))
         close.textContent = "×"
         close.onclick = () => {
           paused.delete(item.id)
@@ -310,10 +313,10 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         badge.className = "notif-item-icon"
         badge.textContent = KIND_ICONS[item.kind] ?? "ℹ"
         const title = document.createElement("strong")
-        title.textContent = item.title || "Thông báo"
+        title.textContent = item.title || t("notifications.title")
         const time = document.createElement("span")
         time.className = "notif-time"
-        time.textContent = formatShortTime(item.createdAt)
+        time.textContent = formatShortTime(item.createdAt, locale())
         head.append(badge, title, time)
 
         li.append(head)
@@ -362,6 +365,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
 
   return {
     store,
+    render: () => renderSnapshot(store.snapshot()),
     notify(options) {
       return store.add(options)
     },

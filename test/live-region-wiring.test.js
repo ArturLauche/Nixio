@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+
+import { createTranslator } from "../src/i18n.js"
 import { readFile } from "node:fs/promises"
 import { announce } from "../src/live-region.js"
 
@@ -102,8 +104,9 @@ test("a page change announces the name of the page, not only its index", () => {
   const announcementFor = (index) => new Function(
     "selectedIndex",
     "state",
+    "t",
     `${mainFunction("pageAnnouncement")}\nreturn pageAnnouncement`,
-  )(() => index, { pages })
+  )(() => index, { pages }, createTranslator("vi").t)
 
   assert.equal(announcementFor(1)(), "Trang 2 / 2: 2.png")
   assert.equal(announcementFor(-1)(), "Chưa có trang")
