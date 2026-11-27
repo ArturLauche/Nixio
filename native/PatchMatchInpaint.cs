@@ -1,4 +1,6 @@
+using System.Numerics;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 
 /// <summary>
 /// Multi-scale PatchMatch + EM similarity-weighted voting + per-channel colour adaptation
@@ -49,6 +51,7 @@ internal static class PatchMatchInpaint
         var patchRadius = Math.Clamp((int?)options["patchRadius"] ?? 3, 1, 5);
         var colorAdapt = (bool?)options["colorAdapt"] ?? true;
         var seamless = (bool?)options["seamless"] ?? true;
+        var structureWeight = Math.Clamp((float?)options["structureWeight"] ?? 0.15f, 0f, 1f);
         var seed = (ulong)((long?)options["seed"] ?? 1L);
 
         var output = new byte[rgbaLen];
@@ -100,7 +103,7 @@ internal static class PatchMatchInpaint
 
         var originalRgb = seamless ? (float[])rgb.Clone() : null;
         var localHoleBox = new Box(hx0 - win.X0, hy0 - win.Y0, hx1 - win.X0, hy1 - win.Y0);
-        Complete(ww, wh, rgb, hole, localHoleBox, patchRadius, colorAdapt, seed);
+        Complete(ww, wh, rgb, hole, localHoleBox, patchRadius, colorAdapt, structureWeight, seed);
         if (seamless && originalRgb is not null)
         {
             PoissonBlend.SeamlessInpaintBlendRgb(ww, wh, rgb, originalRgb, hole);
@@ -141,7 +144,7 @@ internal static class PatchMatchInpaint
         }
     }
 
-    private static void Complete(int w, int h, float[] rgb, byte[] hole, Box hb0, int r, bool colorAdapt, ulong seed)
+    private static void Complete(int w, int h, float[] rgb, byte[] hole, Box hb0, int r, bool colorAdapt, float structureWeight, ulong seed)
     {
         var pyramid = BuildPyramid(w, h, rgb, hole, hb0, r);
         var levels = pyramid.Count;
@@ -191,6 +194,8 @@ internal static class PatchMatchInpaint
             var nnfY = new int[tb.Area];
             var cost = new float[tb.Area];
             Array.Fill(cost, float.PositiveInfinity);
+            var grad = structureWeight > 0f ? new float[lw * lh * 2] : null;
+            if (grad is not null) ComputeGradients(lw, lh, level.Rgb, grad);
 
             var rngState = seed ^ ((ulong)(li + 1) * 0x9E3779B97F4A7C15UL);
             if (rngState == 0) rngState = 1;
@@ -202,8 +207,9 @@ internal static class PatchMatchInpaint
 
             if (upsampled)
             {
-                ComputeCosts(lw, lh, r, level.Rgb, tb, targets, nnfX, nnfY, cost, colorAdapt);
+                ComputeCosts(lw, lh, r, level.Rgb, grad, structureWeight, tb, targets, nnfX, nnfY, cost, colorAdapt);
                 Vote(lw, lh, r, level.Rgb, level.Hole, tb, targets, nnfX, nnfY, cost, colorAdapt);
+                if (grad is not null) ComputeGradients(lw, lh, level.Rgb, grad);
             }
 
             var extent = Math.Max(hb.Width, hb.Height);
@@ -213,13 +219,14 @@ internal static class PatchMatchInpaint
 
             for (var em = 0; em < emIters; em++)
             {
-                ComputeCosts(lw, lh, r, level.Rgb, tb, targets, nnfX, nnfY, cost, colorAdapt);
+                ComputeCosts(lw, lh, r, level.Rgb, grad, structureWeight, tb, targets, nnfX, nnfY, cost, colorAdapt);
                 for (var pm = 0; pm < pmIters; pm++)
                 {
                     var forward = (pm & 1) == 0;
-                    PatchMatchPass(lw, lh, r, level.Rgb, tb, targets, valid, nnfX, nnfY, cost, forward, colorAdapt, ref rngState);
+                    PatchMatchPass(lw, lh, r, level.Rgb, grad, structureWeight, tb, targets, valid, nnfX, nnfY, cost, forward, colorAdapt, ref rngState);
                 }
                 Vote(lw, lh, r, level.Rgb, level.Hole, tb, targets, nnfX, nnfY, cost, colorAdapt);
+                if (grad is not null) ComputeGradients(lw, lh, level.Rgb, grad);
             }
 
             prevNnfX = nnfX;
@@ -620,19 +627,58 @@ internal static class PatchMatchInpaint
         return upsampled;
     }
 
-    private static void ComputeCosts(int w, int h, int r, float[] rgb, Box tb, bool[] targets, int[] nnfX, int[] nnfY, float[] cost, bool colorAdapt)
+    private static void ComputeGradients(int w, int h, float[] rgb, float[] grad)
     {
+        static float Luma(float[] buf, int idx)
+        {
+            var o = idx * 3;
+            return 0.299f * buf[o] + 0.587f * buf[o + 1] + 0.114f * buf[o + 2];
+        }
+        Array.Clear(grad, 0, grad.Length);
+        if (w < 3 || h < 3) return;
+        for (var y = 1; y < h - 1; y++)
+        {
+            var row = y * w;
+            for (var x = 1; x < w - 1; x++)
+            {
+                var idx = row + x;
+                var gx = (Luma(rgb, idx + 1) - Luma(rgb, idx - 1)) * 0.5f;
+                var gy = (Luma(rgb, idx + w) - Luma(rgb, idx - w)) * 0.5f;
+                grad[idx * 2] = gx;
+                grad[idx * 2 + 1] = gy;
+            }
+        }
+    }
+
+    private static void ComputeCosts(
+        int w, int h, int r, float[] rgb, float[]? grad, float structureWeight,
+        Box tb, bool[] targets, int[] nnfX, int[] nnfY, float[] cost, bool colorAdapt)
+    {
+        if (tb.Area >= 256)
+        {
+            Parallel.For(0, tb.Height, ty =>
+            {
+                var rowBase = ty * tb.Width;
+                for (var tx = 0; tx < tb.Width; tx++)
+                {
+                    var k = rowBase + tx;
+                    if (!targets[k]) continue;
+                    cost[k] = PatchDistance(w, r, rgb, grad, structureWeight, tb.X0 + tx, tb.Y0 + ty, nnfX[k], nnfY[k], float.PositiveInfinity, colorAdapt);
+                }
+            });
+            return;
+        }
         for (var ty = 0; ty < tb.Height; ty++)
         for (var tx = 0; tx < tb.Width; tx++)
         {
             var k = ty * tb.Width + tx;
             if (!targets[k]) continue;
-            cost[k] = PatchDistance(w, r, rgb, tb.X0 + tx, tb.Y0 + ty, nnfX[k], nnfY[k], float.PositiveInfinity, colorAdapt);
+            cost[k] = PatchDistance(w, r, rgb, grad, structureWeight, tb.X0 + tx, tb.Y0 + ty, nnfX[k], nnfY[k], float.PositiveInfinity, colorAdapt);
         }
     }
 
     private static void PatchMatchPass(
-        int w, int h, int r, float[] rgb, Box tb, bool[] targets, bool[] valid,
+        int w, int h, int r, float[] rgb, float[]? grad, float structureWeight, Box tb, bool[] targets, bool[] valid,
         int[] nnfX, int[] nnfY, float[] cost, bool forward, bool colorAdapt, ref ulong rng)
     {
         var yStart = forward ? 0 : tb.Height - 1;
@@ -664,7 +710,7 @@ internal static class PatchMatchInpaint
                     var cy = nnfY[nk];
                     if ((uint)cx < w && (uint)cy < h && valid[cy * w + cx])
                     {
-                        var d = PatchDistance(w, r, rgb, x, y, cx, cy, bc, colorAdapt);
+                        var d = PatchDistance(w, r, rgb, grad, structureWeight, x, y, cx, cy, bc, colorAdapt);
                         if (d < bc) { bc = d; bx = cx; by = cy; }
                     }
                 }
@@ -679,7 +725,7 @@ internal static class PatchMatchInpaint
                     var cy = nnfY[nk] + step;
                     if ((uint)cx < w && (uint)cy < h && valid[cy * w + cx])
                     {
-                        var d = PatchDistance(w, r, rgb, x, y, cx, cy, bc, colorAdapt);
+                        var d = PatchDistance(w, r, rgb, grad, structureWeight, x, y, cx, cy, bc, colorAdapt);
                         if (d < bc) { bc = d; bx = cx; by = cy; }
                     }
                 }
@@ -696,7 +742,7 @@ internal static class PatchMatchInpaint
                 var cx = xMin + (int)(NextRand(ref rng) % (ulong)(xMax - xMin + 1));
                 var cy = yMin + (int)(NextRand(ref rng) % (ulong)(yMax - yMin + 1));
                 if (!valid[cy * w + cx]) continue;
-                var d = PatchDistance(w, r, rgb, x, y, cx, cy, bc, colorAdapt);
+                var d = PatchDistance(w, r, rgb, grad, structureWeight, x, y, cx, cy, bc, colorAdapt);
                 if (d < bc) { bc = d; bx = cx; by = cy; }
             }
 
@@ -706,26 +752,78 @@ internal static class PatchMatchInpaint
         }
     }
 
-    private static float PatchDistance(int w, int r, float[] rgb, int tx, int ty, int sx, int sy, float cutoff, bool colorAdapt)
+    private static float GradientPatchError(int w, int r, float[] grad, int tx, int ty, int sx, int sy)
+    {
+        var side = 2 * r + 1;
+        var rowLen = side * 2;
+        var vCount = Vector<float>.Count;
+        var vecLimit = rowLen - vCount;
+        var gSum = 0f;
+        for (var dy = -r; dy <= r; dy++)
+        {
+            var tRow = ((ty + dy) * w + (tx - r)) * 2;
+            var sRow = ((sy + dy) * w + (sx - r)) * 2;
+            var i = 0;
+            if (vecLimit >= 0)
+            {
+                var vAcc = Vector<float>.Zero;
+                for (; i <= vecLimit; i += vCount)
+                {
+                    var d = new Vector<float>(grad, tRow + i) - new Vector<float>(grad, sRow + i);
+                    vAcc += d * d;
+                }
+                gSum += Vector.Sum(vAcc);
+            }
+            for (; i < rowLen; i++)
+            {
+                var d = grad[tRow + i] - grad[sRow + i];
+                gSum += d * d;
+            }
+        }
+        return gSum / (side * side * 2f);
+    }
+
+    private static float PatchDistance(
+        int w, int r, float[] rgb, float[]? grad, float structureWeight,
+        int tx, int ty, int sx, int sy, float cutoff, bool colorAdapt)
     {
         var side = 2 * r + 1;
         var count = side * side;
         if (!colorAdapt)
         {
+            var rowLen = side * 3;
+            var vCount = Vector<float>.Count;
+            var vecLimit = rowLen - vCount;
             var limit = float.IsFinite(cutoff) ? cutoff * (count * 3f) : float.PositiveInfinity;
             var sum = 0f;
             for (var dy = -r; dy <= r; dy++)
             {
                 var tRow = ((ty + dy) * w + (tx - r)) * 3;
                 var sRow = ((sy + dy) * w + (sx - r)) * 3;
-                for (var i = 0; i < side * 3; i++)
+                var i = 0;
+                if (vecLimit >= 0)
+                {
+                    var vAcc = Vector<float>.Zero;
+                    for (; i <= vecLimit; i += vCount)
+                    {
+                        var d = new Vector<float>(rgb, tRow + i) - new Vector<float>(rgb, sRow + i);
+                        vAcc += d * d;
+                    }
+                    sum += Vector.Sum(vAcc);
+                }
+                for (; i < rowLen; i++)
                 {
                     var d = rgb[tRow + i] - rgb[sRow + i];
                     sum += d * d;
                 }
                 if (sum > limit) return float.PositiveInfinity;
             }
-            return sum / (count * 3f);
+            var colorDist = sum / (count * 3f);
+            if (structureWeight > 0f && grad is not null)
+            {
+                colorDist += structureWeight * GradientPatchError(w, r, grad, tx, ty, sx, sy);
+            }
+            return colorDist;
         }
 
         // PhotoCraft / Darabi Image Melding per-channel gain+bias distance.
@@ -753,7 +851,13 @@ internal static class PatchMatchInpaint
         var err = ChannelAdaptedError(n, st0, stt0, ss0, sss0, sts0)
             + ChannelAdaptedError(n, st1, stt1, ss1, sss1, sts1)
             + ChannelAdaptedError(n, st2, stt2, ss2, sss2, sts2);
-        return err / (n * 3f);
+        var dist = err / (n * 3f);
+        if (dist >= cutoff) return float.PositiveInfinity;
+        if (structureWeight > 0f && grad is not null)
+        {
+            dist += structureWeight * GradientPatchError(w, r, grad, tx, ty, sx, sy);
+        }
+        return dist;
     }
 
     private static (float Gain, float Bias) FitChannel(float n, float st, float stt, float ss, float sss)

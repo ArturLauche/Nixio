@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 
 /// <summary>
 /// Smart manga raw page cleanup: adaptive auto-levels (whitens yellowed/gray paper
@@ -100,12 +101,12 @@ internal static class RawCleanup
         }
 
         // 2. Fast edge-preserving 3x3 bilateral denoise (preserves crisp ink & screentones).
-        if (denoise && strength > 0.05)
+        if (denoise && strength > 0.05 && height >= 3 && width >= 3)
         {
             var rangeSigma = (float)(12.0 + 18.0 * strength);
             var invTwoSigmaSq = 1f / (2f * rangeSigma * rangeSigma);
             var src = (byte[])output.Clone();
-            for (var y = 1; y < height - 1; y++)
+            void DenoiseRow(int y)
             {
                 var row = y * width;
                 for (var x = 1; x < width - 1; x++)
@@ -140,14 +141,16 @@ internal static class RawCleanup
                     output[co + 2] = ClampByte(sb * inv);
                 }
             }
+            if (pixelCount >= 65_536) Parallel.For(1, height - 1, DenoiseRow);
+            else for (var y = 1; y < height - 1; y++) DenoiseRow(y);
         }
 
         // 3. Gentle unsharp mask for crisp lineart.
-        if (sharpen && strength > 0.1)
+        if (sharpen && strength > 0.1 && height >= 3 && width >= 3)
         {
             var amount = (float)(0.25 + 0.35 * strength);
             var src = (byte[])output.Clone();
-            for (var y = 1; y < height - 1; y++)
+            void SharpenRow(int y)
             {
                 var row = y * width;
                 for (var x = 1; x < width - 1; x++)
@@ -171,6 +174,8 @@ internal static class RawCleanup
                     }
                 }
             }
+            if (pixelCount >= 65_536) Parallel.For(1, height - 1, SharpenRow);
+            else for (var y = 1; y < height - 1; y++) SharpenRow(y);
         }
 
         return (Metadata(low, high), output);

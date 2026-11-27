@@ -1,3 +1,6 @@
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+
 /// <summary>
 /// Gradient-domain Poisson seamless blending via cascadic multigrid + SOR membrane solver
 /// (clean-room C# implementation inspired by PhotoCraft's poisson.rs and Pérez et al., SIGGRAPH 2003).
@@ -165,13 +168,14 @@ internal static class PoissonBlend
 
     /// <summary>
     /// Standard Pérez et al. seamless cloning when <paramref name="srcRgb"/> is a distinct source image.
+    /// Runs the 3 independent RGB harmonic membranes in parallel.
     /// </summary>
     internal static void SeamlessCloneRgb(int w, int h, float[] srcRgb, float[] dstRgb, byte[] hole)
     {
         var len = w * h;
-        var hv = new float[len];
-        for (var c = 0; c < 3; c++)
+        Parallel.For(0, 3, c =>
         {
+            var hv = new float[len];
             for (var i = 0; i < len; i++)
             {
                 hv[i] = hole[i] != 0 ? 0f : dstRgb[i * 3 + c] - srcRgb[i * 3 + c];
@@ -183,7 +187,68 @@ internal static class PoissonBlend
                     ? Math.Clamp(srcRgb[i * 3 + c] + hv[i], 0f, 1f)
                     : dstRgb[i * 3 + c];
             }
+        });
+    }
+
+    /// <summary>
+    /// RPC entry point for PhotoCraft-style Seamless Healing Clone Stamp.
+    /// Payload layout: dstRgba (w*h*4) + srcRgba (w*h*4) + mask (w*h).
+    /// </summary>
+    internal static (JsonObject, byte[]) ExecuteSeamlessClone(JsonObject options, byte[] data)
+    {
+        var width = (int)options["width"]!;
+        var height = (int)options["height"]!;
+        if (width <= 0 || height <= 0 || (long)width * height > 4_000_000)
+            throw new InvalidDataException("Invalid seamless clone dimensions.");
+        var pixelCount = width * height;
+        var rgbaLen = pixelCount * 4;
+        if (data.Length != rgbaLen * 2 + pixelCount)
+            throw new InvalidDataException("Invalid seamless clone payload length.");
+
+        var output = new byte[rgbaLen];
+        Buffer.BlockCopy(data, 0, output, 0, rgbaLen);
+
+        var hole = new byte[pixelCount];
+        var holeCount = 0;
+        var maskOffset = rgbaLen * 2;
+        for (var i = 0; i < pixelCount; i++)
+        {
+            if (data[maskOffset + i] == 0) continue;
+            hole[i] = 1;
+            holeCount++;
         }
+        if (holeCount == 0 || holeCount == pixelCount)
+            return (new JsonObject { ["blended"] = 0 }, output);
+
+        var dstRgb = new float[pixelCount * 3];
+        var srcRgb = new float[pixelCount * 3];
+        for (var i = 0; i < pixelCount; i++)
+        {
+            var ro = i * 4;
+            var fo = i * 3;
+            dstRgb[fo] = data[ro] / 255f;
+            dstRgb[fo + 1] = data[ro + 1] / 255f;
+            dstRgb[fo + 2] = data[ro + 2] / 255f;
+            var so = rgbaLen + ro;
+            srcRgb[fo] = data[so] / 255f;
+            srcRgb[fo + 1] = data[so + 1] / 255f;
+            srcRgb[fo + 2] = data[so + 2] / 255f;
+        }
+
+        SeamlessCloneRgb(width, height, srcRgb, dstRgb, hole);
+
+        for (var i = 0; i < pixelCount; i++)
+        {
+            if (hole[i] == 0) continue;
+            var ro = i * 4;
+            var fo = i * 3;
+            output[ro] = (byte)Math.Clamp((int)MathF.Round(srcRgb[fo] * 255f), 0, 255);
+            output[ro + 1] = (byte)Math.Clamp((int)MathF.Round(srcRgb[fo + 1] * 255f), 0, 255);
+            output[ro + 2] = (byte)Math.Clamp((int)MathF.Round(srcRgb[fo + 2] * 255f), 0, 255);
+            output[ro + 3] = 255;
+        }
+
+        return (new JsonObject { ["blended"] = holeCount }, output);
     }
 
     /// <summary>
@@ -195,10 +260,9 @@ internal static class PoissonBlend
     internal static void SeamlessInpaintBlendRgb(int w, int h, float[] inpaintedRgb, float[] dstRgb, byte[] hole, float maxShift = 0.16f)
     {
         var len = w * h;
-        var hv = new float[len];
-        for (var c = 0; c < 3; c++)
+        Parallel.For(0, 3, c =>
         {
-            Array.Clear(hv, 0, len);
+            var hv = new float[len];
             for (var y = 0; y < h; y++)
             {
                 var row = y * w;
@@ -231,6 +295,6 @@ internal static class PoissonBlend
                     inpaintedRgb[i * 3 + c] = dstRgb[i * 3 + c];
                 }
             }
-        }
+        });
     }
 }

@@ -1,6 +1,6 @@
 import { clamp } from "../canvas.js"
 import { detectBubbleOnImage } from "../bubble.js"
-import { prepareNativeInpaint, samplePixelColor } from "../retouch.js"
+import { prepareNativeClone, prepareNativeInpaint, samplePixelColor } from "../retouch.js"
 import { resizeBox, rotateBox, snapBox } from "../tools.js"
 
 const zoomSteps = [.25, .5, .75, 1, 1.25, 1.5, 2, 3, 4]
@@ -232,6 +232,7 @@ export function setupGestures({
               mode: "clone", size: size / minDim,
               offsetX: clamp(state.cloneSource.x - origin.x, -1, 1),
               offsetY: clamp(state.cloneSource.y - origin.y, -1, 1),
+              ...(byId("clone-seamless")?.checked && { seamless: true }),
               ...(opacity !== 1 && { opacity }),
               points: [origin],
             }
@@ -470,7 +471,16 @@ export function setupGestures({
       return
     }
     if (completed.kind === "retouch") {
+      const page = selectedPage()
       checkpoint(completed.before)
+      if (page && completed.stroke?.mode === "clone" && completed.stroke.seamless) {
+        prepareNativeClone(page, completed.stroke).then((usedNative) => {
+          if (usedNative && selectedPage() === page) {
+            paintPreview(page)
+            status("Đã hòa biên sao chép nền bằng C# Poisson Seamless Clone.")
+          }
+        })
+      }
       render()
       return
     }

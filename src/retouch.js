@@ -6,7 +6,9 @@ const strokeOrigins = new WeakMap()
 
 export function shareInpaintOrigins(source, copy) {
   source?.forEach((stroke, index) => {
-    if (stroke.mode === "inpaint") strokeOrigins.set(copy[index], strokeOrigins.get(stroke) ?? stroke)
+    if (stroke.mode === "inpaint" || (stroke.mode === "clone" && stroke.seamless)) {
+      strokeOrigins.set(copy[index], strokeOrigins.get(stroke) ?? stroke)
+    }
   })
 }
 
@@ -16,7 +18,7 @@ function inpaintEntry(page, stroke) {
 }
 
 function inpaintGeometry(stroke) {
-  return JSON.stringify([stroke.size, stroke.points])
+  return JSON.stringify([stroke.mode, stroke.size, stroke.points, stroke.offsetX ?? null, stroke.offsetY ?? null, Boolean(stroke.seamless)])
 }
 
 export function waitForNativeRetouch(page) {
@@ -47,8 +49,10 @@ export function validateRetouchStroke(stroke) {
     return { mode: stroke.mode, size: stroke.size, ...(opacity !== 1 && { opacity }), points }
   }
   if (!inRange(stroke.offsetX, -1, 1) || !inRange(stroke.offsetY, -1, 1)) return null
+  if (stroke.seamless !== undefined && typeof stroke.seamless !== "boolean") return null
   return {
     mode: "clone", size: stroke.size, offsetX: stroke.offsetX, offsetY: stroke.offsetY,
+    ...(stroke.seamless && { seamless: true }),
     ...(opacity !== 1 && { opacity }), points,
   }
 }
@@ -120,6 +124,17 @@ function renderRetouchStrokes(context, page, width, height) {
       continue
     }
     if (stroke.mode === "clone" && page.image) {
+      if (stroke.seamless) {
+        const nativePatch = inpaintEntry(page, stroke)?.patch
+        if (nativePatch && nativePatch.width === width && nativePatch.height === height) {
+          context.save()
+          context.globalAlpha = opacity
+          context.drawImage(nativePatch.canvas, nativePatch.left, nativePatch.top)
+          context.restore()
+          painted = true
+          continue
+        }
+      }
       const radius = Math.ceil(lineWidth / 2) + 2
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const point of stroke.points) {
@@ -311,6 +326,99 @@ async function buildNativeInpaintPatch(page, stroke) {
   }
   patchCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
   return { canvas: patchCanvas, left, top, width, height }
+}
+
+export async function prepareNativeClone(page, stroke) {
+  const bridge = globalThis.khungThoaiDesktop ?? desktop
+  if (!bridge?.native || stroke?.mode !== "clone" || !stroke.seamless || !page?.image || !stroke.points?.length) return false
+  const cached = inpaintEntry(page, stroke)
+  if (cached) return cached.pending ?? Boolean(cached.patch)
+  const origin = strokeOrigins.get(stroke) ?? stroke
+  const entry = { image: page.image, geometry: inpaintGeometry(stroke), patch: null, pending: null }
+  nativeInpaintCache.set(origin, entry)
+  entry.pending = buildNativeSeamlessClonePatch(page, stroke, bridge).then((patch) => {
+    entry.patch = patch
+    if (patch) retouchCache.delete(entry.image)
+    return Boolean(patch)
+  }).catch(() => false).finally(() => {
+    entry.pending = null
+    if (!entry.patch && nativeInpaintCache.get(origin) === entry) nativeInpaintCache.delete(origin)
+  })
+  return entry.pending
+}
+
+async function buildNativeSeamlessClonePatch(page, stroke, bridge) {
+  const width = page.image.naturalWidth
+  const height = page.image.naturalHeight
+  if (!width || !height) return null
+  const minDimension = Math.min(width, height)
+  const lineWidth = Math.max(1, stroke.size * minDimension)
+  const radius = Math.ceil(lineWidth / 2) + 2
+  const margin = 12
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const point of stroke.points) {
+    const px = point.x * width
+    const py = point.y * height
+    if (px < minX) minX = px
+    if (py < minY) minY = py
+    if (px > maxX) maxX = px
+    if (py > maxY) maxY = py
+  }
+  const left = Math.max(0, Math.floor(minX - radius - margin))
+  const top = Math.max(0, Math.floor(minY - radius - margin))
+  const right = Math.min(width, Math.ceil(maxX + radius + margin))
+  const bottom = Math.min(height, Math.ceil(maxY + radius + margin))
+  const bw = right - left
+  const bh = bottom - top
+  if (bw <= 4 || bh <= 4 || bw * bh > 2_500_000) return null
+
+  const maskCanvas = document.createElement("canvas")
+  maskCanvas.width = bw
+  maskCanvas.height = bh
+  const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true })
+  maskCtx.strokeStyle = "#fff"
+  maskCtx.lineWidth = lineWidth
+  maskCtx.lineCap = "round"
+  maskCtx.lineJoin = "round"
+  drawStrokePath(maskCtx, stroke.points, width, height, left, top)
+  const maskRgba = maskCtx.getImageData(0, 0, bw, bh).data
+  const mask = new Uint8Array(bw * bh)
+  let any = false
+  for (let i = 0; i < mask.length; i++) {
+    if (maskRgba[i * 4 + 3] >= 32) {
+      mask[i] = 1
+      any = true
+    }
+  }
+  if (!any) return null
+
+  const dstCanvas = document.createElement("canvas")
+  dstCanvas.width = bw
+  dstCanvas.height = bh
+  const dstCtx = dstCanvas.getContext("2d", { willReadFrequently: true })
+  dstCtx.drawImage(page.image, -left, -top)
+  const dstRgba = dstCtx.getImageData(0, 0, bw, bh).data
+
+  const srcCanvas = document.createElement("canvas")
+  srcCanvas.width = bw
+  srcCanvas.height = bh
+  const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true })
+  srcCtx.drawImage(page.image, -(left + stroke.offsetX * width), -(top + stroke.offsetY * height))
+  const srcRgba = srcCtx.getImageData(0, 0, bw, bh).data
+
+  const payload = new Uint8Array(dstRgba.length * 2 + mask.length)
+  payload.set(dstRgba, 0)
+  payload.set(srcRgba, dstRgba.length)
+  payload.set(mask, dstRgba.length * 2)
+
+  const response = await bridge.native("seamless_clone", { width: bw, height: bh }, payload)
+  const out = new Uint8ClampedArray(response.data)
+  if (out.length !== dstRgba.length) return null
+  for (let i = 0; i < mask.length; i++) {
+    out[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
+  }
+  dstCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
+  return { canvas: dstCanvas, left, top, width, height }
 }
 
 export function paintRetouchStrokes(canvas, page) {

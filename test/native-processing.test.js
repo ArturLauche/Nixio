@@ -266,3 +266,44 @@ test("native raw cleanup preserves zero strength and excludes fully transparent 
   assert.deepEqual(black.data.subarray(160, 172), white.data.subarray(160, 172))
   assert.deepEqual([...white.data.subarray(0, 4)], [255, 255, 255, 0])
 })
+
+test("native seamless_clone harmonizes luminance across seam and preserves unmasked pixels", { skip: !available }, async (t) => {
+  const worker = new native.NativeWorker(executable)
+  t.after(() => worker.close())
+  const width = 40
+  const height = 40
+  const pixelCount = width * height
+  const dst = new Uint8Array(pixelCount * 4)
+  const src = new Uint8Array(pixelCount * 4)
+  const mask = new Uint8Array(pixelCount)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x
+      const o = i * 4
+      // Bright destination (200) vs darker source (120) with a sharp bright dot inside source
+      dst[o] = 200; dst[o + 1] = 200; dst[o + 2] = 200; dst[o + 3] = 255
+      const isDetail = Math.abs(x - 20) <= 2 && Math.abs(y - 20) <= 2
+      src[o] = isDetail ? 160 : 120
+      src[o + 1] = isDetail ? 160 : 120
+      src[o + 2] = isDetail ? 160 : 120
+      src[o + 3] = 255
+      if (x >= 12 && x <= 28 && y >= 12 && y <= 28) mask[i] = 1
+    }
+  }
+  const payload = new Uint8Array(dst.length * 2 + mask.length)
+  payload.set(dst, 0)
+  payload.set(src, dst.length)
+  payload.set(mask, dst.length * 2)
+
+  const { result, data } = await worker.call("seamless_clone", { width, height }, payload)
+  assert.equal(result.blended, 17 * 17)
+  assert.equal(data.length, dst.length)
+  // Unmasked pixels must remain bit-for-bit identical to destination.
+  assert.equal(data[0], 200)
+  // Masked background near seam should be lifted from 120 close to destination 200.
+  const rimOff = (13 * width + 13) * 4
+  assert.ok(data[rimOff] >= 185, `Expected seamless rim >= 185, got ${data[rimOff]}`)
+  // Interior detail gradient (+40 over 120) should still be brighter than the lifted rim.
+  const centerOff = (20 * width + 20) * 4
+  assert.ok(data[centerOff] > data[rimOff] + 20)
+})
