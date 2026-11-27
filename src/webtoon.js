@@ -1,8 +1,60 @@
 import { filenameStem } from "./io.js"
 
+// Single source of truth for every canvas this module allocates: browsers reject
+// canvases wider/taller than 16384px, and Nixio's single-page budget is 25 MP.
+export const CANVAS_LIMITS = Object.freeze({
+  maxEdge: 16_384,
+  maxPixels: 25_000_000,
+})
+// Splitting beyond this many strips means the pages are pathologically tall or differ
+// wildly in width; stop before encoding hundreds of canvases.
+const MAX_STITCH_CHUNKS = 32
+// Gutter detection runs on a probe that is bounded in both dimensions so very
+// tall/narrow pages never allocate an image-sized canvas.
+const PROBE_MAX_WIDTH = 512
+const PROBE_MAX_HEIGHT = 4096
+const MIN_SLICE_SOURCE_PX = 16
+// Algorithmic floors in the units of the supplied pixel buffer. They are deliberately
+// small so callers working in downscaled probe pixels keep their requested heights.
+const MIN_TARGET_ROWS = 4
+const MIN_SLICE_ROWS = 2
+const MIN_WINDOW_ROWS = 2
+
+function positiveNumber(value, fallback) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : fallback
+}
+
+function imageSize(page) {
+  const width = Math.floor(Number(page?.image?.naturalWidth))
+  const height = Math.floor(Number(page?.image?.naturalHeight))
+  return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? { width, height }
+    : null
+}
+
+function maxCanvasHeight(width) {
+  return Math.min(CANVAS_LIMITS.maxEdge, Math.floor(CANVAS_LIMITS.maxPixels / width))
+}
+
+function boundedBands(totalHeight, bandHeight) {
+  const parts = Math.ceil(totalHeight / bandHeight)
+  const bands = []
+  for (let part = 0; part < parts; part++) {
+    bands.push([
+      Math.floor((totalHeight * part) / parts),
+      Math.floor((totalHeight * (part + 1)) / parts),
+    ])
+  }
+  return bands
+}
+
 /**
  * Finds clean horizontal cut positions (in image pixels) along flat/empty gutters
  * so long webtoon/manhwa strips are sliced without cutting through speech bubbles or artwork.
+ *
+ * `targetHeight`, `minSliceHeight` and `searchWindow` are interpreted in pixels of the
+ * supplied buffer, so callers may pass values already scaled for a smaller probe.
  */
 export function findSmartSliceCuts(
   pixels,
@@ -10,9 +62,13 @@ export function findSmartSliceCuts(
   height,
   { targetHeight = 1600, minSliceHeight = 500, searchWindow = 320 } = {},
 ) {
-  if (!pixels || width <= 0 || height <= 0) return []
-  const target = Math.max(200, Math.round(Number(targetHeight) || 1600))
-  const minH = Math.max(100, Math.min(target, Math.round(Number(minSliceHeight) || Math.round(target * 0.45))))
+  if (!pixels || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return []
+  if (pixels.length < width * height * 4) return []
+  const target = Math.max(MIN_TARGET_ROWS, Math.round(positiveNumber(targetHeight, 1600)))
+  const minH = Math.min(
+    target,
+    Math.max(MIN_SLICE_ROWS, Math.round(positiveNumber(minSliceHeight, Math.round(target * 0.45)))),
+  )
   if (height <= target + minH * 0.35) {
     return [{ top: 0, bottom: height, height }]
   }
@@ -61,7 +117,7 @@ export function findSmartSliceCuts(
 
   const slices = []
   let top = 0
-  const window = Math.max(32, Math.round(Number(searchWindow) || Math.round(target * 0.25)))
+  const window = Math.max(MIN_WINDOW_ROWS, Math.round(positiveNumber(searchWindow, Math.round(target * 0.25))))
 
   while (top < height) {
     const remaining = height - top
@@ -98,17 +154,32 @@ export function findSmartSliceCuts(
 
 /**
  * Smart-slices a single tall webtoon page into clean PNG Files along detected empty gutters.
+ *
+ * Detection uses a bounded probe; requested heights stay in original image units and are
+ * converted to probe rows before the cut search so wide pages are not sliced too tall.
  */
 export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
   const img = page?.image
-  const width = img?.naturalWidth ?? 0
-  const height = img?.naturalHeight ?? 0
-  if (!width || !height) throw new Error("Trang không có ảnh hợp lệ để cắt.")
+  const width = Math.floor(Number(img?.naturalWidth))
+  const height = Math.floor(Number(img?.naturalHeight))
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error("Trang không có ảnh hợp lệ để cắt.")
+  }
+  const maxSliceHeight = maxCanvasHeight(width)
+  if (width > CANVAS_LIMITS.maxEdge || maxSliceHeight < 1) {
+    throw new Error(
+      `Kích thước ảnh (${width} px) vượt giới hạn canvas ${CANVAS_LIMITS.maxEdge} px / ${CANVAS_LIMITS.maxPixels} điểm ảnh để cắt.`,
+    )
+  }
+  const requestedTarget = Number(targetHeight)
+  const target = Math.max(1, Math.round(Number.isFinite(requestedTarget) && requestedTarget > 0 ? requestedTarget : 1600))
+  const sliceTarget = Math.min(target, maxSliceHeight)
 
-  // Downscale horizontally for fast gutter detection if image is very wide.
-  const probeScale = Math.min(1, 512 / width)
-  const probeW = Math.max(16, Math.round(width * probeScale))
-  const probeH = Math.max(16, Math.round(height * probeScale))
+  // Bound the probe on both axes; track the real vertical ratio when the page is taller
+  // than the cap (the horizontal ratio may also exceed 1 for degenerate narrow pages).
+  const probeW = Math.max(16, Math.min(width, PROBE_MAX_WIDTH))
+  const probeH = Math.min(PROBE_MAX_HEIGHT, Math.max(16, Math.round((height * probeW) / width)))
+  const scaleY = probeH / height
   const probeCanvas = document.createElement("canvas")
   probeCanvas.width = probeW
   probeCanvas.height = probeH
@@ -117,22 +188,53 @@ export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
   const probePixels = probeCtx.getImageData(0, 0, probeW, probeH).data
 
   const probeSlices = findSmartSliceCuts(probePixels, probeW, probeH, {
-    targetHeight: Math.round(targetHeight * probeScale),
-    minSliceHeight: Math.round(Math.max(300, targetHeight * 0.4) * probeScale),
-    searchWindow: Math.round(Math.max(120, targetHeight * 0.25) * probeScale),
+    targetHeight: Math.max(1, Math.round(sliceTarget * scaleY)),
+    minSliceHeight: Math.max(1, Math.round(Math.max(300, sliceTarget * 0.4) * scaleY)),
+    searchWindow: Math.max(1, Math.round(Math.max(120, sliceTarget * 0.25) * scaleY)),
   })
-  if (probeSlices.length <= 1) return []
+
+  // Map probe cuts back to source rows. Kept cuts are strictly increasing, so source
+  // coverage stays contiguous, and slivers are merged instead of emitting tiny files.
+  const needsBounding = height > maxSliceHeight
+  const cuts = []
+  if (probeSlices.length > 1) {
+    let prevBottom = 0
+    for (let i = 0; i < probeSlices.length; i++) {
+      const isLast = i === probeSlices.length - 1
+      const mapped = isLast ? height : Math.round(probeSlices[i].bottom / scaleY)
+      const bottom = Math.min(height, Math.max(prevBottom, mapped))
+      if (bottom <= prevBottom) continue
+      if (!isLast && bottom - prevBottom < MIN_SLICE_SOURCE_PX) continue
+      cuts.push(bottom)
+      prevBottom = bottom
+    }
+    if (cuts.length > 1 && height - cuts[cuts.length - 2] < MIN_SLICE_SOURCE_PX) cuts.splice(cuts.length - 2, 1)
+  }
+  if (cuts.length <= 1 && needsBounding) cuts.splice(0, cuts.length, height)
+  if (!cuts.length) return []
+
+  // Bound every produced slice to the same canvas limits as stitched pages.
+  const boundedCuts = []
+  let bandTop = 0
+  for (const bottom of cuts) {
+    for (const [, bandBottom] of boundedBands(bottom - bandTop, maxSliceHeight)) {
+      boundedCuts.push(bandTop + bandBottom)
+    }
+    bandTop = bottom
+  }
+  if (boundedCuts.length <= 1) return []
 
   const stem = filenameStem(page.name || "webtoon")
   const files = []
-  let prevBottom = 0
-  for (let i = 0; i < probeSlices.length; i++) {
-    const isLast = i === probeSlices.length - 1
-    const top = prevBottom
-    const bottom = isLast ? height : Math.min(height, Math.max(top + 16, Math.round(probeSlices[i].bottom / probeScale)))
+  let top = 0
+  for (const bottom of boundedCuts) {
     const sliceH = bottom - top
-    prevBottom = bottom
     if (sliceH <= 0) continue
+    if (sliceH > maxSliceHeight) {
+      throw new Error(
+        `Mảnh cắt ${width}×${sliceH} vượt giới hạn canvas ${CANVAS_LIMITS.maxEdge} px / ${CANVAS_LIMITS.maxPixels} điểm ảnh.`,
+      )
+    }
 
     const canvas = document.createElement("canvas")
     canvas.width = width
@@ -141,60 +243,134 @@ export async function smartSlicePageImage(page, { targetHeight = 1600 } = {}) {
     ctx.drawImage(img, 0, top, width, sliceH, 0, 0, width, sliceH)
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"))
     if (!blob) throw new Error("Không thể mã hóa mảnh ảnh đã cắt.")
-    const num = String(i + 1).padStart(2, "0")
+    const num = String(files.length + 1).padStart(2, "0")
     files.push(new File([blob], `${stem}-${num}.png`, { type: "image/png" }))
+    top = bottom
   }
   return files
 }
 
 /**
- * Stitches a sequence of pages vertically into one or more PNG Files (auto-chunking safely
- * below Nixio's 28 MP single-image limit).
+ * Plans bounded vertical stitch chunks: every chunk stays within the canvas dimension
+ * cap and the configured pixel budget, and a page taller than one chunk is split into
+ * balanced, contiguous source bands instead of being forced into one oversized canvas.
  */
-export async function stitchPagesVertically(pages, { maxPixels = 25_000_000, background = "#ffffff" } = {}) {
+export function planVerticalStitch(pages, { maxPixels = CANVAS_LIMITS.maxPixels } = {}) {
   if (!Array.isArray(pages) || pages.length < 2) {
     throw new Error("Cần chọn ít nhất 2 trang để ghép dọc.")
   }
-  const targetWidth = Math.max(...pages.map((p) => p.image?.naturalWidth ?? 0))
-  if (!targetWidth) throw new Error("Không tìm thấy kích thước ảnh hợp lệ để ghép.")
+  const requestedPixels = Number(maxPixels)
+  if (!Number.isFinite(requestedPixels) || requestedPixels < 1) {
+    throw new Error("Giới hạn điểm ảnh khi ghép dọc không hợp lệ.")
+  }
+  const pixelLimit = Math.min(Math.floor(requestedPixels), CANVAS_LIMITS.maxPixels)
 
-  const scaledHeights = pages.map((p) => {
-    const w = p.image.naturalWidth
-    const h = p.image.naturalHeight
-    return Math.max(1, Math.round((h * targetWidth) / w))
+  const sources = pages.map((page) => {
+    const size = imageSize(page)
+    if (!size) throw new Error("Trang không có kích thước ảnh hợp lệ để ghép.")
+    return { page, ...size }
   })
 
-  // Partition into chunks that stay within maxPixels and canvas height limit (16384px).
-  const maxChunkHeight = Math.min(16000, Math.floor(maxPixels / targetWidth))
+  // Preserve the legacy common width, but cap it at the canvas limit and downscale
+  // proportionally when a source is wider than any canvas can be.
+  const sourceWidth = sources.reduce((widest, source) => Math.max(widest, source.width), 0)
+  const width = Math.min(sourceWidth, CANVAS_LIMITS.maxEdge)
+  if (width > pixelLimit) {
+    throw new Error(`Giới hạn điểm ảnh (${pixelLimit} px) nhỏ hơn chiều rộng ảnh ghép (${width} px).`)
+  }
+  const rowLimit = Math.min(CANVAS_LIMITS.maxEdge, Math.floor(pixelLimit / width))
+  const scaledRows = sources.reduce(
+    (total, source) => total + Math.max(1, Math.round((source.height * width) / source.width)),
+    0,
+  )
+  if (Math.ceil(scaledRows / rowLimit) > MAX_STITCH_CHUNKS) {
+    throw tooManyStitchChunks(Math.ceil(scaledRows / rowLimit))
+  }
+
+  const pieces = []
+  for (const source of sources) {
+    const totalHeight = Math.max(1, Math.round((source.height * width) / source.width))
+    for (const [destTop, destBottom] of boundedBands(totalHeight, rowLimit)) {
+      const sourceTop = Math.floor((source.height * destTop) / totalHeight)
+      const sourceBottom = Math.floor((source.height * destBottom) / totalHeight)
+      pieces.push({
+        page: source.page,
+        sourceY: sourceTop,
+        sourceWidth: source.width,
+        sourceHeight: Math.max(1, sourceBottom - sourceTop),
+        height: destBottom - destTop,
+      })
+    }
+  }
+
   const chunks = []
   let current = []
-  let currentH = 0
-  for (let i = 0; i < pages.length; i++) {
-    const sh = scaledHeights[i]
-    if (current.length && currentH + sh > maxChunkHeight) {
-      chunks.push({ items: current, height: currentH })
+  let currentHeight = 0
+  for (const piece of pieces) {
+    if (current.length && currentHeight + piece.height > rowLimit) {
+      chunks.push({ height: currentHeight, items: current })
       current = []
-      currentH = 0
+      currentHeight = 0
     }
-    current.push({ page: pages[i], height: sh })
-    currentH += sh
+    current.push({ ...piece, destY: currentHeight })
+    currentHeight += piece.height
   }
-  if (current.length) chunks.push({ items: current, height: currentH })
+  if (current.length) chunks.push({ height: currentHeight, items: current })
+  if (chunks.length > MAX_STITCH_CHUNKS) throw tooManyStitchChunks(chunks.length)
 
+  return { width, rowLimit, chunks }
+}
+
+function tooManyStitchChunks(count) {
+  return new Error(
+    `Cần ${count} mảnh ghép, vượt giới hạn ${MAX_STITCH_CHUNKS} mảnh. Hãy chọn các trang có chiều rộng gần nhau hoặc ghép ít trang hơn.`,
+  )
+}
+
+/**
+ * Stitches a sequence of pages vertically into one or more PNG Files. Every chunk is
+ * bounded by the 16384px canvas dimension and the configured pixel budget; pages that
+ * cannot fit one chunk are split into balanced bands without changing aspect ratio.
+ * `maxPages` optionally caps the output against the caller's remaining project pages.
+ */
+export async function stitchPagesVertically(
+  pages,
+  { maxPixels = CANVAS_LIMITS.maxPixels, background = "#ffffff", maxPages } = {},
+) {
+  const { width, chunks } = planVerticalStitch(pages, { maxPixels })
+  if (maxPages !== undefined) {
+    const pageBudget = Math.floor(Number(maxPages))
+    if (!Number.isFinite(pageBudget) || pageBudget < 0) {
+      throw new Error("Giới hạn số trang sau khi ghép không hợp lệ.")
+    }
+    if (chunks.length > pageBudget) {
+      throw new Error(
+        `Ghép dọc sẽ tạo ${chunks.length} trang, vượt giới hạn còn lại ${pageBudget} trang. Hãy chọn ít trang hơn hoặc thu hẹp khoảng ghép.`,
+      )
+    }
+  }
   const baseStem = filenameStem(pages[0].name || "webtoon")
   const files = []
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c]
     const canvas = document.createElement("canvas")
-    canvas.width = targetWidth
+    canvas.width = width
     canvas.height = chunk.height
     const ctx = canvas.getContext("2d")
     ctx.fillStyle = background
-    ctx.fillRect(0, 0, targetWidth, chunk.height)
-    let y = 0
+    ctx.fillRect(0, 0, width, chunk.height)
     for (const item of chunk.items) {
-      ctx.drawImage(item.page.image, 0, y, targetWidth, item.height)
-      y += item.height
+      ctx.drawImage(
+        item.page.image,
+        0,
+        item.sourceY,
+        item.sourceWidth,
+        item.sourceHeight,
+        0,
+        item.destY,
+        width,
+        item.height,
+      )
     }
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"))
     if (!blob) throw new Error("Không thể tạo ảnh sau khi ghép dọc.")

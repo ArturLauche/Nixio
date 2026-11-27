@@ -1147,7 +1147,7 @@ byId("webtoon-stitch-run")?.addEventListener("click", async () => {
   status(`Đang ghép dọc trang ${startIdx + 1}–${endIdx + 1}…`)
   try {
     const subset = state.pages.slice(startIdx, endIdx + 1)
-    const files = await stitchPagesVertically(subset)
+    const files = await stitchPagesVertically(subset, { maxPages: pageLimit - (state.pages.length - subset.length) })
     const decoded = []
     for (const file of files) decoded.push(await openImage(file))
     checkpoint(undefined, { label: `Ghép dọc ${subset.length} trang`, kind: "page" })
