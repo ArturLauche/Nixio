@@ -1,0 +1,212 @@
+# Kiến trúc hệ thống
+
+Tài liệu này mô tả kiến trúc thực tế của mã nguồn: luồng RPC giữa renderer và worker C#, quy tắc phiên bản giao thức, máy trạng thái tác vụ và phục hồi, ranh giới tin cậy IPC, và cách phân định dữ liệu persist / phiên / danh mục. Các sơ đồ đối chiếu trực tiếp với mã tại thời điểm viết; khi giao thức thay đổi cần cập nhật lại tài liệu này.
+
+Phần mô tả giao thức khung chi tiết từng operation nằm ở [native/README.md](../native/README.md#protocol); hướng dẫn thêm operation mới nằm ở [Extending the worker](../native/README.md#extending-the-worker).
+
+## 1. Sơ đồ tiến trình
+
+```mermaid
+flowchart LR
+    subgraph Renderer["Renderer (chia sẻ Web / Electron)"]
+        UI["src/ controllers & canvas"]
+        Bridge["window.khungThoaiDesktop<br/>(preload.cjs)"]
+    end
+
+    subgraph Main["Main process (desktop/main.cjs)"]
+        Trusted["trusted() frame check"]
+        Allow["Operation allowlist"]
+        PF["ProjectFiles + RecoveryCatalog"]
+        TQ["TaskQueue"]
+        WS["web-search / updater / dialogs"]
+    end
+
+    subgraph Workers["Worker C# (KhungThoai.Redraw --rpc)"]
+        IW["imageWorker (persistent)"]
+        FW["file worker (persistent)"]
+        TW["task worker (isolated / job)"]
+    end
+
+    UI --> Bridge --> Trusted --> Allow
+    Allow -->|"pixel ops: capabilities, mask, inpaint,<br/>content_aware_cleanup, seamless_clone,<br/>clean_raw, preprocess, ocr, png"| IW
+    Allow -->|"ocr / preprocess / png + taskId"| TQ --> TW
+    UI -->|"project-* channels"| PF --> FW
+    Trusted -->|"web-search / fetch-url / check-update / open-external"| WS
+```
+
+- Bản **Web** không có `desktop` (`src/native.js` đọc `globalThis.khungThoaiDesktop`): mọi thao tác ảnh chạy trên Canvas 2D / Web Worker (`src/image-worker.js`), lưu phiên vào IndexedDB, xuất qua JSZip/ag-psd.
+- Bản **Desktop** dùng chung renderer đó; `preload.cjs` expose đúng một object `khungThoaiDesktop` với danh sách hàm cố định.
+- Main process spawn tối đa ba vai trò worker từ cùng một executable: `worker` (file), `imageWorker` (pixel) và một worker isolated mới cho mỗi tác vụ trong `TaskQueue` — [desktop/main.cjs](../desktop/main.cjs), [desktop/task-queue.cjs](../desktop/task-queue.cjs).
+
+## 2. Khung RPC KTR1
+
+Giao tiếp renderer ↔ C# không đi qua JSON-RPC mà qua frame nhị phân trên stdio của tiến trình con. Mỗi frame (cả request lẫn reply) có cùng bố cục:
+
+| Offset | Kích thước | Trường |
+|---:|---:|---|
+| 0 | 4 byte | Magic ASCII `KTR1` |
+| 4 | 4 byte | uint32 little-endian: số byte metadata JSON |
+| 8 | 4 byte | uint32 little-endian: số byte payload nhị phân |
+| 12 | N byte | Metadata JSON UTF-8 |
+| 12 + N | M byte | Payload nhị phân (có thể rỗng) |
+
+```mermaid
+sequenceDiagram
+    participant JS as NativeWorker (desktop/native-worker.cjs)
+    participant CS as NativeRpc.Run (native/NativeRpc.cs)
+    participant OP as Operation impl
+
+    JS->>CS: frame KTR1 {version:1, operation, options} + payload
+    CS->>CS: kiểm magic, biên JSON 2 B–4 MiB, payload 0–512 MiB
+    CS->>OP: dispatch theo operation
+    OP-->>CS: (JsonObject metadata, byte[] bytes)
+    CS-->>JS: frame KTR1 {version:1, ok:true, ...} + bytes
+    Note over CS,JS: op có thể phát nhiều frame<br/>{version:1, event:"progress"} trước reply cuối
+    CS-->>JS: frame KTR1 {version:1, ok:false, error} khi operation lỗi
+```
+
+Quy tắc đã kiểm chứng trong mã:
+
+- **Request**: JSON tối đa 4 MiB (`metaLength` trong `[2, 4 MiB]`), payload tối đa 512 MiB (`dataLength` trong `[0, 512 MiB]`). `NativeRpc.Run` đọc từng frame trong vòng lặp và `return 1` ngay khi magic/sai biên — tiến trình thoát, stream đóng. Phía JS, `native-worker.cjs` ghi header 12 byte rồi metadata rồi payload ([desktop/native-worker.cjs:52-64](../desktop/native-worker.cjs)).
+- **Metadata request**: `{version: 1, operation: string, options: object}`; `version != 1` ném `InvalidDataException` → reply `ok:false`. Phía JS luôn đóng gói `version: 1` khi enqueue ([desktop/native-worker.cjs:30](../desktop/native-worker.cjs)).
+- **Reply**: `{version: 1, ok: boolean}` cộng metadata operation; `ok:false` kèm `error`. JS yêu cầu `result.version === 1` và `typeof result.ok === "boolean"`, ngược lại coi là frame không hỗ trợ và dừng worker ([desktop/native-worker.cjs:122](../desktop/native-worker.cjs)).
+- **Progress**: operation dài gọi `NativeProgress.Emit(progress, stage)` ([native/NativeProgress.cs](../native/NativeProgress.cs)); `NativeRpc` gán `Report` trong lúc dispatch và emit frame `{version:1, event:"progress", progress, stage}` với payload rỗng **trước** reply cuối. `Report` được reset về `null` sau mỗi operation. Phía JS, `read()` nhận diện `event === "progress"` và có thể xử lý nhiều frame trong một chunk stdout bằng đệ quy trên phần dư ([desktop/native-worker.cjs:113-119](../desktop/native-worker.cjs)).
+- **Lỗi transport vs lỗi operation**: lỗi *operation* (validate options, I/O thất bại…) trả `ok:false` + `error`, stream vẫn đồng bộ và worker tiếp tục phục vụ request sau. Lỗi *framing* (magic sai, count vượt biên, header/body cắt ngắn, JSON hỏng, `version` reply sai, byte thừa sau reply cuối) khiến JS `stop()`/kill tiến trình hoặc C# `return 1` — không có khôi phục trong cùng stream.
+- **Giới hạn phía JS**: mỗi `NativeWorker` từ chối khi `queued >= 8` hoặc `data.byteLength > 512 MiB`; metadata > 4 MiB bị từ chối trước khi ghi ([desktop/native-worker.cjs:27-31](../desktop/native-worker.cjs)). Timeout request: 90 giây cho `ocr`, 120 giây cho các operation còn lại.
+
+### Điểm vào legacy
+
+`Program.cs` không có `--rpc` chạy chế độ cũ: mỗi frame là header 24 byte (6 × uint32 LE: `width, height, left, top, right, bottom`) + `width*height*4` byte RGBA, reply là uint32 độ dài + patch. `TextureWorker` trong [desktop/worker.cjs](../desktop/worker.cjs) là client tương ứng. Desktop hiện luôn truyền `--rpc` qua `NativeWorker` ([desktop/native-worker.cjs:13](../desktop/native-worker.cjs)) nên đường legacy chỉ còn cho chạy executable trực tiếp; `redraw` trên RPC đi qua cùng engine `RedrawEngine`.
+
+## 3. Quy tắc phiên bản
+
+- Cả request lẫn reply đều mang `version: 1` trong metadata JSON; magic `KTR1` định danh framing. Hai đầu đều từ chối version khác 1 (request → `ok:false`; reply → JS stop worker). **Không có đàm phán phiên bản động** — đó là phạm vi của issue #58 trong tương lai.
+- Đổi framing không tương thích (layout header, ngữ nghĩa field) yêu cầu bump version và cập nhật đồng thời `native/NativeRpc.cs`, `desktop/native-worker.cjs` và `desktop/worker.cjs` nếu legacy bị ảnh hưởng.
+- Thêm operation mới **không** đổi version: operation lạ rơi vào `ProjectStorage.Execute` → `InvalidDataException("Unknown native operation")` → `ok:false`, và renderer bị chặn sớm hơn bởi allowlist ở main process.
+- Field mới trong `options`/reply phải optional và validate ở operation tương ứng; field project (`.khungthoai`) validate tập trung ở `src/project.js`.
+
+## 4. Máy trạng thái
+
+### 4.1 Tác vụ nền (TaskQueue)
+
+Chỉ `ocr`, `preprocess`, `png` đi qua hàng đợi khi renderer truyền `taskId` ([desktop/main.cjs:101-104](../desktop/main.cjs)); mỗi job chạy trên một worker isolated riêng, bị kill cả cây tiến trình khi hủy ([desktop/task-queue.cjs:52-63](../desktop/task-queue.cjs), [desktop/native-worker.cjs:68-84](../desktop/native-worker.cjs)).
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: submit(id, op, options, data)
+    queued --> running: drain() tạo isolated worker
+    queued --> cancelled: cancel(id) khi chưa chạy
+    running --> done: worker.call resolve
+    running --> error: worker.call reject / timeout / crash
+    running --> cancelled: cancel(id) → kill process tree
+    done --> [*]
+    error --> [*]
+    cancelled --> [*]
+```
+
+- `id` phải khớp `/^[a-zA-Z0-9-]{1,80}$/`, không trùng, tối đa 16 job trong `jobs` ([desktop/task-queue.cjs:11-14](../desktop/task-queue.cjs)).
+- Mỗi chuyển trạng thái `emit` một update `{id, operation, state, progress, stage}` về renderer qua `khung-thoai:task`; `progress` bị kẹp đơn điệu trong `[0,100]`. Renderer giữ 10 tác vụ gần nhất và chỉ hiện nút Hủy ở `queued`/`running` ([src/controllers/tasks.js](../src/controllers/tasks.js)).
+- `close()` (will-quit, điều hướng main frame) hủy toàn bộ job; `did-start-navigation` cũng đóng queue và `cancelAll()` các phiên file ([desktop/main.cjs:72](../desktop/main.cjs)).
+
+### 4.2 Phiên ghi / đọc / xuất file (ProjectFiles + ProjectStorage)
+
+Renderer không bao giờ thấy path hay handle native: nó nhận `id` UUID phiên do main cấp, main giữ map sang `nativeId` handle trong `ProjectStorage` ([desktop/project-files.cjs](../desktop/project-files.cjs), [native/ProjectStorage.cs](../native/ProjectStorage.cs)).
+
+```mermaid
+stateDiagram-v2
+    [*] --> wb: projectBegin → fileBegin/zipBegin (path từ dialog hoặc catalog.prepare)
+    wb --> wa: projectWrite fileAppend / zipPage (zipPage qua encodePng → zipAppend)
+    wa --> wc: fileCommit → temp flush + Move/Replace atomic, .bak khi mode=project
+    wa --> wx: fileCancel / lỗi → xóa temp
+    wc --> [*]
+    wx --> [*]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> ro: projectOpen → fileOpen (path từ dialog, recovery, catalog.resolve)
+    ro --> rr: projectRead → fileReadNext 4 MiB/lần, kiểm size không đổi
+    rr --> rc: hết byte → fileClose tự động
+    rr --> rx: projectCancelRead / lỗi → fileClose
+    rc --> [*]
+    rx --> [*]
+```
+
+- `projectWrite` chỉ chấp nhận operation trong allowlist theo mode: zip → `zipPage|fileCommit|fileCancel`, còn lại → `fileAppend|fileCommit|fileCancel`; `fileCommit`/`fileCancel` đóng phiên và dọn map ([desktop/project-files.cjs:78-97](../desktop/project-files.cjs)).
+- `fileBegin`/`zipBegin` ghi vào `path.<guid>.tmp` cùng thư mục đích; `fileCommit` flush, (tùy chọn) copy `.bak`, rồi `File.Move`/`File.Replace` atomic — tệp đích cũ chỉ bị thay khi bản mới đã hoàn chỉnh ([native/ProjectStorage.cs:81-99](../native/ProjectStorage.cs)).
+- ZIP giới hạn 50 trang, tên phải là `*.png` an toàn; `zipPage` được main chuyển thành `zipAppend` sau khi `encodePng` (tác vụ `png` qua TaskQueue) ([native/ProjectStorage.cs:65-80](../native/ProjectStorage.cs), [desktop/project-files.cjs:83-87](../desktop/project-files.cjs)).
+
+### 4.3 Vòng đời snapshot phục hồi
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle
+    idle --> due: sửa đổi (revision đổi) + 20s interval, hoặc flush khi đóng cửa sổ
+    due --> writing: autosave() → saveDesktopProject("autosave")
+    writing --> committed: fileAppend* → fileCommit → catalog.committed() cập nhật metadata.json và tỉa còn 10 snapshot
+    writing --> failed: lỗi → fileCancel, snapshot cũ nguyên vẹn
+    committed --> idle
+    failed --> idle
+```
+
+- Desktop: `autosave()` chạy mỗi 20 giây khi `nativeReady` và không busy/gesture, bỏ qua khi `savedRevision === revision`; đóng app flush snapshot mới nhất ([src/controllers/project.js:325-357](../src/controllers/project.js)).
+- Snapshot autosave đặt tại `userData/projects/<projectId>/<timestamp>-<uuid>.khungthoai` do `RecoveryCatalog.prepare` cấp; `committed()` ghi `metadata.json` qua file tạm + rename và xóa snapshot vượt quá 10 ([desktop/recovery-catalog.cjs:41-62](../desktop/recovery-catalog.cjs)).
+- Đọc snapshot cũ đi qua `catalog.resolve(projectId, snapshotId)` — ID snapshot phải khớp pattern chặt, không nhận path tự do ([desktop/recovery-catalog.cjs:73-81](../desktop/recovery-catalog.cjs)).
+- Web: cùng nhịp 20 giây nhưng ghi snapshot IndexedDB (`saveWebSnapshot`), không qua worker ([src/controllers/project.js:409-439](../src/controllers/project.js)).
+
+## 5. Ranh giới tin cậy IPC
+
+Mô tả theo hướng phòng thủ: mỗi hàng là một điểm mà dữ liệu vượt ranh giới, kèm kiểm soát thực tế trong mã.
+
+| Ranh giới | Kiểm soát thực tế |
+|---|---|
+| Renderer → preload | `contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`, `webviewTag: false` ([desktop/main.cjs:62-68](../desktop/main.cjs)). `contextBridge` chỉ expose `khungThoaiDesktop` với hàm cố định; không lộ `ipcRenderer` thô ([desktop/preload.cjs](../desktop/preload.cjs)). |
+| Preload → main (IPC) | Mọi handler `ipcMain.handle` đều bọc bởi `trusted()`: `event.sender === mainWindow.webContents`, `senderFrame` không có parent, và `senderFrame.url` (bỏ fragment) đúng bằng `app://khung-thoai/index.html`. Frame lạ nhận `{error: "Untrusted desktop frame."}` ([desktop/main.cjs:93-99](../desktop/main.cjs)). |
+| Điều hướng & cửa sổ | `setWindowOpenHandler` deny, `will-navigate` prevent, `will-attach-webview` prevent; `did-start-navigation` main frame đóng task queue và hủy phiên file ([desktop/main.cjs:72-75](../desktop/main.cjs)). CSP chặt qua header trên scheme `app` ([desktop/main.cjs:13-21](../desktop/main.cjs)). |
+| Static assets | `localFile()` chỉ phục vụ file nằm dưới `dist/` sau `path.resolve` + kiểm `path.relative` — chặn path traversal ([desktop/main.cjs:43-50](../desktop/main.cjs)). Quyền permission (camera, notification…) bị deny toàn bộ. |
+| Renderer → native op | Allowlist cứng trong `khung-thoai:native`: `capabilities, mask, inpaint, content_aware_cleanup, seamless_clone, clean_raw, preprocess, ocr, png` — `redraw` đi kênh riêng `redraw-texture`, file ops không bao giờ lộ ra renderer ([desktop/main.cjs:100-105](../desktop/main.cjs)). |
+| Renderer → filesystem | Không có kênh trực tiếp. `project-*` channels nhận `id` phiên UUID; path chỉ đến từ `dialog.showOpenDialog/showSaveDialog`, `recovery.khungthoai` cố định, hoặc `RecoveryCatalog` dưới `userData`. `projectBegin` kiểm `mode ∈ {autosave, project, zip}` và `validId(projectId)` ([desktop/main.cjs:115-119](../desktop/main.cjs), [desktop/project-files.cjs](../desktop/project-files.cjs)). |
+| Main → worker C# | Spawn process con với `stdio: ["pipe","pipe","ignore"]`, args cố định `--rpc`, `windowsHide`, không shell; isolated task worker `detached` để kill cả process group ([desktop/worker.cjs:46-53](../desktop/worker.cjs), [desktop/native-worker.cjs:14](../desktop/native-worker.cjs)). Worker chỉ thấy bytes trên stdin — không có API filesystem ngoài `ProjectStorage` do main điều khiển path. |
+| Worker → filesystem | `ProjectStorage` chỉ thao tác trên `options.path`/`options.id` do main truyền; commit qua temp + move atomic cùng thư mục; reader mở `FileShare.ReadWrite \| Delete` để atomic replace không làm hỏng phiên đọc ([native/ProjectStorage.cs:29-35](../native/ProjectStorage.cs), [native/ProjectStorage.cs:113-121](../native/ProjectStorage.cs)). |
+| Mạng | `connect-src` giới hạn `self` + HTTPS + loopback; `web-search.cjs` pin IP DNS chống SSRF/DNS rebinding và chặn decompression bomb; `open-external` chỉ mở HTTPS public đã validate ([desktop/web-search.cjs](../desktop/web-search.cjs), [desktop/main.cjs:129-134](../desktop/main.cjs)). |
+
+## 6. Phân định dữ liệu
+
+| Loại | Nơi sở hữu | Định dạng / vòng đời |
+|---|---|---|
+| Dữ liệu dự án persist | File `.khungthoai` do `ProjectStorage` ghi atomic; nội dung do renderer dựng | Blob `KHUNGTHOAI\n` + uint32 độ dài manifest + JSON manifest ≤16 MiB (`version: 2`, đọc được `version: 1`) + bytes ảnh từng trang; validate từng field ở `src/project.js`, sai cấu trúc → `invalidProject()`. |
+| Catalog & snapshot phục hồi | `RecoveryCatalog` trong main process sở hữu `userData/projects/<id>/` và `metadata.json` | Tối đa 10 snapshot `.khungthoai` mỗi `projectId` + bản legacy `recovery.khungthoai[.bak]`; path không bao giờ do renderer tự chọn. |
+| Trạng thái phiên renderer | `EditHistory` (Undo/Redo ≤40, `copyEditor` structuredClone), DOM/canvas, `translationJob` trong manifest | Chỉ sống trong bộ nhớ renderer; được chụp vào snapshot/project blob khi lưu. Ảnh/File dùng chung tham chiếu, chỉ dữ liệu editable bị clone ([src/history.js](../src/history.js)). |
+| Fallback trình duyệt | IndexedDB (`src/web-storage.js`) + Canvas/JSZip/inpaint JS | Cùng nhịp autosave 20s; không có worker C#, không có filesystem — `desktop` là `undefined` nên mọi nhánh `desktop?.` tự tắt. |
+
+## 7. Checklist thêm một operation
+
+Tổng hợp từ [Extending the worker](../native/README.md#extending-the-worker) và các điểm đăng ký thực tế trong mã. Giả sử operation mới tên `dichVuX`.
+
+1. **Quyết định phạm vi quyền.** Operation có chạm filesystem không? Không → được expose cho renderer. Có → bắt buộc đi qua `ProjectFiles`/`ProjectStorage`, renderer chỉ thấy `project-*` channels và handle UUID — không thêm vào allowlist `khung-thoai:native`.
+2. **Cài đặt C# trong file riêng** (ví dụ `native/DichVuX.cs`): hàm nhận `(JsonObject options, byte[] data)` và trả `(JsonObject metadata, byte[] bytes)`; validate `options` (dimension ảnh qua `NativeImaging.Dimensions`, enum, range); gọi `NativeProgress.Emit` nếu chạy lâu; ném exception cho lỗi operation — `NativeRpc` tự gói `ok:false`.
+3. **Đăng ký dispatch** trong `NativeRpc.Run` ([native/NativeRpc.cs:37-50](../native/NativeRpc.cs)): thêm `"dichVuX" => DichVuX.Execute(options, data)` vào switch. Operation file thì thêm `case` trong `ProjectStorage.Execute` thay vì switch chính.
+4. **Khai báo capability**: thêm category vào mảng `operations` trong `LocalOcr.Capabilities` ([native/LocalOcr.cs:37-40](../native/LocalOcr.cs)) nếu renderer cần phát hiện qua `nativeCapabilities()`; nhớ `capabilities.protocol` giữ `1` trừ khi đổi framing.
+5. **Expose qua main process**: thêm `"dichVuX"` vào allowlist ở `handle("khung-thoai:native")` ([desktop/main.cjs:102](../desktop/main.cjs)). Nếu operation dài, đưa vào nhóm `["ocr","preprocess","png"]` để renderer truyền `taskId` chạy trên worker isolated.
+6. **Gọi từ renderer** qua `src/native.js`: `desktop.native("dichVuX", options, data)` cho tác vụ ngắn, `runNativeTask(...)` khi cần hàng đợi/tiến độ/hủy. Không truyền path, handle hay URL file.
+7. **Giữ giao thức**: metadata request vẫn `{version:1, operation, options}`; payload ≤512 MiB, JSON ≤4 MiB; không thêm field bắt buộc phá tương thích; chỉ bump `version` khi đổi framing.
+8. **Test theo native/README**: error recovery (operation lỗi không làm mất đồng bộ stream), biên (0/512 MiB, ảnh méo), alpha compositing nếu liên quan pixel, và cancellation nếu đi qua TaskQueue — xem `test/native-framing.test.js`, `test/task-queue.test.js`, `test/recovery-catalog.test.js`.
+9. **Cập nhật tài liệu**: thêm operation vào danh sách protocol trong `native/README.md` và sơ đồ §1 của tài liệu này nếu thêm vai trò worker/kênh IPC mới.
+
+## 8. Walkthrough (docs-only): operation giả định `inkBounds`
+
+Ví dụ minh họa checklist trên với một operation **không đụng filesystem**: nhận RGBA + options, trả JSON các bounding box vùng mực, payload rỗng. Không có mã nào được thêm — walkthrough này chỉ đối chiếu từng bước với mã hiện tại.
+
+| Bước | Việc sẽ làm | Đối chiếu mã hiện tại |
+|---|---|---|
+| 1. Phạm vi | `inkBounds` thuần tính toán → **được** expose renderer; không đụng `ProjectFiles`. | Renderer đã gọi op pixel trực tiếp qua `desktop.native` ([src/retouch.js:321](../src/retouch.js)); file op mới là thứ bị cấm ([desktop/main.cjs:102](../desktop/main.cjs)). |
+| 2. C# | `native/InkBounds.cs` mới; `Execute(options, data)` validate `width/height` qua `NativeImaging.Dimensions`, duyệt pixel tìm bounding box, trả `(JsonObject{boxes:[...]}, [])`. | Mẫu tương tự `NativeImaging.Mask` trả `(JsonObject, byte[])` tại [native/NativeRpc.cs:41](../native/NativeRpc.cs); lỗi ném `InvalidDataException` như `Redraw` ở [native/NativeRpc.cs:79-84](../native/NativeRpc.cs). |
+| 3. Dispatch | Thêm `"inkBounds" => InkBounds.Execute(options, data)` vào switch trước nhánh `_ => storage.Execute(...)`. | Switch tại [native/NativeRpc.cs:37-50](../native/NativeRpc.cs); op lạ hiện rơi vào storage và trả `Unknown native operation`. |
+| 4. Capability | Thêm `"inkBounds"` vào `operations` JsonArray; `protocol` giữ `1`. | [native/LocalOcr.cs:37-40](../native/LocalOcr.cs); renderer đọc qua `nativeCapabilities()` ở [src/native.js:3-7](../src/native.js). |
+| 5. Main | Thêm `"inkBounds"` vào mảng allowlist; nếu tính cả chương thì đưa vào nhóm task để có `taskId`. | Allowlist [desktop/main.cjs:102](../desktop/main.cjs); nhóm task `["ocr","preprocess","png"]` cùng dòng; `tasks.submit` validate id qua regex ở [desktop/task-queue.cjs:11](../desktop/task-queue.cjs). |
+| 6. Renderer | Gọi `desktop.native("inkBounds", {width,height}, pixels)` hoặc `runNativeTask` nếu qua queue; vẽ kết quả lên canvas như `runNativeTask("png", …)` ở [src/canvas.js:463-465](../src/canvas.js). | Reply `{result, data}` được `preload` mở gói `{value}`/`{error}` ([desktop/preload.cjs:3-7](../desktop/preload.cjs)). |
+| 7. Giao thức | Request `{version:1, operation:"inkBounds", options}` + payload RGBA; reply `{version:1, ok:true, boxes:[…]}` payload rỗng; lỗi → `ok:false`. Không bump version. | Khung và giới hạn ở §2; `NativeProgress.Emit` chỉ cần nếu op phát progress frame ([native/NativeProgress.cs](../native/NativeProgress.cs)). |
+| 8. Test | Case mới trong `test/native-framing.test.js` style (reply `ok:true` metadata-only) + test operation trong `test/` Node runner; case hủy nếu qua TaskQueue. | `CASE_BUDGET`/seeded generator tại [test/native-framing.test.js](../test/native-framing.test.js); queue tests ở `test/task-queue.test.js`. |
+| 9. Docs | Thêm bullet `inkBounds` vào protocol list trong `native/README.md`; sơ đồ §1 đã đủ vì không thêm vai trò/kênh mới. | Danh sách protocol [native/README.md:21-29](../native/README.md). |
+
+Kết quả mong đợi nếu triển khai thật: renderer gọi `inkBounds` → main kiểm `trusted()` + allowlist → `imageWorker.call` (hoặc `TaskQueue` nếu truyền `taskId`) → frame KTR1 → C# dispatch → reply metadata-only → JS resolve `{result:{boxes}, data:empty}` — không chạm `ProjectFiles`, không path nào lộ ra renderer.

@@ -2,7 +2,7 @@
 
 Công cụ biên tập, xóa chữ (redraw), OCR, dịch thuật và dàn thoại truyện tranh/manga chạy trên **trình duyệt Web** và **ứng dụng Desktop (Electron + lõi xử lý ảnh C#/.NET 10 tự chứa)**.
 
-Dự án được xây dựng độc lập sau khi khảo sát luồng công khai của Lilyzono, kết hợp kỹ thuật phục hồi kết cấu **PhotoCraft C# Pro** (Multi-Scale PatchMatch nhận biết cấu trúc nét, SIMD `Vector<float>`, Poisson Seamless Blending đa luồng) và kiến trúc **Trợ lý AI Agent Harness v3** (học hỏi & tối ưu từ DeepSeek Harness). Xem thêm [ANALYSIS.md](ANALYSIS.md), [DESIGN.md](DESIGN.md) và [native/README.md](native/README.md).
+Dự án được xây dựng độc lập sau khi khảo sát luồng công khai của Lilyzono, kết hợp kỹ thuật phục hồi kết cấu **PhotoCraft C# Pro** (Multi-Scale PatchMatch nhận biết cấu trúc nét, SIMD `Vector<float>`, Poisson Seamless Blending đa luồng) và kiến trúc **Trợ lý AI Agent Harness v3** (học hỏi & tối ưu từ DeepSeek Harness). Xem thêm [ANALYSIS.md](ANALYSIS.md), [DESIGN.md](DESIGN.md), [docs/architecture.md](docs/architecture.md) (kiến trúc RPC, máy trạng thái, ranh giới tin cậy IPC) và [native/README.md](native/README.md).
 
 ---
 
@@ -112,6 +112,8 @@ Nixio/
 │   ├── PatchMatchInpaint.cs    # Multi-Scale Gradient-Aware SIMD PatchMatch + EM Voting + Colour Adaptation + Content-Aware Cleanup
 │   ├── PoissonBlend.cs         # Multigrid SOR Poisson Seamless Blending & Seamless Clone Stamp (Parallel.For)
 │   ├── RawCleanup.cs, TextureRedraw.cs, GradientRedraw.cs, NativeImaging.cs, LocalOcr.cs, ProjectStorage.cs, NativeRpc.cs
+├── docs/
+│   └── architecture.md         # Sơ đồ RPC KTR1, máy trạng thái tác vụ/phục hồi, bảng ranh giới tin cậy IPC, checklist thêm operation
 ├── scripts/
 │   ├── desktop-build.mjs       # Build native C# + Vite + @electron/packager
 │   ├── package-release.mjs     # Đóng gói .deb / .rpm / .tar.gz / .zip / Inno Setup .exe

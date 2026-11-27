@@ -50,3 +50,5 @@ Trên một ảnh thử 480 × 640 có nền chấm lặp và ảnh sạch để
 Trên một ảnh thử chuyển sắc 480 × 640, bản Electron Linux phục hồi đúng màu RGB của ảnh sạch ở 1.291 điểm bị chữ che. Nét thử cắt qua mép khung được giữ lại và PSD xuất giữ riêng lớp redraw, ảnh gốc và chữ chỉnh sửa được. Trung vị của tám lượt xử lý vùng 260 × 240 sau lượt làm nóng là 6,8 ms, tính cả Electron IPC.
 
 Với screentone trên nền chuyển sắc, lõi ước tính độ dốc RGB từ vòng lấy mẫu rồi thử nhận diện chu kỳ trên phần màu còn lại. Khi phục hồi, lõi cộng lại độ dốc theo tọa độ từng pixel. Trong bài kiểm thử đầu-cuối trên bản Electron Linux, PNG xuất có sai số tối đa 1/255 ở vùng chữ của ảnh tổng hợp. Bản Linux cũng đã xuất PSD thành công.
+
+Tài liệu kiến trúc của bản dựng (luồng RPC KTR1 renderer ↔ worker C#, máy trạng thái tác vụ và phục hồi, ranh giới tin cậy IPC, phân định dữ liệu persist/phiên) nằm trong [docs/architecture.md](docs/architecture.md).
