@@ -18,7 +18,8 @@ import { cleanupRectangle, paintCleanupMask } from "./cleanup.js"
 import { remainingTranslations, translationLabel } from "./translation.js"
 import { allFonts, loadCustomFont, registerFontName, restoreCustomFonts } from "./fonts.js"
 import { alignBoxes, distributeBoxes, duplicateBox, nudgeBox, reorderBox } from "./tools.js"
-import { cleanRawPageImage } from "./raw-cleanup.js"
+import { cleanRawPageImage, cleanRawPixels } from "./raw-cleanup.js"
+import { smartSlicePageImage, stitchPagesVertically } from "./webtoon.js"
 import { createNotificationCenter } from "./notifications.js"
 import {
   APP_VERSION,
@@ -364,6 +365,8 @@ function renderPages() {
   byId("preview-ocr").disabled = projectBusy() || current < 0 || !nativeReady
   byId("run-local-ocr").disabled = projectBusy() || current < 0 || !nativeLanguages.length
   byId("cleanup-expand").disabled = projectBusy()
+  if (byId("cleanup-mode")) byId("cleanup-mode").disabled = projectBusy()
+  if (byId("open-webtoon")) byId("open-webtoon").disabled = projectBusy() || !count
   byId("pages").replaceChildren(...state.pages.map((page, index) => {
     const li = document.createElement("li")
     const button = listButton(`${index + 1}. ${page.name}`, () => selectPage(page))
@@ -630,9 +633,31 @@ byId("reset-cleanup").onclick = () => {
   delete box.cleanupRect
   delete box.cleanupStrokes
   delete box.cleanupExpand
+  delete box.cleanupMode
   freezeCleanup(box)
   render()
 }
+
+byId("cleanup-mode")?.addEventListener("change", () => {
+  const box = selectedBox()
+  if (!box || projectBusy()) return
+  commitLiveFormCheckpoint()
+  checkpoint()
+  const mode = byId("cleanup-mode").value
+  if (mode === "content-aware") {
+    box.cleanup = true
+    box.cleanupMode = "content-aware"
+    freezeCleanup(box)
+  } else {
+    delete box.cleanupMode
+  }
+  render()
+  status(
+    mode === "content-aware"
+      ? "Đã bật xóa chữ nền tranh phức tạp (PatchMatch C#) cho khung đang chọn."
+      : "Đã chuyển về chế độ xóa chữ tự động (Nền trơn / Screentone).",
+  )
+})
 
 byId("undo-retouch").onclick = () => {
   const page = selectedPage()
@@ -654,22 +679,21 @@ byId("clear-retouch").onclick = () => {
   status("Đã xóa toàn bộ nét vẽ tay trên trang.")
 }
 
-byId("clean-raw").onclick = async () => {
-  const page = selectedPage()
+async function runCleanRawSingle(page, options = { strength: 0.7, denoise: true, sharpen: true }) {
   if (!page || projectBusy()) return
   commitLiveFormCheckpoint()
   state.processingNative = true
   renderPages()
   status("Đang làm sạch ảnh raw (cân bằng trắng, khử nhiễu, tăng sắc nét)…")
   try {
-    const { file, engine } = await cleanRawPageImage(page, { strength: 0.7, denoise: true, sharpen: true })
+    const { file, engine } = await cleanRawPageImage(page, options)
     const decoded = await openImage(file)
     checkpoint()
     page.file = decoded.file
     page.image = decoded.image
     page.url = decoded.url
     render()
-    status(`Đã làm sạch ảnh raw (${engine === "native-cs" ? "C#" : "JS"}). Nhấn Ctrl+Z nếu muốn hoàn tác.`)
+    status(`Đã làm sạch ảnh raw (${engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS"}). Nhấn Ctrl+Z nếu muốn hoàn tác.`)
     notify({
       kind: "success",
       title: "Đã làm sạch ảnh raw",
@@ -685,7 +709,7 @@ byId("clean-raw").onclick = async () => {
   }
 }
 
-byId("clean-raw-all")?.addEventListener("click", async () => {
+async function runCleanRawChapter(options = { strength: 0.7, denoise: true, sharpen: true }) {
   if (cleanRawController) {
     cleanRawController.abort()
     return
@@ -704,7 +728,7 @@ byId("clean-raw-all")?.addEventListener("click", async () => {
       if (cleanRawController.signal.aborted) break
       const page = state.pages[i]
       status(`Đang làm sạch raw ${i + 1}/${total} trang (${page.name})…`)
-      const { file, engine } = await cleanRawPageImage(page, { strength: 0.7, denoise: true, sharpen: true })
+      const { file, engine } = await cleanRawPageImage(page, options)
       if (cleanRawController.signal.aborted) break
       const decoded = await openImage(file)
       if (!recorded) {
@@ -714,7 +738,7 @@ byId("clean-raw-all")?.addEventListener("click", async () => {
       page.file = decoded.file
       page.image = decoded.image
       page.url = decoded.url
-      engineLabel = engine === "native-cs" ? "C#" : "JS"
+      engineLabel = engine === "native-cs" ? "C#" : engine === "js-worker" ? "Web Worker" : "JS"
       cleaned++
       if (selectedPage() === page) renderCanvas()
     }
@@ -737,6 +761,140 @@ byId("clean-raw-all")?.addEventListener("click", async () => {
     status(`Lỗi làm sạch raw sau ${cleaned}/${total} trang: ${error.message}`, true)
   } finally {
     cleanRawController = null
+    state.processingNative = false
+    render()
+  }
+}
+
+const rawDialog = byId("raw-cleanup-dialog")
+let rawPreviewSource = null
+function readRawDialogOptions() {
+  const strength = clamp((Number(byId("raw-strength")?.value) ?? 70) / 100, 0, 1)
+  return {
+    strength,
+    denoise: Boolean(byId("raw-denoise")?.checked),
+    sharpen: Boolean(byId("raw-sharpen")?.checked),
+  }
+}
+function paintRawPreview() {
+  if (!rawPreviewSource) return
+  const opts = readRawDialogOptions()
+  if (byId("raw-strength-val")) byId("raw-strength-val").textContent = `${Math.round(opts.strength * 100)}%`
+  const canvas = byId("raw-preview-canvas")
+  const res = cleanRawPixels(rawPreviewSource.data, rawPreviewSource.width, rawPreviewSource.height, opts)
+  canvas.width = rawPreviewSource.width
+  canvas.height = rawPreviewSource.height
+  canvas.getContext("2d").putImageData(new ImageData(res.data, rawPreviewSource.width, rawPreviewSource.height), 0, 0)
+  if (byId("raw-preview-meta")) {
+    byId("raw-preview-meta").textContent = `Mức đen: ${res.blackPoint} · Mức trắng: ${res.whitePoint} · ${res.grayscale ? "Khử ố vàng 3 kênh R/G/B" : "Bảo toàn màu gốc"}`
+  }
+}
+byId("raw-strength")?.addEventListener("input", paintRawPreview)
+byId("raw-denoise")?.addEventListener("change", paintRawPreview)
+byId("raw-sharpen")?.addEventListener("change", paintRawPreview)
+byId("raw-close")?.addEventListener("click", () => rawDialog?.close())
+byId("raw-apply-page")?.addEventListener("click", () => {
+  const opts = readRawDialogOptions()
+  rawDialog?.close()
+  runCleanRawSingle(selectedPage(), opts)
+})
+byId("raw-apply-chapter")?.addEventListener("click", () => {
+  const opts = readRawDialogOptions()
+  rawDialog?.close()
+  runCleanRawChapter(opts)
+})
+
+byId("clean-raw").onclick = async () => {
+  const page = selectedPage()
+  if (!page || projectBusy()) return
+  if (!rawDialog?.showModal) return runCleanRawSingle(page)
+  const natW = page.image.naturalWidth
+  const natH = page.image.naturalHeight
+  const scale = Math.min(1, 520 / Math.max(natW, natH))
+  const pw = Math.max(16, Math.round(natW * scale))
+  const ph = Math.max(16, Math.round(natH * scale))
+  const off = document.createElement("canvas")
+  off.width = pw
+  off.height = ph
+  const ctx = off.getContext("2d", { willReadFrequently: true })
+  ctx.drawImage(page.image, 0, 0, pw, ph)
+  rawPreviewSource = { width: pw, height: ph, data: ctx.getImageData(0, 0, pw, ph).data }
+  paintRawPreview()
+  rawDialog.showModal()
+}
+
+byId("clean-raw-all")?.addEventListener("click", () => runCleanRawChapter(readRawDialogOptions()))
+
+// Webtoon Vertical Stitch & Smart Slice dialog
+const webtoonDialog = byId("webtoon-dialog")
+byId("open-webtoon")?.addEventListener("click", () => {
+  if (projectBusy() || !state.pages.length || !webtoonDialog?.showModal) return
+  const count = state.pages.length
+  const fromEl = byId("webtoon-stitch-from")
+  const toEl = byId("webtoon-stitch-to")
+  if (fromEl) { fromEl.max = String(count); fromEl.value = "1" }
+  if (toEl) { toEl.max = String(count); toEl.value = String(count) }
+  if (byId("webtoon-stitch-run")) byId("webtoon-stitch-run").disabled = count < 2
+  if (byId("webtoon-slice-run")) byId("webtoon-slice-run").disabled = !selectedPage()
+  webtoonDialog.showModal()
+})
+byId("webtoon-close")?.addEventListener("click", () => webtoonDialog?.close())
+byId("webtoon-stitch-run")?.addEventListener("click", async () => {
+  if (projectBusy() || state.pages.length < 2) return
+  const from = clamp(Math.round(Number(byId("webtoon-stitch-from")?.value) || 1), 1, state.pages.length)
+  const to = clamp(Math.round(Number(byId("webtoon-stitch-to")?.value) || state.pages.length), 1, state.pages.length)
+  const startIdx = Math.min(from, to) - 1
+  const endIdx = Math.max(from, to) - 1
+  if (endIdx <= startIdx) return status("Hãy chọn ít nhất 2 trang để ghép dọc.", true)
+  webtoonDialog?.close()
+  commitLiveFormCheckpoint()
+  state.processingNative = true
+  renderPages()
+  status(`Đang ghép dọc trang ${startIdx + 1}–${endIdx + 1}…`)
+  try {
+    const subset = state.pages.slice(startIdx, endIdx + 1)
+    const files = await stitchPagesVertically(subset)
+    const decoded = []
+    for (const file of files) decoded.push(await openImage(file))
+    checkpoint()
+    state.pages.splice(startIdx, subset.length, ...decoded)
+    selectPage(decoded[0])
+    status(`Đã ghép ${subset.length} trang thành ${decoded.length} dải Webtoon (nhấn Ctrl+Z để hoàn tác).`)
+  } catch (error) {
+    status("Không thể ghép dọc trang. " + error.message, true)
+  } finally {
+    state.processingNative = false
+    render()
+  }
+})
+byId("webtoon-slice-run")?.addEventListener("click", async () => {
+  const page = selectedPage()
+  if (!page || projectBusy()) return
+  const targetHeight = clamp(Math.round(Number(byId("webtoon-slice-height")?.value) || 1600), 600, 4000)
+  webtoonDialog?.close()
+  commitLiveFormCheckpoint()
+  state.processingNative = true
+  renderPages()
+  status(`Đang cắt thông minh trang ${page.name} theo rãnh trống…`)
+  try {
+    const files = await smartSlicePageImage(page, { targetHeight })
+    if (!files.length) {
+      status("Trang hiện tại đã đủ gọn, không cần cắt thêm.")
+      return
+    }
+    const idx = state.pages.indexOf(page)
+    if (state.pages.length - 1 + files.length > pageLimit) {
+      throw new Error(`Số mảnh cắt (${files.length}) sẽ vượt giới hạn ${pageLimit} trang. Hãy tăng chiều cao mục tiêu.`)
+    }
+    const decoded = []
+    for (const file of files) decoded.push(await openImage(file))
+    checkpoint()
+    state.pages.splice(idx, 1, ...decoded)
+    selectPage(decoded[0])
+    status(`Đã cắt thông minh thành ${decoded.length} trang theo rãnh trống (nhấn Ctrl+Z để hoàn tác).`)
+  } catch (error) {
+    status("Không thể cắt trang Webtoon. " + error.message, true)
+  } finally {
     state.processingNative = false
     render()
   }
@@ -876,6 +1034,7 @@ function renderInspector() {
     byId("box-fill-shape").value = box.fillShape ?? "rect"
     byId("box-fill-color").value = box.fillColor ?? "#ffffff"
     byId("box-cleanup").checked = Boolean(box.cleanup)
+    if (byId("cleanup-mode")) byId("cleanup-mode").value = box.cleanupMode ?? "auto"
     byId("cleanup-expand").value = box.cleanupExpand ?? 0
     const idx = boxes.findIndex((item) => item.id === box.id)
     byId("box-layer-down").disabled = idx <= 0 || projectBusy()

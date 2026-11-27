@@ -129,6 +129,195 @@ internal static class PatchMatchInpaint
         return (new JsonObject { ["filled"] = holeCount }, output);
     }
 
+    /// <summary>
+    /// Auto Content-Aware Cleanup for text on complex artwork inside a speech/SFX box:
+    /// isolates high-contrast interior lettering (protecting artwork strokes crossing the box edge),
+    /// dilates the lettering mask by 2px, and fills via Multi-Scale PatchMatch + Poisson Seamless Blend.
+    /// Returns an inner-sized RGBA overlay patch (alpha 255 on cleaned pixels, 0 elsewhere).
+    /// </summary>
+    internal static (JsonObject, byte[]) ExecuteContentAware(JsonObject options, byte[] data)
+    {
+        var (width, height) = NativeImaging.Dimensions(options, data.Length, 1_600_000);
+        var region = options["inner"]?.AsObject() ?? throw new InvalidDataException("Missing inner region.");
+        var left = (int)region["left"]!;
+        var top = (int)region["top"]!;
+        var right = (int)region["right"]!;
+        var bottom = (int)region["bottom"]!;
+        if (left < 0 || top < 0 || right > width || bottom > height || right - left < 2 || bottom - top < 2)
+            throw new InvalidDataException("Invalid content-aware region.");
+
+        var iw = right - left;
+        var ih = bottom - top;
+        var pixelCount = width * height;
+        var luma = new float[pixelCount];
+        for (var i = 0; i < pixelCount; i++)
+        {
+            var o = i * 4;
+            luma[i] = (data[o] * 54f + data[o + 1] * 183f + data[o + 2] * 19f) / 256f;
+        }
+
+        // Prefix sum (integral image) for fast O(1) 13x13 local luminance background estimate.
+        var sw = width + 1;
+        var integral = new double[sw * (height + 1)];
+        for (var y = 0; y < height; y++)
+        {
+            var rowSum = 0d;
+            var dstRow = (y + 1) * sw;
+            var prevRow = y * sw;
+            var srcRow = y * width;
+            for (var x = 0; x < width; x++)
+            {
+                rowSum += luma[srcRow + x];
+                integral[dstRow + x + 1] = integral[prevRow + x + 1] + rowSum;
+            }
+        }
+
+        double LocalMean(int cx, int cy, int rad)
+        {
+            var x0 = Math.Max(0, cx - rad);
+            var y0 = Math.Max(0, cy - rad);
+            var x1 = Math.Min(width, cx + rad + 1);
+            var y1 = Math.Min(height, cy + rad + 1);
+            var sum = integral[y1 * sw + x1] - integral[y0 * sw + x1] - integral[y1 * sw + x0] + integral[y0 * sw + x0];
+            return sum / Math.Max(1, (x1 - x0) * (y1 - y0));
+        }
+
+        // Detect high-contrast lettering candidates across the inner box and a 2px border ring.
+        var candidate = new byte[pixelCount];
+        var ringX0 = Math.Max(0, left - 2);
+        var ringY0 = Math.Max(0, top - 2);
+        var ringX1 = Math.Min(width, right + 2);
+        var ringY1 = Math.Min(height, bottom + 2);
+        for (var y = ringY0; y < ringY1; y++)
+        {
+            var row = y * width;
+            for (var x = ringX0; x < ringX1; x++)
+            {
+                var idx = row + x;
+                if (data[idx * 4 + 3] < 240) continue;
+                var mean = LocalMean(x, y, 6);
+                if (Math.Abs(luma[idx] - mean) >= 28.0) candidate[idx] = 1;
+            }
+        }
+
+        // BFS from pixels touching or outside the inner boundary to protect crossing artwork strokes.
+        var protectedArt = new byte[pixelCount];
+        var bfs = new Queue<int>();
+        for (var y = ringY0; y < ringY1; y++)
+        {
+            var row = y * width;
+            for (var x = ringX0; x < ringX1; x++)
+            {
+                var idx = row + x;
+                if (candidate[idx] == 0) continue;
+                var isBorder = x <= left || x >= right - 1 || y <= top || y >= bottom - 1;
+                if (!isBorder) continue;
+                protectedArt[idx] = 1;
+                bfs.Enqueue(idx);
+            }
+        }
+        while (bfs.Count > 0)
+        {
+            var cur = bfs.Dequeue();
+            var cx = cur % width;
+            var cy = cur / width;
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                var nx = cx + dx;
+                var ny = cy + dy;
+                if (nx < ringX0 || nx >= ringX1 || ny < ringY0 || ny >= ringY1) continue;
+                var nIdx = ny * width + nx;
+                if (candidate[nIdx] == 0 || protectedArt[nIdx] != 0) continue;
+                protectedArt[nIdx] = 1;
+                bfs.Enqueue(nIdx);
+            }
+        }
+
+        // Dilate isolated interior lettering mask by 2px inside inner box.
+        var fullHole = new byte[pixelCount];
+        var holeCount = 0;
+        var hx0 = width;
+        var hy0 = height;
+        var hx1 = 0;
+        var hy1 = 0;
+        for (var y = top; y < bottom; y++)
+        {
+            var row = y * width;
+            for (var x = left; x < right; x++)
+            {
+                var idx = row + x;
+                if (candidate[idx] == 0 || protectedArt[idx] != 0) continue;
+                for (var dy = -2; dy <= 2; dy++)
+                for (var dx = -2; dx <= 2; dx++)
+                {
+                    if (dx * dx + dy * dy > 5) continue;
+                    var nx = x + dx;
+                    var ny = y + dy;
+                    if (nx < left || nx >= right || ny < top || ny >= bottom) continue;
+                    var nIdx = ny * width + nx;
+                    if (protectedArt[nIdx] != 0 || fullHole[nIdx] != 0) continue;
+                    fullHole[nIdx] = 1;
+                    holeCount++;
+                    if (nx < hx0) hx0 = nx;
+                    if (ny < hy0) hy0 = ny;
+                    if (nx + 1 > hx1) hx1 = nx + 1;
+                    if (ny + 1 > hy1) hy1 = ny + 1;
+                }
+            }
+        }
+
+        if (holeCount == 0 || holeCount > iw * ih * 0.65)
+            return (new JsonObject { ["filled"] = 0 }, []);
+
+        var win = SamplingWindow(new Box(hx0, hy0, hx1, hy1), width, height);
+        var ww = win.Width;
+        var wh = win.Height;
+        var rgb = new float[ww * wh * 3];
+        var hole = new byte[ww * wh];
+        for (var y = 0; y < wh; y++)
+        {
+            var srcRow = (win.Y0 + y) * width + win.X0;
+            var dstRow = y * ww;
+            for (var x = 0; x < ww; x++)
+            {
+                var si = (srcRow + x) * 4;
+                var di = (dstRow + x) * 3;
+                rgb[di] = data[si] / 255f;
+                rgb[di + 1] = data[si + 1] / 255f;
+                rgb[di + 2] = data[si + 2] / 255f;
+                hole[dstRow + x] = fullHole[srcRow + x];
+            }
+        }
+
+        var originalRgb = (float[])rgb.Clone();
+        var localHoleBox = new Box(hx0 - win.X0, hy0 - win.Y0, hx1 - win.X0, hy1 - win.Y0);
+        Complete(ww, wh, rgb, hole, localHoleBox, 3, true, 0.15f, 1UL);
+        PoissonBlend.SeamlessInpaintBlendRgb(ww, wh, rgb, originalRgb, hole);
+
+        var overlay = new byte[iw * ih * 4];
+        for (var y = top; y < bottom; y++)
+        {
+            var wy = y - win.Y0;
+            if (wy < 0 || wy >= wh) continue;
+            for (var x = left; x < right; x++)
+            {
+                var wx = x - win.X0;
+                if (wx < 0 || wx >= ww) continue;
+                var wIdx = wy * ww + wx;
+                if (hole[wIdx] == 0) continue;
+                var si = wIdx * 3;
+                var di = ((y - top) * iw + (x - left)) * 4;
+                overlay[di] = ToByte(rgb[si]);
+                overlay[di + 1] = ToByte(rgb[si + 1]);
+                overlay[di + 2] = ToByte(rgb[si + 2]);
+                overlay[di + 3] = 255;
+            }
+        }
+        return (new JsonObject { ["filled"] = holeCount }, overlay);
+    }
+
     private static Box SamplingWindow(Box hole, int width, int height)
     {
         var side = (int)Math.Round(4.0 * Math.Sqrt(Math.Max(hole.Width, 50) * (double)Math.Max(hole.Height, 50)));

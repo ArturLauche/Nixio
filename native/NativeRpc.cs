@@ -40,6 +40,7 @@ internal static class NativeRpc
                     "redraw" => Redraw(options, data),
                     "mask" => (new JsonObject(), NativeImaging.Mask(options, data)),
                     "inpaint" => PatchMatchInpaint.Execute(options, data),
+                    "content_aware_cleanup" => PatchMatchInpaint.ExecuteContentAware(options, data),
                     "seamless_clone" => PoissonBlend.ExecuteSeamlessClone(options, data),
                     "clean_raw" => RawCleanup.Execute(options, data),
                     "preprocess" => NativeImaging.Preprocess(options, data),

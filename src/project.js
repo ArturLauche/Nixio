@@ -68,11 +68,13 @@ function projectStroke(stroke) {
 }
 
 function projectBox(box) {
-  const { text, cleanup = false, originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0 } = box ?? {}
-  if (!isText(text) || typeof cleanup !== "boolean" || !Number.isInteger(cleanupExpand) || Math.abs(cleanupExpand) > 8 ||
+  const { text, cleanup = false, cleanupMode = "auto", originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0 } = box ?? {}
+  if (!isText(text) || typeof cleanup !== "boolean" || !["auto", "content-aware"].includes(cleanupMode) ||
+      !Number.isInteger(cleanupExpand) || Math.abs(cleanupExpand) > 8 ||
       (cleanupStrokes !== undefined && !Array.isArray(cleanupStrokes))) throw invalidProject()
   return {
     ...rectangle(box), ...projectStyle(box), text, cleanup,
+    ...(cleanupMode !== "auto" && { cleanupMode }),
     ...(originalBox && { originalBox: rectangle(originalBox) }),
     ...(cleanupRect && { cleanupRect: rectangle(cleanupRect) }),
     ...(cleanupExpand !== 0 && { cleanupExpand }),
