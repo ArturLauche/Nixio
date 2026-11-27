@@ -77,7 +77,7 @@ async function spreadsheetText(zip) {
     }
     return values
   })
-  const headings = (rows[0] ?? []).map((cell) => cell.trim().toLowerCase())
+  const headings = Array.from(rows[0] ?? [], (cell) => String(cell ?? "").trim().toLowerCase())
   const script = headings.findIndex((cell) => ["translation", "bản dịch", "thoại", "text"].includes(cell))
   const page = headings.findIndex((cell) => ["page", "trang", "ảnh"].includes(cell))
   if (script < 0) return rows.map((row) => row.filter(Boolean).join(" ")).filter(Boolean).join("\n")
