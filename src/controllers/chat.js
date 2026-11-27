@@ -549,6 +549,14 @@ export function setupChat({
 
   let turnBeforeSnapshot = null
   let turnCheckpointRecorded = false
+  // The project a running turn started in. A turn outlives a project switch, so its transcript has
+  // to keep landing in the project it began in instead of the one the user just opened.
+  let turnProjectId = null
+  const turnProject = () => turnProjectId ?? state.projectId
+  const saveTurnSession = (fields) => {
+    const id = turnProject()
+    if (id) saveProjectChatSession(id, fields)
+  }
   // One AI turn is one named action: every tool edit inside the turn lands on the same entry, so
   // the timeline shows the turn instead of one anonymous row per tool call.
   const AI_TURN_META = { label: "Chỉnh sửa từ Trợ lý AI", kind: "ai" }
@@ -583,6 +591,7 @@ export function setupChat({
   // refused so a later turn cannot quietly propose the same thing again.
   function applyReviewChanges(review, ids) {
     const before = editorSnapshot?.() ?? null
+    const projectId = turnProject()
     const outcome = applyAcceptedChanges({
       pages: state.pages,
       session: review,
@@ -596,7 +605,7 @@ export function setupChat({
     if (outcome.rejected.length) rejectionLog = recordRejections(rejectionLog, outcome.rejected)
     if (outcome.applied.length) rejectionLog = clearRejections(rejectionLog, outcome.applied)
     if (outcome.applied.length || outcome.rejected.length) {
-      if (state.projectId) saveProjectRejections(state.projectId, rejectionLog)
+      if (projectId) saveProjectRejections(projectId, rejectionLog)
     }
     return outcome
   }
@@ -728,7 +737,7 @@ export function setupChat({
     renderFontOptions,
     onTodosChange: (todos) => {
       renderTodos(todos)
-      if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos })
+      saveTurnSession({ history: chatHistory, todos })
     },
     onPlanSubmit: (plan) => renderPlanCard(plan, activeTurnEl),
     onAskUser: promptInteractiveQuestion,
@@ -795,9 +804,12 @@ export function setupChat({
 
   toggleBtn.onclick = () => setOpen(panel.hidden)
   byId("chat-close").onclick = () => setOpen(false)
-  // Escape is the keyboard twin of the × button and belongs to the panel only while it is open.
+  // Escape is the keyboard twin of the × button and belongs to the panel only while it is open,
+  // and only while no dialog owns Escape.
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !panel.hidden && !event.defaultPrevented) setOpen(false)
+    if (event.key !== "Escape" || panel.hidden || event.defaultPrevented) return
+    if (document.querySelector("dialog[open]")) return
+    setOpen(false)
   })
 
   function clearSession() {
@@ -818,6 +830,8 @@ export function setupChat({
       reportBusy()
       return
     }
+    // Summarising can outlive a project switch, so it writes to the project it started in.
+    const compactProjectId = state.projectId
     if (!useLlm) {
       try {
         const res = compactChatHistory(chatHistory, { force: true })
@@ -826,7 +840,7 @@ export function setupChat({
           return
         }
         chatHistory = res.history
-        if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
+        if (compactProjectId) saveProjectChatSession(compactProjectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
         renderPersistedSession()
         statusEl.textContent = `Đã nén ${res.foldedMessages} tin nhắn cũ (tiết kiệm ~${res.charsSaved} ký tự).`
         notify?.({
@@ -855,7 +869,7 @@ export function setupChat({
         return
       }
       chatHistory = res.history
-      if (state.projectId) saveProjectChatSession(state.projectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
+      if (compactProjectId) saveProjectChatSession(compactProjectId, { history: chatHistory, todos: tools.getTodos?.() ?? [] })
       renderPersistedSession()
       statusEl.textContent = `Đã tóm tắt ${res.foldedMessages} tin nhắn cũ bằng AI (-${res.charsSaved} ký tự).`
       notify?.({
@@ -976,6 +990,8 @@ export function setupChat({
 
   async function runTurn(promptText, { planMode = false, onTurnStart, onTurnEnd } = {}) {
     let settled = { ok: false, cancelled: false }
+    // The turn keeps writing to the project it starts in, whatever the user opens meanwhile.
+    turnProjectId = state.projectId
 
     const userBubble = document.createElement("div")
     userBubble.className = "chat-msg user"
@@ -1134,9 +1150,7 @@ export function setupChat({
 
       clearStreamPreview()
       chatHistory = result.updatedHistory
-      if (state.projectId) {
-        saveProjectChatSession(state.projectId, { history: chatHistory, todos: result.todos })
-      }
+      saveTurnSession({ history: chatHistory, todos: result.todos })
       persistRecord()
       if (result.contextBudget) updateContextMeter(result.contextBudget)
       if (result.thought) {
@@ -1216,6 +1230,7 @@ export function setupChat({
     } finally {
       turnBeforeSnapshot = null
       turnCheckpointRecorded = false
+      turnProjectId = null
       tools.endReview?.()
       activeController = null
       activeTurnEl = null

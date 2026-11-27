@@ -798,3 +798,38 @@ test("a turn that changes nothing explains why in Vietnamese", async () => {
   const planNote = byClass(harness.byId("chat-messages"), "chat-msg system").at(-1)
   assert.ok(planNote, "a plan-mode turn still reports its own reason")
 })
+
+test("an Escape that belongs to a dialog leaves the panel open (#review)", async () => {
+  const harness = await createHarness()
+  const panel = harness.panel
+  panel.hidden = false
+  // A modal owns Escape while it is open: closing the panel behind it would drop the dialog's host.
+  const dialog = fakeElement("dialog")
+  harness.document.querySelector = (selector) => (selector === "dialog[open]" ? dialog : null)
+  harness.document.dispatch("keydown", { key: "Escape" })
+  assert.equal(panel.hidden, false)
+
+  harness.document.querySelector = () => null
+  harness.document.dispatch("keydown", { key: "Escape" })
+  assert.equal(panel.hidden, true, "with no dialog open Escape closes the panel again")
+})
+
+test("a project switch during a turn keeps the transcript in the project the turn started in (#review)", async () => {
+  const { loadProjectChatSession } = await import("../src/chat-storage.js")
+  const harness = await createHarness()
+  const stream = streamingResponse()
+  harness.setFetch(() => stream.response())
+  harness.submit("Đọc trang 1")
+  await drain()
+
+  // The user opens another project while the answer is still streaming.
+  harness.state.projectId = "project-2"
+  stream.send("Đã đọc trang 1.")
+  stream.close()
+  await drain()
+
+  const started = loadProjectChatSession("project-1").history
+  assert.ok(started.length >= 2, "the turn lands in the project it started in")
+  assert.equal(started.at(-1).text, "Đã đọc trang 1.")
+  assert.deepEqual(loadProjectChatSession("project-2").history, [], "nothing leaks into the project the user opened")
+})
