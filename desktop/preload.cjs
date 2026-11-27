@@ -30,4 +30,10 @@ contextBridge.exposeInMainWorld("khungThoaiDesktop", {
   // Write-only: the key travels in and only a status and an opaque handle come back.
   credentialSave: (provider, endpoint, secret) => invoke("credential-save", provider, endpoint, secret),
   credentialRemove: (provider, endpoint) => invoke("credential-remove", provider, endpoint),
+  // Selected-provider traffic runs in main. The renderer names a provider and an operation, never a
+  // URL, a method or a header, and the key is attached in main.
+  providerRequest: (request) => invoke("provider-request", request),
+  providerStream: (request) => invoke("provider-stream", request),
+  providerCancel: (ticket) => invoke("provider-cancel", ticket),
+  onProviderEvent: (callback) => ipcRenderer.on("khung-thoai:provider-event", (_event, payload) => callback(payload)),
 })

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell, safeStorage } = require("electron")
+const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell, safeStorage, webContents } = require("electron")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const { NativeWorker } = require("./native-worker.cjs")
@@ -8,6 +8,7 @@ const { webSearch, fetchUrl, isSafePublicHttpsUrl } = require("./web-search.cjs"
 const { checkForUpdates } = require("./updater.cjs")
 const { CredentialStore } = require("./credential-store.cjs")
 const { CREDENTIAL_CHANNELS, CredentialService, sanitizeCredentialError, trustedChannel } = require("./credential-ipc.cjs")
+const { PROVIDER_CHANNELS, ProviderTransport, providerChannel, sanitizeProviderError } = require("./provider-transport.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -39,6 +40,7 @@ let worker
 let imageWorker
 let tasks
 let projects
+let providerTransport
 let mainWindow
 let closeApproved = false
 
@@ -70,18 +72,18 @@ function createWindow() {
     },
   })
 
-  const { webContents } = mainWindow
-  webContents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { tasks?.close(); projects?.cancelAll().catch(() => {}) } })
-  webContents.setWindowOpenHandler(() => ({ action: "deny" }))
-  webContents.on("will-navigate", (event) => event.preventDefault())
-  webContents.on("will-attach-webview", (event) => event.preventDefault())
+  const contents = mainWindow.webContents
+  contents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { tasks?.close(); providerTransport?.cancelAll(); projects?.cancelAll().catch(() => {}) } })
+  contents.setWindowOpenHandler(() => ({ action: "deny" }))
+  contents.on("will-navigate", (event) => event.preventDefault())
+  contents.on("will-attach-webview", (event) => event.preventDefault())
   mainWindow.on("close", (event) => {
     if (closeApproved || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isCrashed()) return
     event.preventDefault()
     mainWindow.webContents.send("khung-thoai:closing")
   })
   mainWindow.once("ready-to-show", () => mainWindow.show())
-  mainWindow.on("closed", () => { mainWindow = null })
+  mainWindow.on("closed", () => { providerTransport?.cancelAll(); mainWindow = null })
   mainWindow.loadURL(entry)
 }
 
@@ -97,12 +99,25 @@ app.whenReady().then(() => {
   const handle = (channel, action, onError) => ipcMain.handle(channel, trustedChannel(trusted, action, onError))
   // API keys live in the OS vault under userData and never reach the renderer: these channels only
   // accept a newly typed key and return status plus opaque handles.
-  const credentials = new CredentialService({
-    store: new CredentialStore({ userData: app.getPath("userData"), safeStorage, platform: process.platform }),
+  const credentialStore = new CredentialStore({ userData: app.getPath("userData"), safeStorage, platform: process.platform })
+  const credentials = new CredentialService({ store: credentialStore })
+  // Provider traffic is built in main from a provider name and an operation, so a selected-provider
+  // call is never a generic privileged fetch. Frames reach only the window that opened the stream.
+  providerTransport = new ProviderTransport({
+    credentials: credentialStore,
+    emit: (senderKey, payload) => {
+      const id = Number(senderKey.slice(1))
+      const contents = Number.isInteger(id) ? webContents.fromId(id) : null
+      if (contents && !contents.isDestroyed()) contents.send(PROVIDER_CHANNELS.event, payload)
+    },
   })
   handle(CREDENTIAL_CHANNELS.status, (provider, endpoint) => credentials.status(provider, endpoint), sanitizeCredentialError)
   handle(CREDENTIAL_CHANNELS.save, (provider, endpoint, secret) => credentials.save(provider, endpoint, secret), sanitizeCredentialError)
   handle(CREDENTIAL_CHANNELS.remove, (provider, endpoint) => credentials.remove(provider, endpoint), sanitizeCredentialError)
+  const provider = (channel, action) => ipcMain.handle(channel, providerChannel(trusted, action, sanitizeProviderError))
+  provider(PROVIDER_CHANNELS.request, (senderKey, request) => providerTransport.execute(senderKey, request))
+  provider(PROVIDER_CHANNELS.stream, (senderKey, request) => providerTransport.stream(senderKey, request))
+  provider(PROVIDER_CHANNELS.cancel, (senderKey, ticket) => providerTransport.cancel(senderKey, ticket))
   handle("khung-thoai:redraw-texture", (input) => imageWorker.available ? imageWorker.redraw(input) : undefined)
   handle("khung-thoai:native", (operation, options, data, taskId) => {
     if (!["capabilities", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
