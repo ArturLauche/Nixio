@@ -418,6 +418,59 @@ test("the QA board stores a note with its state, filters rows, and applies the p
   assert.equal(byId("preflight-dialog").open, false)
 })
 
+test("a triage decision marks the project dirty and keeps the caret in the row it changed (#review)", async () => {
+  const { byId } = createById()
+  const page = {
+    id: "p1",
+    name: "01.png",
+    image: { naturalWidth: 800, naturalHeight: 1200 },
+    boxes: [{
+      id: "b1", text: "", x: .1, y: .1, w: .5, h: .25,
+      size: 24, font: "Arial", color: "#171717", align: "center", rotation: 0, fill: true,
+    }],
+    unplaced: [],
+  }
+  const state = { pages: [page], queue: [], exporting: false, openingProject: false }
+  const store = createQaReviewStore()
+  let changed = 0
+  const { setupExports } = await controllers("export")
+  setupExports({
+    ...baseArguments(byId, state),
+    readTranslationSettings: () => ({}),
+    qaReview: store,
+    changed: () => { changed++ },
+  })
+  // The board looks up the control it just painted the way the real DOM would.
+  byId("preflight-issues").querySelectorAll = (selector) => {
+    const wanted = /^\[data-qa-finding="(.*)"\]$/.exec(selector)?.[1]
+    const found = []
+    const stack = [...byId("preflight-issues").children]
+    while (stack.length) {
+      const node = stack.shift()
+      if (!node) continue
+      if (node.dataset?.qaFinding === wanted) found.push(node)
+      if (Array.isArray(node.children)) stack.push(...node.children)
+    }
+    return found
+  }
+
+  byId("check-export").onclick()
+  const id = "1:0:empty_or_placeholder"
+  const select = qaRowControls(byId, id, "SELECT")
+  assert.equal(changed, 0, "opening the board changes nothing")
+  globalThis.document.activeElement = select
+  select.value = "fixed"
+  select.onchange()
+  globalThis.document.activeElement = null
+
+  assert.equal(store.entry(id).state, "fixed")
+  assert.equal(changed, 1, "a decision is an unsaved change")
+  const repainted = qaRowControls(byId, id, "SELECT")
+  assert.notEqual(repainted, select, "the board repainted the row")
+  assert.equal(repainted.value, "fixed")
+  assert.equal(repainted.focused, true, "the caret stays on the control the user just used")
+})
+
 test("an open warning gates the export and continuing records the override as a decision", async () => {
   const { byId } = createById()
   const page = {

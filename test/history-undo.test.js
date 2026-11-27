@@ -377,3 +377,11 @@ test("undo and redo preserve history when the current snapshot cannot be copied"
   assert.throws(() => history.redo(uncloneable), { name: "DataCloneError" })
   assert.equal(history.redo({ pages: [], index: 0 }).index, 1)
 })
+
+test("the editor snapshot carries QA decisions, so undoing an applied suggestion restores them (#review)", async () => {
+  const main = await readFile(new URL("../src/main.js", import.meta.url), "utf8")
+  // The board is project data an action changes, so it belongs in the snapshot history records.
+  assert.match(main, /function editorSnapshot\(\) \{[\s\S]*?qaReview: qaReview\.snapshot\(\),[\s\S]*?\n\}/)
+  // ...and the restore path has to put it back, or the finding stays marked fixed.
+  assert.match(main, /function applyHistorySnapshot\(snapshot\) \{[\s\S]*?qaReview: review[\s\S]*?qaReview\.replace\(review\)/)
+})

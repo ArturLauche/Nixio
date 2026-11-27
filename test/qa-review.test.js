@@ -235,3 +235,26 @@ test("setQaFindingState is pure, and a project hands its board over whole", () =
   store.clear()
   assert.equal(store.size, 0)
 })
+
+test("a snapshot hands the whole board back, so undo restores the decision with the text (#review)", () => {
+  const store = createQaReviewStore()
+  const id = "1:0:punctuation_spacing"
+  store.set(id, { state: "fixed", note: "Đã sửa dấu câu" })
+  const before = store.snapshot()
+  const revision = store.revision
+
+  // The edit an undo has to reverse.
+  store.set(id, { state: "ignored", note: "Biên tập giữ nguyên" })
+  assert.equal(store.entry(id).state, "ignored")
+
+  store.replace(before)
+  assert.equal(store.entry(id).state, "fixed")
+  assert.equal(store.entry(id).note, "Đã sửa dấu câu")
+  assert.deepEqual(store.snapshot(), before)
+  assert.notEqual(store.revision, revision, "a restore repaints the board")
+
+  // The snapshot is a copy, so a later decision cannot rewrite the state history parked.
+  store.set(id, { state: "ignored", note: "Biên tập giữ nguyên" })
+  assert.equal(before.entries[0].state, "fixed")
+  assert.deepEqual(store.snapshot().version, before.version)
+})

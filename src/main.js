@@ -190,6 +190,9 @@ function editorSnapshot() {
     pageId: state.pageId, boxId: state.boxId,
     styleGuide: state.styleGuide, fit: state.fit,
     defaultFont: state.defaultFont, templateId: state.templateId,
+    // A triage decision is project data an action can change, so undoing "Áp gợi ý QA" has to put
+    // the decision back with the text instead of leaving the finding marked fixed.
+    qaReview: qaReview.snapshot(),
     settings: Object.fromEntries(projectSettings.map(({ id, value }) => [id, value])),
   })
 }
@@ -263,8 +266,9 @@ function restoreHistory(direction) {
 // Undo, redo and a timeline jump all apply a snapshot through one path so selection, project
 // settings and asset release stay identical no matter how the playhead moved.
 function applyHistorySnapshot(snapshot) {
-  const { settings, ...editor } = snapshot
+  const { settings, qaReview: review, ...editor } = snapshot
   projects.changed()
+  if (review) qaReview.replace(review)
   Object.assign(state, editor, { placing: false })
   updateFitLabel()
   syncSelectionAfterRestore()
@@ -2470,6 +2474,7 @@ const exportUi = setupExports({
   readTranslationSettings: translation.settings,
   isNativeReady: () => projects.ready,
   commitLiveForm: commitLiveFormCheckpoint,
+  changed: () => projects.changed(),
 })
 chat = setupChat({
   ...shared,

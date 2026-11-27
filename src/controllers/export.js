@@ -44,6 +44,7 @@ export function setupExports({
   commitLiveForm,
   checkpoint,
   render,
+  changed,
   qaReview,
   notify,
 }) {
@@ -336,7 +337,16 @@ export function setupExports({
       }
       error.textContent = ""
       row.dataset.state = stateSelect.value
+      // A decision is project data like any other: without this the file never turns dirty, so
+      // autosave and the close guard both skip it and the triage is lost.
+      changed?.()
+      // The board re-renders every row, so the control the user just used is put back under the
+      // caret instead of dropping focus to the document.
+      const tag = document.activeElement === stateSelect ? "select" : "input"
       paintBoard()
+      const control = [...byId("preflight-issues").querySelectorAll(`[data-qa-finding="${finding.id}"]`)]
+        .find((element) => element.tagName.toLowerCase() === tag)
+      control?.focus()
     }
     stateSelect.onchange = save
     noteInput.onchange = save
@@ -361,6 +371,7 @@ export function setupExports({
     box.text = finding.suggestion
     qaReview?.set?.(finding.id, { state: "fixed", note: finding.note })
     render()
+    changed?.()
     // The box is fixed, so the next run no longer reports it: re-linting retires the row instead
     // of leaving a decision on screen for a finding that is gone.
     boardLint = lintPages(boardPages)
