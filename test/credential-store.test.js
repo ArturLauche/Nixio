@@ -4,12 +4,16 @@ import * as fsPromises from "node:fs/promises"
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { CREDENTIAL_CODES, CredentialStore } from "../desktop/credential-store.cjs"
+import { CREDENTIAL_CODES, CREDENTIAL_MESSAGES, CredentialStore } from "../desktop/credential-store.cjs"
 
 // Synthetic values stand in for API keys: no real credential is ever used by these tests.
 const SECRET = "sk-test-gemini-4f9c1b2a7d6e"
 const OTHER = "sk-test-openai-8a1c3d5e7f90"
-const PREFIX = "FAKE1:"
+// Tags of the pinned runtime. "v10" on Linux is the POSIX fallback key, "v11" the Secret Service and
+// "v12" the portal secret; macOS and Windows only ever produce "v10".
+const FALLBACK_TAG = "v10"
+const SECRET_SERVICE_TAG = "v11"
+const PORTAL_TAG = "v12"
 
 const mask = (buffer) => {
   const output = Buffer.alloc(buffer.length)
@@ -17,35 +21,40 @@ const mask = (buffer) => {
   return output
 }
 
-// Stands in for Electron safeStorage. It records usage and produces non-deterministic ciphertext so
-// a rewrite is observable, but it never contains the plaintext.
+// Stands in for Electron safeStorage. Ciphertext is `tag + masked plaintext`, exactly as
+// `Encryptor::EncryptString` prefixes the tag of the provider that encrypted the data, so a test can
+// stand in for a specific key provider. It records what it was asked to encrypt, which is how the
+// tests prove a secret never reached the fallback.
 function fakeSafeStorage(options = {}) {
-  const { available = true, availableError, encryptError, decryptError, rotate = 0 } = options
-  const calls = { encrypt: 0, decrypt: 0, plaintext: 0, rotations: 0 }
+  const { available = true, availableError, encryptError, decryptError, rotate = null, tag = SECRET_SERVICE_TAG } = options
+  const calls = { encrypt: 0, decrypt: 0, plaintext: 0, rotations: 0, plaintexts: [] }
   let serial = 0
-  let rotations = rotate
+  const failure = (option, ...args) => (typeof option === "function" ? option(...args) : option)
   const safeStorage = {
     async isAsyncEncryptionAvailable() {
       if (availableError) throw availableError
       return available
     },
     async encryptStringAsync(plaintext) {
-      calls.encrypt++
-      if (encryptError) throw typeof encryptError === "function" ? encryptError(plaintext) : encryptError
-      return Buffer.concat([Buffer.from(`${PREFIX}${++serial}:`, "utf8"), mask(Buffer.from(plaintext, "utf8"))])
+      const index = calls.encrypt++
+      calls.plaintexts.push(plaintext)
+      const encryptedError = failure(encryptError, plaintext, index)
+      if (encryptedError) throw encryptedError
+      // A serial byte keeps a rewrite of the same key observable, like a real rotation would.
+      return Buffer.concat([Buffer.from(tag, "latin1"), Buffer.from([serial++ % 256]), mask(Buffer.from(plaintext, "utf8"))])
     },
     async decryptStringAsync(ciphertext) {
-      calls.decrypt++
-      if (decryptError) throw typeof decryptError === "function" ? decryptError(ciphertext) : decryptError
-      const raw = Buffer.from(ciphertext).toString("latin1")
-      const match = /^FAKE1:\d+:/.exec(raw)
-      if (!match) throw new Error("not a fake ciphertext")
-      const shouldReEncrypt = rotations > 0
-      if (shouldReEncrypt) {
-        rotations--
-        calls.rotations++
+      const index = calls.decrypt++
+      const decryptedError = failure(decryptError, ciphertext, index)
+      if (decryptedError) throw decryptedError
+      const raw = Buffer.from(ciphertext)
+      if (!raw.subarray(0, tag.length).equals(Buffer.from(tag, "latin1"))) {
+        throw new Error("no key for this provider prefix")
       }
-      return { shouldReEncrypt, result: mask(Buffer.from(raw.slice(match[0].length), "latin1")).toString("utf8") }
+      const result = mask(raw.subarray(tag.length + 1)).toString("utf8")
+      const shouldReEncrypt = typeof rotate === "function" && rotate(result) === true
+      if (shouldReEncrypt) calls.rotations++
+      return { shouldReEncrypt, result }
     },
     setUsePlainTextEncryption() { calls.plaintext++ },
   }
@@ -56,12 +65,14 @@ function fakeSafeStorage(options = {}) {
 async function prepare(t, { platform = "darwin", safeStorage = {}, fileSystem } = {}) {
   const userData = await mkdtemp(path.join(os.tmpdir(), "nixio-credentials-"))
   t.after(() => rm(userData, { recursive: true, force: true }))
-  const fake = fakeSafeStorage(safeStorage)
+  const fake = fakeSafeStorage({ tag: platform === "linux" ? SECRET_SERVICE_TAG : FALLBACK_TAG, ...safeStorage })
   const store = new CredentialStore({ userData, safeStorage: fake.safeStorage, platform, fileSystem })
   return { store, userData, calls: fake.calls, safeStorage: fake.safeStorage, platform }
 }
 
 const recordPath = (userData, provider) => path.join(userData, "credentials", `${provider}.json`)
+const encode = (tag, plaintext) => Buffer.concat([Buffer.from(tag, "latin1"), mask(Buffer.from(plaintext, "utf8"))])
+const errorOf = async (promise) => promise.catch((value) => value)
 
 async function listFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -73,7 +84,7 @@ async function listFiles(directory) {
   return found
 }
 
-test("supported OS protection round-trips a credential through the injected safeStorage", async (t) => {
+test("a supported OS provider round-trips a credential through the injected safeStorage", async (t) => {
   const { store, userData, calls } = await prepare(t)
   assert.deepEqual(await store.save("gemini", SECRET), { provider: "gemini" })
   assert.equal(await store.read("gemini"), SECRET)
@@ -143,12 +154,16 @@ test("an encryption failure rejects without exposing the key or replacing the pr
   await store.save("gemini", SECRET)
   const failing = new CredentialStore({
     userData,
-    safeStorage: fakeSafeStorage({ encryptError: (plaintext) => new Error(`encryption failed for ${plaintext}`) }).safeStorage,
+    safeStorage: fakeSafeStorage({
+      tag: FALLBACK_TAG,
+      encryptError: (plaintext) => (plaintext === OTHER ? new Error(`encryption failed for ${plaintext}`) : null),
+    }).safeStorage,
     platform: "darwin",
   })
 
-  const error = await failing.save("gemini", OTHER).catch((value) => value)
+  const error = await errorOf(failing.save("gemini", OTHER))
   assert.equal(error.code, CREDENTIAL_CODES.ENCRYPT)
+  assert.equal(error.message, CREDENTIAL_MESSAGES[CREDENTIAL_CODES.ENCRYPT])
   assert.ok(!error.message.includes(OTHER))
   assert.ok(!String(error.cause?.message ?? "").includes(OTHER))
   assert.equal(await store.read("gemini"), SECRET)
@@ -161,19 +176,25 @@ test("decryption failures and tampered records fail closed and can be repaired",
 
   const locked = new CredentialStore({
     userData,
-    safeStorage: fakeSafeStorage({ decryptError: new Error("secret service locked") }).safeStorage,
+    safeStorage: fakeSafeStorage({
+      tag: FALLBACK_TAG,
+      // The store's probe decrypts first; the stored record must then fail like a locked vault.
+      decryptError: (_ciphertext, index) => (index > 0 ? new Error("secret service locked") : null),
+    }).safeStorage,
     platform: "darwin",
   })
-  assert.equal((await locked.read("gemini").catch((value) => value)).code, CREDENTIAL_CODES.DECRYPT)
+  const lockedError = await errorOf(locked.read("gemini"))
+  assert.equal(lockedError.code, CREDENTIAL_CODES.DECRYPT)
+  assert.ok(!String(lockedError.message).includes("secret service locked"))
 
   await writeFile(record, "not json")
-  assert.equal((await store.read("gemini").catch((value) => value)).code, CREDENTIAL_CODES.CORRUPT)
+  assert.equal((await errorOf(store.read("gemini"))).code, CREDENTIAL_CODES.CORRUPT)
 
   await writeFile(record, JSON.stringify({ version: 2, ciphertext: "AAAA" }))
-  assert.equal((await store.read("gemini").catch((value) => value)).code, CREDENTIAL_CODES.CORRUPT)
+  assert.equal((await errorOf(store.read("gemini"))).code, CREDENTIAL_CODES.CORRUPT)
 
   await writeFile(record, JSON.stringify({ version: 1, ciphertext: "%%%not-base64%%%" }))
-  assert.equal((await store.read("gemini").catch((value) => value)).code, CREDENTIAL_CODES.CORRUPT)
+  assert.equal((await errorOf(store.read("gemini"))).code, CREDENTIAL_CODES.CORRUPT)
 
   await store.save("gemini", OTHER)
   assert.equal(await store.read("gemini"), OTHER)
@@ -184,42 +205,102 @@ test("unavailable OS encryption refuses reads and writes without a fallback", as
   await base.store.save("gemini", SECRET)
 
   const off = await prepare(t, { safeStorage: { available: false } })
-  assert.deepEqual(await off.store.status(), { supported: false, backend: "keychain", reason: "unavailable" })
-  assert.equal((await off.store.save("gemini", SECRET).catch((value) => value)).code, CREDENTIAL_CODES.UNAVAILABLE)
+  assert.deepEqual(await off.store.status(), { supported: false, provider: null, reason: "unavailable" })
+  assert.equal((await errorOf(off.store.save("gemini", SECRET))).code, CREDENTIAL_CODES.UNAVAILABLE)
   await assert.rejects(stat(path.join(off.userData, "credentials")), /ENOENT/)
   assert.equal(off.calls.encrypt, 0)
 
   const locked = new CredentialStore({ userData: base.userData, safeStorage: fakeSafeStorage({ available: false }).safeStorage, platform: "darwin" })
-  assert.equal((await locked.read("gemini").catch((value) => value)).code, CREDENTIAL_CODES.UNAVAILABLE)
+  assert.equal((await errorOf(locked.read("gemini"))).code, CREDENTIAL_CODES.UNAVAILABLE)
   assert.equal(await base.store.read("gemini"), SECRET)
 
   const throwing = await prepare(t, { safeStorage: { availableError: new Error("keychain timed out") } })
-  assert.equal((await throwing.store.status()).reason, "unavailable")
+  const state = await throwing.store.status()
+  assert.equal(state.reason, "unavailable")
+  assert.equal(throwing.calls.encrypt, 0)
 })
 
-test("Linux backends without OS protection are refused before encryption", async (t) => {
-  for (const backend of ["basic_text", "unknown", "libsecret", "gnome-libsecret", ""]) {
-    const { store, userData, calls } = await prepare(t, { platform: "linux", safeStorage: { backend } })
-    const status = await store.status()
-    assert.equal(status.supported, false)
-    assert.equal(status.reason, backend === "basic_text" ? "insecure-backend" : "unsupported-backend")
-    assert.equal((await store.save("gemini", SECRET).catch((value) => value)).code, CREDENTIAL_CODES.UNPROTECTED)
-    assert.equal(calls.encrypt, 0)
-    await assert.rejects(stat(path.join(userData, "credentials")), /ENOENT/)
+// The blocking review finding: Electron 45 can report a protected Linux backend while the async
+// provider chain encrypts with the POSIX fallback ("peanuts" key), and async availability is true in
+// that state. Nothing about a label or availability may therefore authorize a fallback ciphertext.
+test("a plausible Linux backend plus async availability cannot authorize the fallback key", async (t) => {
+  const { store, userData, calls } = await prepare(t, {
+    platform: "linux",
+    safeStorage: { tag: FALLBACK_TAG, backend: "gnome_libsecret", available: true },
+  })
+  assert.deepEqual(await store.status(), { supported: false, provider: null, reason: "unsupported-provider" })
+
+  const error = await errorOf(store.save("gemini", SECRET))
+  assert.equal(error.code, CREDENTIAL_CODES.UNPROTECTED)
+  assert.equal(error.message, CREDENTIAL_MESSAGES[CREDENTIAL_CODES.UNPROTECTED])
+  assert.equal(calls.plaintexts.includes(SECRET), false, "the key must never reach the fallback provider")
+  await assert.rejects(stat(path.join(userData, "credentials")), /ENOENT/)
+})
+
+test("a Linux backend label is never consulted in either direction", async (t) => {
+  for (const backend of ["basic_text", "unknown", "kwallet5", "gnome_libsecret"]) {
+    const withFallback = await prepare(t, { platform: "linux", safeStorage: { tag: FALLBACK_TAG, backend } })
+    assert.equal((await withFallback.store.status()).supported, false, `${backend} must not authorize v10`)
+
+    const withSecretService = await prepare(t, { platform: "linux", safeStorage: { tag: SECRET_SERVICE_TAG, backend } })
+    assert.equal((await withSecretService.store.status()).supported, true, `${backend} must not veto v11`)
   }
 
-  const missing = await prepare(t, { platform: "linux" })
-  assert.equal((await missing.store.status()).reason, "unsupported-backend")
-  assert.equal((await missing.store.save("gemini", SECRET).catch((value) => value)).code, CREDENTIAL_CODES.UNPROTECTED)
+  const throwing = await prepare(t, { platform: "linux", safeStorage: { tag: SECRET_SERVICE_TAG } })
+  throwing.safeStorage.getSelectedStorageBackend = () => { throw new Error("backend probe exploded") }
+  assert.deepEqual(await throwing.store.status(), { supported: true, provider: "freedesktop-secret-service", reason: null })
 })
 
-test("a protected Linux backend round-trips the credential", async (t) => {
-  for (const backend of ["gnome_libsecret", "kwallet", "kwallet5", "kwallet6"]) {
-    const { store } = await prepare(t, { platform: "linux", safeStorage: { backend } })
-    assert.deepEqual(await store.status(), { supported: true, backend, reason: null })
+test("Linux secret service and portal ciphertexts are accepted", async (t) => {
+  const cases = [
+    [SECRET_SERVICE_TAG, "freedesktop-secret-service"],
+    [PORTAL_TAG, "xdg-portal-secret"],
+  ]
+  for (const [tag, provider] of cases) {
+    const { store } = await prepare(t, { platform: "linux", safeStorage: { tag } })
+    assert.deepEqual(await store.status(), { supported: true, provider, reason: null })
     await store.save("gemini", SECRET)
     assert.equal(await store.read("gemini"), SECRET)
   }
+})
+
+test("a fallback-encrypted record is refused on read and left on disk for migration", async (t) => {
+  const { store, userData } = await prepare(t, { platform: "linux" })
+  await fsPromises.mkdir(path.join(userData, "credentials"), { recursive: true, mode: 0o700 })
+  const record = recordPath(userData, "gemini")
+  await writeFile(record, JSON.stringify({ version: 1, ciphertext: encode(FALLBACK_TAG, SECRET).toString("base64") }))
+
+  const error = await errorOf(store.read("gemini"))
+  assert.equal(error.code, CREDENTIAL_CODES.UNPROTECTED_RECORD)
+  assert.ok(!String(error.message).includes(SECRET))
+  assert.equal((await readFile(record, "utf8")).includes(SECRET), false)
+  assert.deepEqual(await store.list(), ["gemini"])
+})
+
+test("an unknown provider tag fails closed on every platform", async (t) => {
+  for (const [platform, tag] of [["darwin", SECRET_SERVICE_TAG], ["win32", PORTAL_TAG], ["linux", "v99"], ["freebsd", SECRET_SERVICE_TAG]]) {
+    const { store, calls } = await prepare(t, { platform, safeStorage: { tag } })
+    assert.deepEqual(await store.status(), { supported: false, provider: null, reason: "unsupported-provider" }, `${platform}/${tag}`)
+    assert.equal((await errorOf(store.save("gemini", SECRET))).code, CREDENTIAL_CODES.UNPROTECTED)
+    assert.equal(calls.plaintexts.includes(SECRET), false)
+  }
+})
+
+test("a provider that fails its own probe round-trip is refused", async (t) => {
+  const { safeStorage } = fakeSafeStorage({ tag: SECRET_SERVICE_TAG })
+  safeStorage.decryptStringAsync = async () => ({ shouldReEncrypt: false, result: "something else" })
+  const userData = await mkdtemp(path.join(os.tmpdir(), "nixio-credentials-"))
+  t.after(() => rm(userData, { recursive: true, force: true }))
+  const store = new CredentialStore({ userData, safeStorage, platform: "linux" })
+  assert.deepEqual(await store.status(), { supported: false, provider: null, reason: "probe-failed" })
+  assert.equal((await errorOf(store.save("gemini", SECRET))).code, CREDENTIAL_CODES.UNPROTECTED)
+
+  const empty = new CredentialStore({
+    userData,
+    safeStorage: { ...safeStorage, encryptStringAsync: async () => Buffer.alloc(0) },
+    platform: "linux",
+  })
+  assert.equal((await empty.status()).reason, "unsupported-provider")
 })
 
 test("a failed atomic replace keeps the previous encrypted record", async (t) => {
@@ -235,7 +316,7 @@ test("a failed atomic replace keeps the previous encrypted record", async (t) =>
   await store.save("gemini", SECRET)
 
   blocked = true
-  assert.equal((await store.save("gemini", OTHER).catch((value) => value)).code, CREDENTIAL_CODES.IO)
+  assert.equal((await errorOf(store.save("gemini", OTHER))).code, CREDENTIAL_CODES.IO)
   assert.equal(await store.read("gemini"), SECRET)
   assert.deepEqual(await readdir(path.join(userData, "credentials")), ["gemini.json"])
 
@@ -268,11 +349,11 @@ test("concurrent saves and reads stay consistent", async (t) => {
 test("invalid handles and keys are refused before the OS store is used", async (t) => {
   const { store, userData, calls } = await prepare(t)
   for (const provider of ["", "Gemini", "../escape", "gemini.json", "gemini/2", "a".repeat(33), 42, null]) {
-    assert.equal((await store.save(provider, SECRET).catch((value) => value)).code, CREDENTIAL_CODES.INVALID_PROVIDER)
-    assert.equal((await store.read(provider).catch((value) => value)).code, CREDENTIAL_CODES.INVALID_PROVIDER)
+    assert.equal((await errorOf(store.save(provider, SECRET))).code, CREDENTIAL_CODES.INVALID_PROVIDER)
+    assert.equal((await errorOf(store.read(provider))).code, CREDENTIAL_CODES.INVALID_PROVIDER)
   }
   for (const secret of ["", "  padded  ", "line\nbreak", "a".repeat(9000), 7, null, undefined]) {
-    assert.equal((await store.save("gemini", secret).catch((value) => value)).code, CREDENTIAL_CODES.INVALID_SECRET)
+    assert.equal((await errorOf(store.save("gemini", secret))).code, CREDENTIAL_CODES.INVALID_SECRET)
   }
   assert.equal(calls.encrypt, 0)
   await assert.rejects(stat(path.join(userData, "credentials")), /ENOENT/)
@@ -285,7 +366,8 @@ test("invalid handles and keys are refused before the OS store is used", async (
 
 test("key rotation rewrites the record and never fails the read", async (t) => {
   const { userData } = await prepare(t)
-  const rotating = fakeSafeStorage({ rotate: 1 })
+  let rotateRecords = true
+  const rotating = fakeSafeStorage({ tag: FALLBACK_TAG, rotate: (plaintext) => rotateRecords && plaintext === SECRET })
   const store = new CredentialStore({ userData, safeStorage: rotating.safeStorage, platform: "darwin" })
   await store.save("gemini", SECRET)
   const record = recordPath(userData, "gemini")
@@ -295,7 +377,9 @@ test("key rotation rewrites the record and never fails the read", async (t) => {
   assert.equal(rotating.calls.rotations, 1)
   const after = await readFile(record, "utf8")
   assert.notEqual(after, before)
+  rotateRecords = false
   await store.read("gemini")
+  assert.equal(rotating.calls.rotations, 1)
   assert.equal(await readFile(record, "utf8"), after)
 
   const blockedFileSystem = {
@@ -304,7 +388,7 @@ test("key rotation rewrites the record and never fails the read", async (t) => {
   }
   const failing = new CredentialStore({
     userData,
-    safeStorage: fakeSafeStorage({ rotate: 1 }).safeStorage,
+    safeStorage: fakeSafeStorage({ tag: FALLBACK_TAG, rotate: (plaintext) => plaintext === SECRET }).safeStorage,
     platform: "darwin",
     fileSystem: blockedFileSystem,
   })
@@ -312,13 +396,13 @@ test("key rotation rewrites the record and never fails the read", async (t) => {
   assert.equal(await readFile(record, "utf8"), after)
 })
 
-test("status reports the selected backend without throwing", async (t) => {
+test("status reports the proven provider without throwing", async (t) => {
   const darwin = await prepare(t)
-  assert.deepEqual(await darwin.store.status(), { supported: true, backend: "keychain", reason: null })
+  assert.deepEqual(await darwin.store.status(), { supported: true, provider: "keychain", reason: null })
   const windows = await prepare(t, { platform: "win32" })
-  assert.deepEqual(await windows.store.status(), { supported: true, backend: "dpapi", reason: null })
-  const linux = await prepare(t, { platform: "linux", safeStorage: { backend: "kwallet5" } })
-  assert.deepEqual(await linux.store.status(), { supported: true, backend: "kwallet5", reason: null })
+  assert.deepEqual(await windows.store.status(), { supported: true, provider: "dpapi", reason: null })
+  const linux = await prepare(t, { platform: "linux" })
+  assert.deepEqual(await linux.store.status(), { supported: true, provider: "freedesktop-secret-service", reason: null })
   const bare = new CredentialStore({ userData: darwin.userData, platform: "darwin" })
-  assert.deepEqual(await bare.status(), { supported: false, backend: null, reason: "api-unavailable" })
+  assert.deepEqual(await bare.status(), { supported: false, provider: null, reason: "api-unavailable" })
 })
