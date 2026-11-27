@@ -262,6 +262,21 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
     let rawReasoning = ""
     let usage = null
     const toolMap = new Map()
+    // OpenAI-compatible servers may omit `index` on streamed tool_call fragments (valid per
+    // spec) or send `id` only on the first fragment. Alias both hints to a single slot so later
+    // argument fragments keep accumulating instead of opening orphan slots that drop them.
+    const toolAliases = new Map()
+    let pendingKey = null
+    const aliasKey = (hint, key) => {
+      if (hint) toolAliases.set(hint, key)
+    }
+    const resolveToolKey = (item) => {
+      const byId = item.id ? "id:" + item.id : ""
+      const byIndex = Number.isInteger(item.index) ? "i:" + item.index : ""
+      const known = (byId && toolAliases.get(byId)) || (byIndex && toolAliases.get(byIndex))
+      if (known) return known
+      return byId || byIndex || pendingKey || "tc:" + toolMap.size
+    }
     await readSseEvents(response.body, (raw) => {
       let chunk
       try {
@@ -287,19 +302,26 @@ async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = f
         onDelta?.({ text: delta.content, thought: "" })
       }
       if (Array.isArray(delta.tool_calls)) {
+        const seen = new Set()
         for (const item of delta.tool_calls) {
-          const idx = Number.isInteger(item.index) ? item.index : toolMap.size
-          const prev = toolMap.get(idx) ?? { id: "", name: "", argumentsText: "" }
+          let key = resolveToolKey(item)
+          // Two hint-less fragments inside one delta are separate calls, never one continuation.
+          if (!item.id && !Number.isInteger(item.index) && seen.has(key)) key = "tc:" + toolMap.size
+          seen.add(key)
+          aliasKey(item.id ? "id:" + item.id : "", key)
+          aliasKey(Number.isInteger(item.index) ? "i:" + item.index : "", key)
+          const prev = toolMap.get(key) ?? { order: toolMap.size, id: "", name: "", argumentsText: "" }
           if (item.id) prev.id = item.id
           if (item.function?.name) prev.name += item.function.name
           if (typeof item.function?.arguments === "string") prev.argumentsText += item.function.arguments
-          toolMap.set(idx, prev)
+          toolMap.set(key, prev)
+          pendingKey = key
         }
       }
     })
-    let toolCalls = [...toolMap.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([, item], index) => {
+    let toolCalls = [...toolMap.values()]
+      .sort((a, b) => a.order - b.order)
+      .map((item, index) => {
         let args = {}
         try {
           args = JSON.parse(item.argumentsText || "{}")

@@ -380,4 +380,56 @@ test("parseTextToolCalls decodes JSON-string arguments from text-form tool calls
   assert.deepEqual(parseTextToolCalls('<tool_call>{"name":"list_boxes","arguments":"5"}</tool_call>')[0].args, {})
 })
 
+test("runAgentTurn keeps streamed OpenAI tool_call arguments when deltas omit index", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const encoder = new TextEncoder()
+  const makeSseStream = (chunks) => new ReadableStream({
+    start(controller) {
+      for (const line of chunks) controller.enqueue(encoder.encode(line))
+      controller.close()
+    },
+  })
+
+  let call = 0
+  globalThis.fetch = async () => {
+    call++
+    if (call === 1) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: makeSseStream([
+          'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"search_chapter_text","arguments":""}}]}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\\"query\\":\\"こんにちは\\"}"}}]}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ choices: [{ message: { content: "Xong." } }] }),
+    }
+  }
+
+  const { tools } = makeHarnessContext()
+  const result = await runAgentTurn({
+    userMessage: "Tìm khung thoại chứa lời chào",
+    settings: {
+      provider: "openai",
+      baseUrl: "http://localhost:11434/v1",
+      llmModel: "qwen2.5:7b",
+      source: "Japanese",
+      target: "Vietnamese",
+    },
+    tools,
+    stream: true,
+  })
+  assert.equal(result.toolTrace[0].name, "search_chapter_text")
+  assert.deepEqual(result.toolTrace[0].args, { query: "こんにちは" })
+  assert.equal(result.toolTrace[0].data.matches.length, 1)
+})
+
 
