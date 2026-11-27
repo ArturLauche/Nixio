@@ -889,6 +889,9 @@ dialog {
   background: var(--surface);
   color: var(--ink);
   width: min(420px, 94vw);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 16px 18px;
   box-shadow: var(--shadow-md);
 }
@@ -897,7 +900,7 @@ dialog h2 { font-size: .96rem; margin-bottom: 8px; }
 .dialog-group { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .dialog-group h3 { margin: 0 0 4px; font-size: .84rem; font-weight: 620; }
 #find-replace-dialog { width: min(520px, 94vw); }
-#find-results, #preflight-issues { max-height: 40dvh; overflow: auto; margin: 10px 0; }
+#find-results, #preflight-issues { max-height: min(40dvh, 220px); overflow: auto; margin: 10px 0; }
 #find-results button, #preflight-issues button { white-space: normal; }
 #preflight-dialog { width: min(560px, 94vw); }
 #shortcuts-dialog { width: min(460px, 94vw); }
