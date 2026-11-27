@@ -619,17 +619,30 @@ export function setupChat({
 
   syncProjectSession()
 
+  // The panel only hands the caret back while it still owns it: a close or a finished turn that
+  // lands while the user is typing in the editor must leave that field alone.
+  function panelHasFocus() {
+    const active = document.activeElement
+    return !active || active === document.body || active === panel || Boolean(panel.contains?.(active))
+  }
+
   function setOpen(open) {
     panel.hidden = !open
     toggleBtn.setAttribute("aria-pressed", String(open))
     if (open) {
       refreshModelBadge()
       input.focus()
+    } else if (panelHasFocus()) {
+      toggleBtn.focus()
     }
   }
 
   toggleBtn.onclick = () => setOpen(panel.hidden)
   byId("chat-close").onclick = () => setOpen(false)
+  // Escape is the keyboard twin of the × button and belongs to the panel only while it is open.
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !panel.hidden && !event.defaultPrevented) setOpen(false)
+  })
 
   function clearSession() {
     if (activeController) {
@@ -1000,7 +1013,7 @@ export function setupChat({
       activeTurnEl = null
       syncBusyControls()
       scrollToBottom()
-      input.focus()
+      if (!panel.hidden && panelHasFocus()) input.focus()
       onTurnEnd?.(settled)
     }
   }
