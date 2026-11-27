@@ -73,6 +73,19 @@ function cleanupPatch(image, rect, mode = "auto") {
     const result = cleanupPaper(context, data, sampleWidth, sampleHeight, inner)
     return result ? createPatch(result, left, top) : null
   }
+  const redrawFallback = () => {
+    const redraw = globalThis.khungThoaiDesktop?.redrawTexture
+    if (!redraw || sampleWidth * sampleHeight > 1_600_000) return useCanvas()
+    return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
+      .then((bytes) => {
+        // A missing or malformed reply means the worker is unavailable or failed;
+        // either way the local canvas estimate is the last resort.
+        if (bytes == null) return useCanvas()
+        if (!ArrayBuffer.isView(bytes) || bytes.BYTES_PER_ELEMENT !== 1 || bytes.byteLength !== width * height * 4) return useCanvas()
+        return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
+      })
+      .catch(() => useCanvas())
+  }
   if (mode === "content-aware" && globalThis.khungThoaiDesktop?.native && sampleWidth * sampleHeight <= 1_600_000) {
     return globalThis.khungThoaiDesktop
       .native(
@@ -82,20 +95,15 @@ function cleanupPatch(image, rect, mode = "auto") {
       )
       .then((response) => {
         const bytes = response?.data
-        if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return null
+        // filled === 0 is the worker's intentional "nothing to remove" answer,
+        // distinct from a failed or malformed response.
+        if (response?.result?.filled === 0) return null
+        if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== width * height * 4) return redrawFallback()
         return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
       })
-      .catch(() => null)
+      .catch(() => redrawFallback())
   }
-  const redraw = globalThis.khungThoaiDesktop?.redrawTexture
-  if (!redraw || sampleWidth * sampleHeight > 1_600_000) return useCanvas()
-  return redraw({ width: sampleWidth, height: sampleHeight, inner, pixels: data })
-    .then((bytes) => {
-      if (bytes === undefined) return useCanvas()
-      if (!ArrayBuffer.isView(bytes) || bytes.BYTES_PER_ELEMENT !== 1 || bytes.byteLength !== width * height * 4) return null
-      return createPatch(new ImageData(new Uint8ClampedArray(bytes), width, height), left, top)
-    })
-    .catch(() => null)
+  return redrawFallback()
 }
 
 function cleanupPaper(context, data, sampleWidth, sampleHeight, inner) {
