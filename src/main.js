@@ -127,6 +127,7 @@ const historyKindLabels = {
   form: "Khung", box: "Khung", gesture: "Bàn vẽ", nudge: "Phím", page: "Trang", "raw-cleanup": "Raw",
   preset: "Mẫu", settings: "Cài đặt", translate: "Dịch", ocr: "OCR", ai: "AI",
   find: "Tìm", retouch: "Cọ", cleanup: "Nền", layout: "Canh", script: "Kịch bản", text: "Chữ",
+  qa: "QA",
 }
 const alignLabels = { left: "trái", centerX: "giữa ngang", right: "phải", top: "trên", centerY: "giữa dọc", bottom: "dưới" }
 const distributeLabels = { horizontal: "ngang", vertical: "dọc" }
