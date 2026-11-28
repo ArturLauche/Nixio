@@ -129,7 +129,7 @@ function sessionHistory() {
   ]
 }
 
-async function createHarness({ prepareStorage, pages = [], replay = null } = {}) {
+async function createHarness({ prepareStorage, pages = [], replay = null, t = null } = {}) {
   installBrowserGlobals()
   prepareStorage?.()
   const elements = new Map()
@@ -188,6 +188,7 @@ async function createHarness({ prepareStorage, pages = [], replay = null } = {})
     notify(notification) { notifications.push(notification) },
     restoreHistory() {},
     replay,
+    ...(t ? { t } : {}),
   })
 
   return {
@@ -395,6 +396,14 @@ test("busy submission keeps the draft and disables every chat control", async ()
   assert.equal(harness.byId("chat-stop").hidden, true)
   assert.equal(harness.panel.getAttribute("aria-busy"), "false")
   assert.equal(input.value, "Bản nháp mới")
+})
+
+test("the welcome card follows the active locale", async () => {
+  const { translate } = await import("../src/i18n.js")
+  const harness = await createHarness({ t: (key, params) => translate("en", key, params) })
+  const welcome = byClass(harness.byId("chat-messages"), "chat-msg system")[0]
+  assert.match(welcome.textContent, /AI assistant Harness v3/)
+  assert.doesNotMatch(welcome.textContent, /Trợ lý AI/)
 })
 
 test("a project switch during AI compaction hands the panel back to the new project", async () => {

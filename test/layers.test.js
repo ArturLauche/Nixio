@@ -1,10 +1,10 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import {
-  addLayer, addStroke, compositedLayers, defaultLayers, duplicateLayer, hasVisibleLayer,
+  addLayer, addStroke, canPaint, compositedLayers, defaultLayers, duplicateLayer, hasVisibleLayer,
   layerKindNames, layerLimit, layerStrokes, layersEqualDefault, layersNativeFriendly, moveLayer,
   pageLayers, removeLayer, removeStroke, renameLayer, retargetStroke, serializeLayers,
-  setLayerHidden, setLayerOpacity, setStrokeHidden, strokeLabel, strokeLayer, validateLayers,
+  setLayerHidden, setLayerOpacity, setStrokeHidden, strokeLabel, strokeLayer, strokeTarget, validateLayers,
 } from "../src/layers.js"
 
 const paintStroke = (overrides = {}) => ({
@@ -57,6 +57,20 @@ test("painting after the last retouch layer was deleted restores a layer instead
   assert.equal(stroke.layerId, restored.id)
   assert.equal(page.layers.indexOf(restored), 1, "the restored brush layer sits below the text layer")
   assert.deepEqual(compositedLayers(page).find(({ layer }) => layer === restored).strokes, [stroke])
+})
+
+test("a full stack without a brush layer refuses a stroke instead of storing an invisible one", () => {
+  const page = { retouchStrokes: [] }
+  const retouch = pageLayers(page).find(({ kind }) => kind === "retouch")
+  assert.equal(removeLayer(page, retouch.id), true)
+  while (page.layers.length < layerLimit) addLayer(page, "cleanup")
+  assert.equal(strokeTarget(page), null)
+  assert.equal(canPaint(page), false)
+
+  const stroke = paintStroke()
+  assert.equal(addStroke(page, stroke), null)
+  assert.deepEqual(page.retouchStrokes, [], "a refused stroke is not stored")
+  assert.equal(Object.hasOwn(stroke, "layerId"), false)
 })
 
 test("reordering the stack keeps every stroke in the layer it was painted into", () => {

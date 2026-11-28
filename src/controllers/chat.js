@@ -23,6 +23,7 @@ import {
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
 import { providerLabel, resolveProvider } from "../provider-registry.js"
 import { formatTokens, formatUsd } from "../token-accounting.js"
+import { translate } from "../i18n.js"
 
 const searchStorageKey = "khung-thoai-search-config"
 const planExecutionPrompt =
@@ -68,6 +69,7 @@ function appendSafeTextWithLinks(container, text) {
 export function setupChat({
   state,
   byId,
+  t = (key, params) => translate("vi", key, params),
   checkpoint,
   editorSnapshot,
   render,
@@ -756,8 +758,7 @@ export function setupChat({
     }
     const intro = document.createElement("div")
     intro.className = "chat-msg system"
-    intro.textContent =
-      "Trợ lý AI Harness v3 hỗ trợ ngữ cảnh dự án trực tiếp, hồ sơ kỹ năng theo thể loại, thẻ hỏi trắc nghiệm, duyệt từng thay đổi AI (kèm duyệt thao tác hàng loạt), Chế độ Kế hoạch (Plan Mode), tự thử lại khi lỗi mạng/429, chống lặp công cụ và lệnh nhanh (/qc, /plan, /autofit, /compact, /skill, /help)."
+    intro.textContent = t("chat.welcome")
     messagesEl.append(intro)
   }
 
@@ -1315,6 +1316,9 @@ export function setupChat({
     close: () => setOpen(false),
     refreshModelBadge,
     syncProjectSession,
+    // The welcome card is the only chat copy on screen before a project has a transcript; redraw it
+    // on a locale switch so a fresh session does not keep the previous language's introduction.
+    refreshWelcome: () => { if (!chatHistory.length) renderWelcome() },
     getActiveSkill: () => getSkill(skillSelect?.value || "default"),
   }
 }

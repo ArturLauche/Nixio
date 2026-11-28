@@ -59,7 +59,7 @@ Node 22.12+, `node:test` + `node:assert/strict`; tên test là câu mô tả hà
 | pipeline ảnh | `npm run benchmark` |
 
 - Không sửa test để test xanh; không thêm skip trừ khi môi trường thiếu (ví dụ thiếu `dotnet`) và phải nêu trong báo cáo.
-- Trên máy không có .NET: `npm test` = 875 test, 848 pass, 27 skip, 0 fail.
+- Trên máy không có .NET: `npm test` = 879 test, 852 pass, 27 skip, 0 fail.
 
 ## 5. Commit & PR
 

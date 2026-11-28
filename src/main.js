@@ -2194,6 +2194,7 @@ const notifications = createNotificationCenter({ byId, locale: () => i18n.locale
 refreshLocaleViews = () => {
   notifications.render()
   dialogs?.renderFindResults()
+  chat?.refreshWelcome?.()
 }
 const notify = (options) => notifications.notify(options)
 

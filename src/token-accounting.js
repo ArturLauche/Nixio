@@ -87,10 +87,28 @@ export function normalizeUsage({ usage = null, promptChars = 0, completionChars 
 // price entered for a long model id survives a reload and the budget gate keeps enforcing it.
 const priceKeyLimit = 120
 
+// A plain prefix of a long id would merge models that differ only after the cut. Two independent
+// rolling hashes over the *full* id make the bounded key collision-resistant without changing any
+// short key that existing ledgers already use.
+function modelDigest(name) {
+  let a = 0x811c9dc5
+  let b = 0x01000193
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index)
+    a = Math.imul(a ^ code, 0x01000193) >>> 0
+    b = Math.imul(b + code, 0x85ebca6b) >>> 0
+  }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0")
+}
+
 export function priceKey(provider, model) {
   const name = String(model ?? "").trim().toLowerCase()
   const prefix = (provider === "openai" ? "openai" : "gemini") + ":"
-  return prefix + (name.slice(0, priceKeyLimit - prefix.length) || "auto")
+  const full = name || "auto"
+  const room = priceKeyLimit - prefix.length
+  if (full.length <= room) return prefix + full
+  const digest = modelDigest(full)
+  return prefix + full.slice(0, room - digest.length - 1) + "~" + digest
 }
 
 /**
@@ -261,12 +279,15 @@ function bucket(buckets, key, entry, limit, decorate = () => ({})) {
 export function recordCall(ledger, call = {}) {
   const base = ledger ?? createLedger()
   const provider = call.provider === "openai" ? "openai" : "gemini"
-  const model = String(call.model || "auto").slice(0, 120)
+  // Key the bucket on the full id before truncating the display name, so two long models that share
+  // a 120-character prefix still get their own prices and usage history.
+  const fullModel = String(call.model || "auto")
+  const model = fullModel.slice(0, 120)
   const tokens = call.tokens ?? {}
   const promptTokens = Math.max(0, Math.round(Number(tokens.promptTokens) || 0))
   const completionTokens = Math.max(0, Math.round(Number(tokens.completionTokens) || 0))
   const cachedTokens = Math.min(promptTokens, Math.max(0, Math.round(Number(tokens.cachedTokens) || 0)))
-  const key = priceKey(provider, model)
+  const key = priceKey(provider, fullModel)
   const priced = priceTokens(base.prices?.[key] ?? null, { promptTokens, completionTokens, cachedTokens })
   const entry = {
     at: Number(call.at) || 0,
