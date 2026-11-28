@@ -3,6 +3,7 @@ import { packager } from "@electron/packager"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
+import { macPackagerOptions } from "./package-release.mjs"
 
 const root = fileURLToPath(new URL("..", import.meta.url))
 const platformByRid = { linux: "linux", win: "win32", osx: "darwin" }
@@ -17,7 +18,8 @@ const worker = path.join(root, "native", "out", rid, "native-worker")
 
 run(process.env.KHUNG_THOAI_DOTNET ?? "dotnet", [
   "publish", "native/KhungThoai.Redraw.csproj", "-c", "Release", "-r", rid,
-  "--self-contained", "-p:PublishSingleFile=true", "-p:PublishTrimmed=true", "-o", worker,
+  "--self-contained", "-p:PublishSingleFile=true", "-p:PublishTrimmed=true",
+  "-p:RestoreLockedMode=true", "-o", worker,
 ])
 
 if (process.env.KHUNG_THOAI_OCR_BUNDLE) {
@@ -32,11 +34,12 @@ if (mode === "app") {
     executableName: "Khung-Thoai",
     platform,
     arch,
+    ...(platform === "darwin" ? macPackagerOptions() : {}),
     asar: true,
     overwrite: true,
     out: path.join(root, "desktop-dist"),
     extraResource: [worker],
-    ignore: /^(\/(?:node_modules|native|scripts|src|test|desktop-dist|release-dist|release-stage|artifacts|\.git)(?:\/|$)|\/(?:package-lock\.json|index\.html|vite\.config\.js|.*\.md)$)/,
+    ignore: /^(\/(?:node_modules|native|scripts|src|test|desktop-dist|release-dist|release-stage|release-verify|artifacts|\.git)(?:\/|$)|\/(?:package-lock\.json|index\.html|vite\.config\.js|.*\.md)$)/,
   })
   paths.forEach((location) => console.log(location))
 }

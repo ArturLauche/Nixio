@@ -4,24 +4,34 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#111418">
-  <title>Khung Thoại — Biên tập trang truyện</title>
+  <title data-i18n="app.title">Khung Thoại — Biên tập trang truyện</title>
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
+  <p id="live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+  <p id="live-region-alert" class="sr-only" role="alert" aria-atomic="true"></p>
   <header class="app-header">
     <a class="wordmark" href="#editor" data-view="editor"><span>KT</span> Khung Thoại</a>
-    <nav aria-label="Không gian làm việc">
-      <a href="#editor" data-view="editor" aria-current="page">Biên tập</a>
-      <a href="#library" data-view="library">Thư viện chương</a>
+    <nav aria-label="Không gian làm việc" data-i18n-aria-label="nav.workspace">
+      <a href="#editor" data-view="editor" aria-current="page" data-i18n="nav.editor">Biên tập</a>
+      <a href="#library" data-view="library" data-i18n="nav.library">Thư viện chương</a>
     </nav>
     <div class="header-actions">
-      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối">☾ Tối</button>
-      <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)">Trợ lý AI</button>
-      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H)">Tìm &amp; thay</button>
-      <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)">Phím tắt</button>
-      <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại">Cập nhật</button>
-      <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" title="Trung tâm thông báo">Thông báo <span id="notif-badge" class="notif-badge" hidden>0</span></button>
-      <button type="button" class="button header-export" id="export-all">Xuất cả lượt</button>
+      <label class="header-locale" for="locale-select">
+        <span class="sr-only" data-i18n="header.locale">Ngôn ngữ giao diện</span>
+        <select id="locale-select" aria-label="Ngôn ngữ giao diện" data-i18n-aria-label="header.locale" title="Ngôn ngữ giao diện" data-i18n-title="header.locale">
+          <option value="vi">Tiếng Việt</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+        </select>
+      </label>
+      <button type="button" class="button header-secondary" id="toggle-theme" aria-pressed="false" title="Chuyển chế độ Sáng / Tối" data-i18n-title="header.theme.title">☾ Tối</button>
+      <button type="button" class="button header-secondary" id="open-chat" aria-pressed="false" title="Mở Trợ lý AI Harness (Web Search &amp; công cụ biên tập)" data-i18n-title="header.chat.title" data-i18n="header.chat">Trợ lý AI</button>
+      <button type="button" class="button header-secondary" id="open-find" title="Tìm và thay thế (Ctrl+H / Ctrl+F)" data-i18n-title="header.find.title" data-i18n="header.find">Tìm &amp; thay</button>
+      <button type="button" class="button header-secondary" id="open-shortcuts" title="Phím tắt (?)" data-i18n-title="header.shortcuts.title" data-i18n="header.shortcuts">Phím tắt</button>
+      <button type="button" class="button header-secondary" id="check-update" title="Kiểm tra phiên bản mới của Khung Thoại" data-i18n-title="header.update.title" data-i18n="header.update">Cập nhật</button>
+      <button type="button" class="button header-secondary notif-btn" id="open-notifications" aria-expanded="false" aria-label="Trung tâm thông báo" data-i18n-aria-label="notifications.label" title="Trung tâm thông báo" data-i18n-title="notifications.label"><span data-i18n="notifications.title">Thông báo</span> <span id="notif-badge" class="notif-badge" hidden>0</span></button>
+      <button type="button" class="button header-export" id="export-all" data-i18n="header.export">Xuất cả lượt</button>
     </div>
   </header>
 
@@ -33,6 +43,7 @@
           <button type="button" class="button" id="new-project">Dự án mới</button>
           <button type="button" class="button" id="open-project">Mở dự án</button>
           <button type="button" class="button" id="save-project">Lưu dự án</button>
+          <button type="button" class="button" id="open-templates" title="Mẫu dự án: ngôn ngữ, hướng đọc, ghi chú dịch, bảng thuật ngữ, mẫu dàn chữ, phông và định dạng xuất">Mẫu dự án…</button>
           <input type="file" id="project-file" accept=".khungthoai" hidden>
         </div>
         <p id="project-dirty" class="muted" role="status"></p>
@@ -46,9 +57,14 @@
         </div>
         <div id="web-recovery" hidden>
           <p id="web-autosave-status" class="muted" role="status"></p>
-          <div class="form-actions">
-            <button type="button" id="recover-web" class="button">Khôi phục phiên web</button>
-            <button type="button" id="clear-web-recovery" class="button danger">Bỏ bản lưu</button>
+          <div id="web-recovery-actions" hidden>
+            <label class="field" for="web-recovery-select">Bản tự lưu trên trình duyệt
+              <select id="web-recovery-select"></select>
+            </label>
+            <div class="form-actions">
+              <button type="button" id="recover-web" class="button">Khôi phục bản đã chọn</button>
+              <button type="button" id="clear-web-recovery" class="button danger">Bỏ bản đã chọn</button>
+            </div>
           </div>
         </div>
         <label class="dropzone" id="dropzone" for="images">
@@ -61,6 +77,21 @@
           <button type="button" id="open-webtoon" class="button full" title="Ghép dọc hoặc cắt thông minh trang Webtoon/Manhwa theo rãnh trống">Ghép &amp; Cắt Webtoon</button>
         </div>
         <ol id="pages" class="page-list" aria-label="Thứ tự trang"></ol>
+        <div id="page-bulk-bar" class="page-bulk-bar" hidden>
+          <p id="page-bulk-count" class="muted" role="status"></p>
+          <div class="page-bulk-actions">
+            <button type="button" id="bulk-translate" class="button" title="Dịch các trang đã chọn (Ctrl+click / Shift+click / phím cách)">Dịch</button>
+            <button type="button" id="bulk-duplicate" class="button">Nhân bản</button>
+            <button type="button" id="bulk-move-up" class="button" title="Đưa các trang đã chọn lên một bậc">↑ Lên</button>
+            <button type="button" id="bulk-move-down" class="button" title="Đưa các trang đã chọn xuống một bậc">↓ Xuống</button>
+            <button type="button" id="bulk-export" class="button">Xuất ZIP</button>
+            <button type="button" id="bulk-delete" class="button danger">Xóa</button>
+          </div>
+          <div class="page-bulk-actions">
+            <button type="button" id="bulk-select-all" class="button">Chọn tất cả</button>
+            <button type="button" id="bulk-clear" class="button">Bỏ chọn</button>
+          </div>
+        </div>
       </section>
 
       <section class="side-section">
@@ -93,8 +124,13 @@
           </label>
           <div id="gemini-fields">
             <label class="field" for="gemini-key">Khóa API
-              <input id="gemini-key" type="password" autocomplete="off">
+              <input id="gemini-key" type="password" autocomplete="off" spellcheck="false">
             </label>
+            <div id="gemini-key-actions" class="credential-actions" hidden>
+              <button type="button" id="gemini-key-save" class="button">Lưu khóa</button>
+              <button type="button" id="gemini-key-remove" class="button">Xóa khóa</button>
+            </div>
+            <p id="gemini-key-status" class="credential-status" role="status" aria-live="polite"></p>
             <label class="field" for="gemini-model">Model
               <select id="gemini-model">
                 <option value="auto">Tự động</option>
@@ -120,8 +156,13 @@
               <input id="llm-model" type="text" placeholder="qwen2.5:7b, hy-mt2-manga, gpt-4o-mini">
             </label>
             <label class="field" for="llm-key">API Key (trống nếu chạy cục bộ)
-              <input id="llm-key" type="password" autocomplete="off">
+              <input id="llm-key" type="password" autocomplete="off" spellcheck="false">
             </label>
+            <div id="llm-key-actions" class="credential-actions" hidden>
+              <button type="button" id="llm-key-save" class="button">Lưu khóa</button>
+              <button type="button" id="llm-key-remove" class="button">Xóa khóa</button>
+            </div>
+            <p id="llm-key-status" class="credential-status" role="status" aria-live="polite"></p>
           </div>
           <label class="field" for="source-language">Ngôn ngữ gốc
             <select id="source-language">
@@ -140,7 +181,11 @@
           <label class="field" for="translation-glossary">Bảng thuật ngữ
             <textarea id="translation-glossary" rows="3" placeholder="Tên gốc = tên dịch, mỗi mục một dòng"></textarea>
           </label>
+          <p id="glossary-status" class="muted" role="status" aria-live="polite"></p>
+          <button type="button" class="button" id="open-style-guide" title="Quy tắc phong cách dịch riêng của dự án này">Hướng dẫn phong cách…</button>
           <button type="button" class="button full" id="translate-boxes">Dịch các khung chữ đang có</button>
+          <p class="muted" id="translation-memory-status" role="status" aria-live="polite">Bộ nhớ dịch: chưa có cặp nào trong dự án.</p>
+          <button type="button" class="button full" id="use-approved-translation" disabled>Dùng bản đã duyệt</button>
           <button type="button" class="button full" id="translate">Dịch trang đang mở</button>
           <button type="button" class="button full" id="translate-all">Dịch cả lượt</button>
           <button type="button" class="button full" id="resume-translation">Tiếp tục dịch chương</button>
@@ -150,7 +195,7 @@
       </section>
       <section class="side-section" id="local-processing" hidden>
         <h2>OCR trên máy</h2>
-        <p class="muted" id="native-status"></p>
+        <p class="muted" id="native-status" role="status" aria-live="polite"></p>
         <label class="field" for="local-ocr-language">Ngôn ngữ đã cài<select id="local-ocr-language"></select></label>
         <label class="field" for="local-ocr-layout">Bố cục
           <select id="local-ocr-layout"><option value="11">Chữ rải rác</option><option value="6">Một khối chữ</option><option value="5">Chữ dọc Nhật (jpn_vert)</option><option value="3">Tự động toàn trang</option></select>
@@ -181,6 +226,7 @@
         <div class="canvas-actions">
           <button type="button" id="undo" aria-label="Hoàn tác (Ctrl+Z)" disabled>Hoàn tác</button>
           <button type="button" id="redo" aria-label="Làm lại (Ctrl+Shift+Z)" disabled>Làm lại</button>
+          <button type="button" id="history-toggle" aria-expanded="false" aria-controls="history-panel" title="Lịch sử thao tác có tên, nhảy tới mốc (Ctrl+Shift+H)">Lịch sử</button>
           <div class="zoom-group" role="group" aria-label="Thu phóng">
             <button type="button" id="zoom-out" aria-label="Thu nhỏ">−</button>
             <span id="zoom-level">Vừa trang</span>
@@ -221,45 +267,59 @@
         <button type="button" id="detect-bubbles" class="button" title="Quét tự động toàn bộ bong bóng thoại sáng trên trang hiện tại">Quét bong bóng</button>
         <button type="button" id="undo-retouch" class="button" hidden>Hoàn tác nét cọ</button>
         <button type="button" id="clear-retouch" class="button danger" hidden>Xóa nét vẽ tay</button>
-        <span class="toolbar-spacer" aria-hidden="true"></span>
-        <label class="choice"><input type="checkbox" id="show-cleanup" checked>Redraw</label>
-        <label class="choice"><input type="checkbox" id="show-text" checked>Chữ</label>
       </div>
+      <section id="history-panel" class="history-panel" aria-labelledby="history-title" hidden>
+        <div class="history-head">
+          <h2 id="history-title">Lịch sử thao tác</h2>
+          <span id="history-current" class="muted"></span>
+          <span id="history-count" class="muted" role="status" aria-live="polite"></span>
+          <button type="button" id="history-start" class="button" title="Quay lại trạng thái trước thao tác cũ nhất còn lưu">Về mốc cũ nhất</button>
+          <button type="button" id="history-close" class="button" aria-label="Đóng lịch sử thao tác">Đóng</button>
+        </div>
+        <div class="history-search-row">
+          <label class="field" for="history-search">Tìm thao tác
+            <input id="history-search" type="search" autocomplete="off" spellcheck="false" placeholder="Ví dụ: làm sạch, dịch, khung">
+          </label>
+          <span class="history-hint muted">↑ ↓ chọn mốc · Enter để nhảy · Esc đóng</span>
+        </div>
+        <p id="history-empty" class="muted" hidden></p>
+        <ol id="history-list" class="history-list" aria-label="Các mốc lịch sử, mốc mới nhất ở cuối"></ol>
+      </section>
       <div class="workspace-body">
         <div class="tool-rail" id="tool-rail" role="toolbar" aria-label="Công cụ vẽ và chỉnh khung" aria-orientation="vertical">
-          <button type="button" class="rail-btn" data-tool="text" aria-pressed="true" title="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)">
+          <button type="button" class="rail-btn" data-tool="text" aria-pressed="true" aria-label="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)" title="Di chuyển &amp; chỉnh khung (Chọn, kéo, co giãn, xoay)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2l9 6.5-4.2.7L6 13.5 3 2z"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="pan" aria-pressed="false" title="Kéo bàn vẽ (Hand / giữ Space)">
+          <button type="button" class="rail-btn" data-tool="pan" aria-pressed="false" aria-label="Kéo bàn vẽ (Hand / giữ Space)" title="Kéo bàn vẽ (Hand / giữ Space)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 8V3.2a.8.8 0 0 1 1.6 0V7m0-2.6a.8.8 0 0 1 1.6 0V7.5m0-1.9a.8.8 0 0 1 1.6 0V9.5c0 2.5-1.6 4.5-4 4.5-1.8 0-3-1-3.8-2.6L2.2 8.7a.85.85 0 0 1 1.3-1l1.4 1.3V4.5a.8.8 0 0 1 1.6 0"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="bubble" aria-pressed="false" title="Chấm bong bóng thoại tự động">
+          <button type="button" class="rail-btn" data-tool="bubble" aria-pressed="false" aria-label="Chấm bong bóng thoại tự động" title="Chấm bong bóng thoại tự động">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5c3.3 0 6 2 6 4.6 0 2.6-2.7 4.6-6 4.6-.9 0-1.8-.1-2.5-.4L2.5 13l.8-2.6C2.5 9.5 2 8.4 2 7.1c0-2.6 2.7-4.6 6-4.6z"/></svg>
           </button>
           <hr class="rail-divider">
-          <button type="button" class="rail-btn" data-tool="region" aria-pressed="false" title="Khoanh vùng xóa chữ cho khung đang chọn">
+          <button type="button" class="rail-btn" data-tool="region" aria-pressed="false" aria-label="Khoanh vùng xóa chữ cho khung đang chọn" title="Khoanh vùng xóa chữ cho khung đang chọn">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.5 2" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="erase" aria-pressed="false" title="Cọ giữ nền gốc (bảo vệ nét vẽ)">
+          <button type="button" class="rail-btn" data-tool="erase" aria-pressed="false" aria-label="Cọ giữ nền gốc (bảo vệ nét vẽ)" title="Cọ giữ nền gốc (bảo vệ nét vẽ)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2l5 2v3.6c0 3.1-2.1 5.1-5 6-2.9-.9-5-2.9-5-6V4.2l5-2z"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="restore" aria-pressed="false" title="Cọ thêm vùng xóa chữ">
+          <button type="button" class="rail-btn" data-tool="restore" aria-pressed="false" aria-label="Cọ thêm vùng xóa chữ" title="Cọ thêm vùng xóa chữ">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
           </button>
           <hr class="rail-divider">
-          <button type="button" class="rail-btn" data-tool="paint" aria-pressed="false" title="Cọ vẽ che chữ">
+          <button type="button" class="rail-btn" data-tool="paint" aria-pressed="false" aria-label="Cọ vẽ che chữ" title="Cọ vẽ che chữ">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 2.5l1 1-6.2 6.2-1.8.8.8-1.8 6.2-6.2z"/><path d="M5.5 10.5c-1.4 0-2.5.9-2.8 2.5 1.7.3 3.3-.2 3.8-1.5"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="clone" aria-pressed="false" title="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)">
+          <button type="button" class="rail-btn" data-tool="clone" aria-pressed="false" aria-label="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)" title="Cọ sao chép nền (Alt+bấm đặt nguồn, có Hòa biên Poisson)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.2 7.5a2 2 0 1 1 3.6 0l-.6 2.5H6.8l-.6-2.5z"/><path d="M3.5 10h9v2.2h-9V10zM3 13.8h10"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="inpaint" aria-pressed="false" title="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)">
+          <button type="button" class="rail-btn" data-tool="inpaint" aria-pressed="false" aria-label="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)" title="Cọ tẩy chữ thông minh (PatchMatch + Poisson Inpaint)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5l6.5-6.5M9.5 3v2M9.5 8v1.5M6.5 6H5M12.5 6H14M11.6 3.9l1-1"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="retouch-erase" aria-pressed="false" title="Cọ tẩy nét redraw (lộ lại ảnh gốc)">
+          <button type="button" class="rail-btn" data-tool="retouch-erase" aria-pressed="false" aria-label="Cọ tẩy nét redraw (lộ lại ảnh gốc)" title="Cọ tẩy nét redraw (lộ lại ảnh gốc)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 3.2l3.2 3.2-5.6 5.6H4l-1.5-1.5 7.1-7.3zM7.2 12h6.3"/></svg>
           </button>
-          <button type="button" class="rail-btn" data-tool="eyedropper" aria-pressed="false" title="Hút màu (Shift+bấm để đổi màu chữ)">
+          <button type="button" class="rail-btn" data-tool="eyedropper" aria-pressed="false" aria-label="Hút màu (Shift+bấm để đổi màu chữ)" title="Hút màu (Shift+bấm để đổi màu chữ)">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 2.5l3 3-1.4 1.4-3-3 1.4-1.4zM9.8 6.2L4.2 11.8l-.9 1.7 1.7-.9 5.6-5.6"/></svg>
           </button>
         </div>
@@ -278,6 +338,7 @@
               <span class="split-badge split-badge-before">Gốc</span>
               <span class="split-thumb" aria-hidden="true">⇄</span>
               <span class="split-badge split-badge-after">Biên tập</span>
+              <span class="split-hint" aria-hidden="true">←/→ 2% · Shift 10%</span>
             </div>
           </div>
         </div>
@@ -321,8 +382,9 @@
           <details class="prop-group" open>
             <summary>Nội dung &amp; Kiểu chữ</summary>
             <label class="field" for="box-text">Nội dung
-              <textarea id="box-text" rows="3" required></textarea>
+              <textarea id="box-text" rows="3"></textarea>
             </label>
+            <p id="box-text-error" class="field-error" role="alert"></p>
             <div class="font-row">
               <label class="field" for="box-font">Font
                 <select id="box-font">
@@ -351,6 +413,18 @@
             <label class="field" for="box-align">Canh chữ
               <select id="box-align"><option value="center">Giữa</option><option value="left">Trái / Trên</option><option value="right">Phải / Dưới</option></select>
             </label>
+          </details>
+          <details class="prop-group" id="box-geometry">
+            <summary>Vị trí &amp; Kích thước</summary>
+            <div class="two-fields">
+              <label class="field" for="box-x">X (px)<input id="box-x" type="number" step="1" required></label>
+              <label class="field" for="box-y">Y (px)<input id="box-y" type="number" step="1" required></label>
+            </div>
+            <div class="two-fields">
+              <label class="field" for="box-w">Rộng (px)<input id="box-w" type="number" min="1" step="1" required></label>
+              <label class="field" for="box-h">Cao (px)<input id="box-h" type="number" min="1" step="1" required></label>
+            </div>
+            <p class="muted">Phím G mở nhóm này. Mũi tên trên tay cầm co giãn khung 1 px (giữ Shift: 10 px).</p>
           </details>
           <details class="prop-group">
             <summary>Viền, Đổ bóng &amp; Uốn chữ SFX</summary>
@@ -433,6 +507,18 @@
         </label>
         <button type="button" class="button" id="reset-cleanup">Đặt lại vùng xóa</button>
       </section>
+      <section class="side-section" id="layers-panel">
+        <h2>Lớp</h2>
+        <p class="muted">Ghép từ dưới lên. Bật/tắt nền, cọ và chữ riêng từng lớp; đổi độ đục, đổi tên hoặc đổi thứ tự.</p>
+        <ol id="layer-list" class="layer-list"></ol>
+        <div class="form-actions">
+          <button type="button" id="add-layer" class="button" title="Thêm một lớp cọ trống ở trên cùng">+ Lớp cọ</button>
+          <button type="button" id="restore-original" class="button" title="Trả trang về ảnh quét gốc trước khi làm sạch raw" hidden>Lấy lại ảnh gốc</button>
+        </div>
+        <h3>Nét cọ</h3>
+        <p class="muted">Bấm một nét để chọn, ẩn, xoá hoặc chuyển sang lớp cọ khác.</p>
+        <ol id="stroke-list" class="stroke-list"></ol>
+      </section>
       <section id="queue-section" class="side-section" hidden>
         <div class="section-heading"><h2>Chưa đặt</h2></div>
         <p class="muted">Bấm một câu để đặt trên trang hiện tại.</p>
@@ -473,11 +559,12 @@
   </main>
 
   <dialog id="project-library">
-    <h2>Dự án gần đây và phục hồi</h2>
-    <p id="project-library-empty" class="muted">Chưa có dự án đã lưu.</p>
-    <button type="button" class="button" id="legacy-recovery" hidden>Khôi phục phiên tự lưu cũ</button>
+    <h2 data-i18n="projectLibrary.title">Dự án gần đây và phục hồi</h2>
+    <p id="project-library-busy" class="muted" hidden></p>
+    <p id="project-library-empty" class="muted" data-i18n="projectLibrary.empty">Chưa có dự án đã lưu.</p>
+    <button type="button" class="button" id="legacy-recovery" hidden data-i18n="projectLibrary.legacy">Khôi phục phiên tự lưu cũ</button>
     <div id="recent-projects"></div>
-    <form method="dialog"><button class="button">Đóng</button></form>
+    <form method="dialog"><button class="button" data-i18n="dialog.close">Đóng</button></form>
   </dialog>
   <dialog id="ocr-review">
     <h2>Kiểm tra kết quả OCR</h2>
@@ -491,62 +578,115 @@
     <form method="dialog"><button class="button">Đóng</button></form>
   </dialog>
   <dialog id="preflight-dialog">
-    <h2>Rà trước khi xuất</h2>
+    <h2 data-i18n="preflight.title">Rà trước khi xuất</h2>
     <p id="preflight-summary" class="muted"></p>
+    <div id="qa-filters">
+      <label class="field" for="qa-filter-state">Trạng thái<select id="qa-filter-state"></select></label>
+      <label class="field" for="qa-filter-severity">Mức độ<select id="qa-filter-severity"></select></label>
+      <label class="field" for="qa-filter-page">Trang<select id="qa-filter-page"></select></label>
+      <label class="field" for="qa-filter-type">Loại<select id="qa-filter-type"></select></label>
+    </div>
+    <p id="qa-summary" class="muted" role="status"></p>
     <ol id="preflight-issues" class="box-list"></ol>
     <div class="form-actions">
-      <button type="button" id="close-preflight" class="button">Đóng</button>
-      <button type="button" id="continue-export" class="button primary">Vẫn xuất</button>
+      <button type="button" id="close-preflight" class="button" data-i18n="dialog.close">Đóng</button>
+      <button type="button" id="continue-export" class="button primary" data-i18n="preflight.continue">Vẫn xuất</button>
+    </div>
+  </dialog>
+  <dialog id="template-dialog">
+    <h2>Mẫu dự án</h2>
+    <p class="muted">Mẫu gom sẵn ngôn ngữ, hướng đọc, ghi chú dịch, bảng thuật ngữ, mẫu dàn chữ, phông mặc định và định dạng xuất. Áp dụng trước khi nhập trang để bắt đầu nhanh; trang ảnh đang mở không bị ảnh hưởng.</p>
+    <label class="field" for="template-select">Mẫu<select id="template-select"></select></label>
+    <label class="field" for="template-name">Tên mẫu<input id="template-name" maxlength="80"></label>
+    <div class="form-actions">
+      <button type="button" id="apply-template" class="button primary">Áp dụng cho dự án này</button>
+      <button type="button" id="new-project-template" class="button">Dự án mới với mẫu</button>
+    </div>
+    <div class="form-actions">
+      <button type="button" id="save-template" class="button">Lưu thiết lập hiện tại làm mẫu</button>
+      <button type="button" id="rename-template" class="button">Đổi tên</button>
+      <button type="button" id="overwrite-template" class="button">Ghi đè</button>
+      <button type="button" id="delete-template" class="button danger">Xóa mẫu</button>
+    </div>
+    <div class="form-actions preset-io-actions">
+      <button type="button" id="export-templates" class="button" title="Xuất danh sách mẫu dự án ra tệp JSON để dùng chung">Xuất JSON</button>
+      <button type="button" id="import-templates" class="button" title="Nhập mẫu dự án từ tệp JSON">Nhập JSON</button>
+      <input type="file" id="templates-file" accept=".json,application/json" hidden>
+    </div>
+    <form method="dialog"><button class="button">Đóng</button></form>
+  </dialog>
+  <dialog id="style-guide-dialog">
+    <h2 data-i18n="styleGuide.title">Hướng dẫn phong cách dự án</h2>
+    <p class="muted" data-i18n="styleGuide.description">Quy tắc được lưu cùng tệp dự án, tự tiêm vào mọi lượt dịch và được Trợ lý AI dùng để rà lỗi tức thì (0-token).</p>
+    <div id="style-guide-fields"></div>
+    <div class="form-actions">
+      <button type="button" id="save-style-guide" class="button primary" data-i18n="styleGuide.save">Lưu hướng dẫn</button>
+      <button type="button" id="clear-style-guide" class="button" data-i18n="styleGuide.clear">Xóa toàn bộ</button>
+      <button type="button" id="close-style-guide" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="find-replace-dialog">
-    <h2>Tìm và thay thế trong chương</h2>
-    <label class="field" for="find-query">Tìm kiếm
-      <input id="find-query" type="search" placeholder="Nhập từ hoặc cụm thoại cần tìm">
+    <h2 data-i18n="find.title">Tìm và thay thế trong chương</h2>
+    <label class="field" for="find-query"><span data-i18n="find.query">Tìm kiếm</span>
+      <input id="find-query" type="search" placeholder="Nhập từ hoặc cụm thoại cần tìm" data-i18n-placeholder="find.queryPlaceholder">
     </label>
-    <label class="field" for="replace-text">Thay bằng
-      <input id="replace-text" type="text" placeholder="Nội dung thay thế">
+    <p id="find-error" class="find-error" role="alert"></p>
+    <label class="field" for="replace-text"><span data-i18n="find.replace">Thay bằng</span>
+      <input id="replace-text" type="text" placeholder="Nội dung thay thế" data-i18n-placeholder="find.replacePlaceholder">
     </label>
     <div class="style-toggles">
-      <label class="choice"><input id="find-case" type="checkbox"> Phân biệt hoa/thường</label>
-      <label class="choice"><input id="find-word" type="checkbox"> Khớp nguyên từ</label>
-      <label class="choice"><input id="find-unplaced" type="checkbox"> Gồm câu chưa đặt</label>
+      <label class="choice"><input id="find-case" type="checkbox"> <span data-i18n="find.case">Phân biệt hoa/thường</span></label>
+      <label class="choice"><input id="find-word" type="checkbox"> <span data-i18n="find.word">Khớp nguyên từ</span></label>
+      <label class="choice"><input id="find-unplaced" type="checkbox"> <span data-i18n="find.unplaced">Gồm câu chưa đặt</span></label>
     </div>
     <p id="find-summary" class="muted" role="status"></p>
     <ol id="find-results" class="box-list"></ol>
     <div class="form-actions">
-      <button type="button" id="replace-all-btn" class="button primary">Thay tất cả</button>
-      <button type="button" id="close-find" class="button">Đóng</button>
+      <button type="button" id="replace-all-btn" class="button primary" data-i18n="find.replaceAll">Thay tất cả</button>
+      <button type="button" id="close-find" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="shortcuts-dialog">
-    <h2>Phím tắt biên tập</h2>
+    <h2 data-i18n="shortcuts.title">Phím tắt biên tập</h2>
     <dl class="shortcuts-list">
-      <div><dt>Ctrl / Cmd + Z</dt><dd>Hoàn tác</dd></div>
-      <div><dt>Ctrl / Cmd + Shift + Z / Y</dt><dd>Làm lại</dd></div>
-      <div><dt>Ctrl / Cmd + D</dt><dd>Nhân bản khung đang chọn</dd></div>
-      <div><dt>Ctrl / Cmd + H hoặc F</dt><dd>Tìm và thay thế trong chương</dd></div>
-      <div><dt>Ctrl + Cuộn chuột</dt><dd>Thu phóng bản vẽ (25%–400%)</dd></div>
-      <div><dt>Giữ Space + Kéo / Chuột giữa</dt><dd>Kéo bàn vẽ (Pan)</dd></div>
-      <div><dt>Phím \</dt><dd>Bật/tắt so sánh với ảnh gốc</dd></div>
-      <div><dt>Shift + \</dt><dd>Bật/tắt thanh kéo so sánh gốc</dd></div>
-      <div><dt>Shift + Kéo tay cầm xoay</dt><dd>Xoay khung theo nấc 15°</dd></div>
-      <div><dt>Shift + Bấm khung</dt><dd>Chọn nhiều khung để kéo / căn hàng</dd></div>
-      <div><dt>Alt + Kéo khung</dt><dd>Tạm tắt hút lưới căn thẳng hàng</dd></div>
-      <div><dt>Alt + Bấm (Cọ sao chép)</dt><dd>Chọn điểm nguồn sao chép nền</dd></div>
-      <div><dt>Mũi tên (khi chọn khung)</dt><dd>Dịch khung 1 px (giữ Shift: 10 px)</dd></div>
-      <div><dt>Delete / Backspace</dt><dd>Xóa khung đang chọn</dd></div>
-      <div><dt>Enter (trên ảnh)</dt><dd>Thêm khung chữ ở giữa trang</dd></div>
+      <div><dt>Ctrl / Cmd + Z</dt><dd data-i18n="shortcuts.undo">Hoàn tác</dd></div>
+      <div><dt>Ctrl / Cmd + Shift + Z / Y</dt><dd data-i18n="shortcuts.redo">Làm lại</dd></div>
+      <div><dt>Ctrl / Cmd + D</dt><dd data-i18n="shortcuts.duplicate">Nhân bản khung đang chọn</dd></div>
+      <div><dt data-i18n="shortcuts.key.find">Ctrl / Cmd + H hoặc F</dt><dd data-i18n="shortcuts.find">Tìm và thay thế trong chương</dd></div>
+      <div><dt>Ctrl / Cmd + Shift + H</dt><dd data-i18n="shortcuts.history">Lịch sử thao tác có tên, nhảy tới mốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.zoom">Ctrl + Cuộn chuột</dt><dd data-i18n="shortcuts.zoom">Thu phóng bản vẽ (25%–400%)</dd></div>
+      <div><dt data-i18n="shortcuts.key.pan">Giữ Space + Kéo / Chuột giữa</dt><dd data-i18n="shortcuts.pan">Kéo bàn vẽ (Pan)</dd></div>
+      <div><dt data-i18n="shortcuts.key.compare">Phím \</dt><dd data-i18n="shortcuts.compare">Bật/tắt so sánh với ảnh gốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.splitCompare">Shift + \</dt><dd data-i18n="shortcuts.splitCompare">Bật/tắt thanh kéo so sánh gốc</dd></div>
+      <div><dt data-i18n="shortcuts.key.rotate">Shift + Kéo tay cầm xoay</dt><dd data-i18n="shortcuts.rotate">Xoay khung theo nấc 15°</dd></div>
+      <div><dt data-i18n="shortcuts.key.multiSelect">Shift + Bấm khung</dt><dd data-i18n="shortcuts.multiSelect">Chọn nhiều khung để kéo / căn hàng</dd></div>
+      <div><dt data-i18n="shortcuts.key.noSnap">Alt + Kéo khung</dt><dd data-i18n="shortcuts.noSnap">Tạm tắt hút lưới căn thẳng hàng</dd></div>
+      <div><dt data-i18n="shortcuts.key.clone">Alt + Bấm (Cọ sao chép)</dt><dd data-i18n="shortcuts.clone">Chọn điểm nguồn sao chép nền</dd></div>
+      <div><dt data-i18n="shortcuts.key.nudge">Mũi tên (khi chọn khung)</dt><dd data-i18n="shortcuts.nudge">Dịch khung 1 px (giữ Shift: 10 px), hút theo lưới căn thẳng hàng (giữ Alt: tắt hút)</dd></div>
+      <div><dt data-i18n="shortcuts.resizeKey">Tab tới tay cầm rồi mũi tên</dt><dd data-i18n="shortcuts.resize">Co giãn khung 1 px (giữ Shift: 10 px); cả nhóm đang chọn co giãn theo</dd></div>
+      <div><dt data-i18n="shortcuts.rotateGripKey">Mũi tên trên tay cầm xoay</dt><dd data-i18n="shortcuts.rotateGrip">Xoay khung 15° (giữ Shift: 45°)</dd></div>
+      <div><dt data-i18n="shortcuts.geometryKey">G</dt><dd data-i18n="shortcuts.geometry">Mở ô toạ độ khung: X, Y, rộng, cao</dd></div>
+      <div><dt data-i18n="shortcuts.cancelGestureKey">Esc (trong thao tác phím)</dt><dd data-i18n="shortcuts.cancelGesture">Huỷ lần dịch / co giãn / xoay vừa làm</dd></div>
+      <div><dt>Delete / Backspace</dt><dd data-i18n="shortcuts.delete">Xóa khung đang chọn</dd></div>
+      <div><dt data-i18n="shortcuts.key.newBox">Enter (trên ảnh)</dt><dd data-i18n="shortcuts.newBox">Thêm khung chữ ở giữa trang</dd></div>
     </dl>
     <div class="form-actions">
-      <button type="button" id="close-shortcuts" class="button primary">Đóng</button>
+      <button type="button" id="close-shortcuts" class="button primary" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
   <dialog id="zip-dialog">
     <form method="dialog">
-      <h2>Xuất toàn bộ trang</h2>
+      <h2 id="zip-dialog-title">Xuất toàn bộ trang</h2>
+      <label class="field" for="export-profile">Hồ sơ xuất theo nền tảng
+        <select id="export-profile"></select>
+      </label>
+      <p id="export-profile-summary" class="muted" role="status" aria-live="polite"></p>
       <label class="field" for="zip-format">Định dạng
-        <select id="zip-format"><option value="png">ZIP ảnh PNG</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+        <select id="zip-format"><option value="profile">ZIP ảnh theo hồ sơ (chia mảnh)</option><option value="png">ZIP ảnh PNG</option><option value="psd">ZIP PSD có lớp chữ</option><option value="raster">ZIP PSD lớp ảnh</option></select>
+      </label>
+      <p class="muted">Gói ảnh chia mảnh kèm <code>manifest.json</code> ghi thứ tự từng mảnh.</p>
+      <label class="field" for="zip-name">Tên tệp ZIP (không bắt buộc)
+        <input id="zip-name" type="text" placeholder="khung-thoai" autocomplete="off" spellcheck="false">
       </label>
       <div class="form-actions">
         <button value="cancel" class="button">Hủy</button>
@@ -572,6 +712,7 @@
         <label class="choice"><input id="chat-allow-edits" type="checkbox" checked> Cho phép sửa khung &amp; thuật ngữ</label>
         <label class="choice"><input id="chat-plan-mode" type="checkbox"> Chế độ Kế hoạch (Plan)</label>
         <label class="choice"><input id="chat-confirm-bulk" type="checkbox" checked> Hỏi duyệt sửa hàng loạt</label>
+        <label class="choice"><input id="chat-review-changes" type="checkbox" checked> Duyệt từng thay đổi của AI</label>
       </div>
       <details class="chat-search-config">
         <summary>Hồ sơ kỹ năng (Skill) &amp; Web Search</summary>
@@ -595,6 +736,32 @@
           <input id="chat-search-key" type="password" autocomplete="off">
         </label>
       </details>
+      <details class="chat-search-config" id="usage-panel">
+        <summary>Kế toán token &amp; chi phí</summary>
+        <p id="usage-summary" class="muted">Chưa có lượt gọi AI nào.</p>
+        <p id="usage-hint" class="muted">Giá do bạn tự nhập (USD trên 1 triệu token) — ứng dụng không tự áp giá của nhà cung cấp. Model chưa có giá vẫn được đếm token nhưng tính 0 $ và ghi “chưa đặt giá”.</p>
+        <div id="usage-models" class="usage-models"></div>
+        <div class="two-fields">
+          <label class="field" for="usage-budget-limit">Hạn mức (USD)
+            <input id="usage-budget-limit" type="number" min="0" step="0.01" value="0">
+          </label>
+          <label class="field" for="usage-budget-warn">Cảnh báo ở (%)
+            <input id="usage-budget-warn" type="number" min="1" max="100" step="1" value="80">
+          </label>
+        </div>
+        <button type="button" id="usage-reset" class="button full">Đặt lại kế toán</button>
+      </details>
+      <details class="chat-search-config" id="chat-replay">
+        <summary>Ghi &amp; phát lại lượt chạy</summary>
+        <p class="muted">Mỗi lượt được ghi có giới hạn: lời nhắc, quyết định của model, công cụ kèm tham số và kết quả, chi phí và thời gian. Khóa API, header và URL có mật khẩu được ẩn trước khi lưu. Phát lại chỉ đọc bản ghi — không gọi nhà cung cấp và không chạy lại công cụ.</p>
+        <p id="chat-replay-empty" class="muted">Chưa có bản ghi lượt nào.</p>
+        <ol id="chat-replay-list" class="chat-replay-list"></ol>
+        <div id="chat-replay-trace" class="chat-replay-trace" hidden></div>
+        <div class="form-actions">
+          <button type="button" id="chat-replay-export" class="button" disabled>Xuất JSON</button>
+          <button type="button" id="chat-replay-clear" class="button" disabled>Xóa bản ghi</button>
+        </div>
+      </details>
       <div class="chat-chips" role="group" aria-label="Gợi ý nhanh">
         <button type="button" class="button" data-chat-prompt="Đọc các khung thoại trên trang hiện tại, tra web các tên riêng hoặc thuật ngữ tiếng Nhật/nước ngoài cần xác minh rồi đề xuất bổ sung vào Bảng thuật ngữ.">Tra thuật ngữ</button>
         <button type="button" class="button" data-chat-prompt="/autofit">Khớp tràn khung</button>
@@ -610,13 +777,18 @@
       </div>
       <ol id="chat-todo-list" class="chat-todo-list"></ol>
     </div>
-    <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+    <div class="chat-log">
+      <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+      <button type="button" id="chat-jump" class="button chat-jump" hidden>Có tin nhắn mới ↓</button>
+    </div>
     <div class="chat-status-row">
       <p id="chat-status" class="chat-status muted" role="status"></p>
       <span id="chat-context-meter" class="chat-context-meter" hidden></span>
+      <span id="chat-usage" class="chat-usage" hidden></span>
       <span id="chat-stats" class="chat-stats muted" hidden></span>
     </div>
     <form id="chat-form" class="chat-composer">
+      <label class="sr-only" for="chat-input">Tin nhắn cho trợ lý AI</label>
       <textarea id="chat-input" rows="2" placeholder="Hỏi AI hoặc gõ lệnh nhanh: /qc, /plan, /autofit, /compact ai, /help…"></textarea>
       <div class="form-actions">
         <button type="submit" id="chat-send" class="button primary">Gửi</button>
@@ -625,16 +797,16 @@
     </form>
   </aside>
 
-  <aside id="notifications-panel" class="notifications-panel" aria-label="Trung tâm thông báo" hidden>
+  <aside id="notifications-panel" class="notifications-panel" aria-label="Trung tâm thông báo" data-i18n-aria-label="notifications.label" hidden>
     <div class="notifications-header">
-      <h2>Thông báo</h2>
+      <h2 data-i18n="notifications.title">Thông báo</h2>
       <div class="chat-header-actions">
-        <button type="button" id="notifications-check-update" class="button">Kiểm tra cập nhật</button>
-        <button type="button" id="notifications-clear" class="button">Xóa hết</button>
-        <button type="button" id="notifications-close" class="button" aria-label="Đóng trung tâm thông báo">×</button>
+        <button type="button" id="notifications-check-update" class="button" data-i18n="notifications.checkUpdate">Kiểm tra cập nhật</button>
+        <button type="button" id="notifications-clear" class="button" data-i18n="notifications.clear">Xóa hết</button>
+        <button type="button" id="notifications-close" class="button" aria-label="Đóng trung tâm thông báo" data-i18n-aria-label="notifications.close">×</button>
       </div>
     </div>
-    <p id="notifications-empty" class="muted notifications-empty">Chưa có thông báo nào trong phiên này.</p>
+    <p id="notifications-empty" class="muted notifications-empty" data-i18n="notifications.empty">Chưa có thông báo nào trong phiên này.</p>
     <ol id="notifications-list" class="notifications-list"></ol>
   </aside>
 
@@ -646,9 +818,9 @@
     <pre id="update-notes" class="update-notes"></pre>
     <div id="update-assets" class="update-assets" hidden></div>
     <div class="form-actions">
-      <button type="button" id="update-open-release" class="button primary">Mở trang phát hành</button>
-      <button type="button" id="update-dismiss-version" class="button">Bỏ qua bản này</button>
-      <button type="button" id="update-close" class="button">Đóng</button>
+      <button type="button" id="update-open-release" class="button primary" data-i18n="update.openRelease">Mở trang phát hành</button>
+      <button type="button" id="update-dismiss-version" class="button" data-i18n="update.dismiss">Bỏ qua bản này</button>
+      <button type="button" id="update-close" class="button" data-i18n="dialog.close">Đóng</button>
     </div>
   </dialog>
 

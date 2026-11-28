@@ -77,7 +77,7 @@ async function spreadsheetText(zip) {
     }
     return values
   })
-  const headings = (rows[0] ?? []).map((cell) => cell.trim().toLowerCase())
+  const headings = Array.from(rows[0] ?? [], (cell) => String(cell ?? "").trim().toLowerCase())
   const script = headings.findIndex((cell) => ["translation", "bản dịch", "thoại", "text"].includes(cell))
   const page = headings.findIndex((cell) => ["page", "trang", "ảnh"].includes(cell))
   if (script < 0) return rows.map((row) => row.filter(Boolean).join(" ")).filter(Boolean).join("\n")
@@ -130,8 +130,13 @@ export function saveFile(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
+// Only a real file extension is dropped. A chapter title such as
+// "One Piece - Chương 1.5 - Part 2" ends in a number, not an extension, and cutting at the last dot
+// there lost the part that tells two chapters of the same series apart.
+const knownExtension = /\.(png|jpe?g|webp|json|txt|docx|xlsx|zip|khungthoai)$/i
+
 export function filenameStem(name) {
-  return name.replace(/\.[^.]+$/, "").replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").slice(0, 120) || "trang"
+  return name.replace(knownExtension, "").replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").slice(0, 120) || "trang"
 }
 
 export function normalizedSearch(value) {

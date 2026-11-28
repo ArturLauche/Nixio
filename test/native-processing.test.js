@@ -1,15 +1,13 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { existsSync } from "node:fs"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import native from "../desktop/native-worker.cjs"
+import { nativeSkip, nativeWorker } from "../scripts/native-worker.mjs"
 import JSZip from "jszip"
 
-const rid = ({ linux: "linux", win32: "win", darwin: "osx" })[process.platform] + "-" + process.arch
-const executable = path.resolve("native/out", rid, "native-worker", "KhungThoai.Redraw" + (process.platform === "win32" ? ".exe" : ""))
-const available = existsSync(executable)
+const { available, executable } = nativeWorker()
 const image = (width = 32, height = 32) => ({ width, height, pixels: new Uint8Array(width * height * 4).fill(255) })
 
 test("NativeWorker.redraw returns null safely for null or malformed samples", async (t) => {
@@ -127,7 +125,7 @@ test("OCR maps rotated text boxes back into the input image coordinate system", 
   const worker = new native.NativeWorker(executable)
   t.after(() => worker.close())
   const { result: capabilities } = await worker.call("capabilities")
-  if (!capabilities.languages.includes("eng")) return t.skip("English Tesseract language is unavailable")
+  if (!capabilities.languages.includes("eng")) return nativeSkip(t, "English Tesseract language is unavailable")
   const { gunzipSync } = await import("node:zlib")
   const pixels = gunzipSync(await readFile("test/fixtures/comic/english.rgba.gz"))
   const rotated = Buffer.alloc(pixels.length)

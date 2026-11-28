@@ -16,16 +16,16 @@ Tesseract TSV output is grouped by line and coordinates are mapped back through 
 
 The legacy 24-byte redraw input remains available when launching the executable without arguments. Electron uses `--rpc`.
 
-Each RPC frame consists of the ASCII magic `KTR1`, a uint32 little-endian JSON byte count, a uint32 little-endian payload byte count, UTF-8 JSON, then binary bytes. JSON is limited to 4 MiB and payloads to 512 MiB. Requests contain `version: 1`, `operation` and `options`. Replies contain `version: 1`, `ok`, operation metadata and optional bytes. Failed operations return `ok: false` and `error`. A malformed frame terminates the process. Operation failures keep the stream synchronized.
+Each RPC frame consists of the ASCII magic `KTR1`, a uint32 little-endian JSON byte count, a uint32 little-endian payload byte count, UTF-8 JSON, then binary bytes. JSON is limited to 4 MiB and payloads to 512 MiB. Requests contain `version`, `operation`, `options` and a `protocol` range `{min, max}`. Replies contain `version`, `protocolVersion`, `minProtocol`, `maxProtocol`, `ok`, operation metadata and optional bytes. A worker whose range does not overlap the request's answers `ok: false` with `Native protocol incompatible: …` naming both ranges, and the process is not terminated: the persistent worker owns open project handles, so an older or newer binary is reported instead of killed mid-transfer. A reply that changes framing after a range was agreed fails the same way, and later requests fail with that one error until the app closes the worker. A malformed frame terminates the process. Operation failures keep the stream synchronized.
 
-- `capabilities` returns supported operation categories and installed OCR languages.
+- `capabilities` returns the protocol range, the version of each operation, the supported operation categories and the installed OCR languages, so the renderer detects a feature instead of assuming it.
 - `redraw` accepts sample RGBA plus an inner rectangle and returns a transparent recovered patch.
 - `mask` accepts patch RGBA, original-image coordinates, brush strokes and a signed dilation/erosion radius. Stroke widths are normalized by the shorter original-image dimension.
 - `preprocess` returns contrast-normalized grayscale RGBA with optional cross-median denoising and 1–3× scaling. Scaling is reduced to 1× when it would exceed the 28-million-pixel limit.
 - `ocr` preprocesses RGBA and returns recognized lines with integer boxes in the 0–1000 coordinate space. Supported segmentation modes are automatic page, single block and sparse text.
 - `png` composites original RGBA, a transparent text/background layer and ordered cleanup patches, then encodes PNG. Font measurement and text rasterization use Canvas, shared with the preview. Editable PSD layers use ag-psd.
-- `zipBegin`, `zipPage` and `fileCommit` stream a batch into a temporary ZIP and replace the destination only when finished.
-- `fileBegin`, `fileAppend`, `fileCommit` and `fileCancel` write projects in chunks. A previous file can be retained as `.bak`.
+- `zipBegin`, `zipPage` and `fileCommit` stream a batch into a temporary ZIP and replace the destination only when it is finished and readable. A page name, the 50-page limit, the composition and the PNG signature are checked before the archive and the page count change, so a rejected page leaves no empty entry and the transfer still accepts the next page. A failed archive write marks the transfer damaged, and commit refuses a damaged archive.
+- `fileBegin`, `fileAppend`, `fileCommit` and `fileCancel` write projects in chunks. A previous file can be retained as `.bak`. Commit flushes and verifies the temporary file, copies the current destination beside it, replaces the destination, and only then publishes the copy as `.bak`. The reply reports `backup` as `written`, `kept` when only the backup publication failed and the older backup stays, or `none`. Any failure before the destination replacement leaves the destination and its backup untouched, and temporary files are removed.
 - `fileOpen`, `fileReadNext` and `fileClose` read in 4-MiB chunks through one open file handle. An atomic replacement during a read does not mix two project versions. `fileRead` also provides internal offset-based reads.
 
 Only the main process can request file operations. Renderer-visible IDs are mapped to native handles. Paths are obtained from dialogs or the app recovery directory. Failed batch operations cancel the temporary transfer. A hard process crash can leave a uniquely named temporary file beside the destination, while the last committed project stays intact.
@@ -34,7 +34,7 @@ Only the main process can request file operations. Renderer-visible IDs are mapp
 
 Add an operation implementation in a focused C# file and register it in `NativeRpc`. Include its category in `capabilities`. Expose it through the renderer allowlist only if it needs no filesystem access. File operations go through `ProjectFiles`, which owns their paths and handles.
 
-Use binary payloads for images and retain structured metadata for coordinates and options. Change the protocol version for incompatible framing changes. Keep optional project fields backward compatible and validate them in `src/project.js`. Test error recovery, boundaries, alpha compositing and cancellation alongside successful requests.
+Use binary payloads for images and retain structured metadata for coordinates and options. Change the protocol range on both ends (`native/NativeRpc.cs` and `src/native.js`) for incompatible framing changes. Keep optional project fields backward compatible and validate them in `src/project.js`. Test error recovery, boundaries, alpha compositing and cancellation alongside successful requests.
 
 ## Recovery
 

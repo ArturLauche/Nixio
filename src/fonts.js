@@ -14,9 +14,16 @@ export function allFonts() {
   return [...builtInFonts, ...customFonts]
 }
 
-export function registerFontName(name) {
+// The one place a font name is cleaned. Shared so a name can be validated without teaching the
+// picker a family that is not in the project yet.
+export function normalizeFontName(name) {
   if (typeof name !== "string") return null
   const clean = name.trim().replace(/[\u0000-\u001f"\\]/g, "").slice(0, 80)
+  return clean || null
+}
+
+export function registerFontName(name) {
+  const clean = normalizeFontName(name)
   if (!clean) return null
   if (!builtInFonts.includes(clean)) customFonts.add(clean)
   return clean

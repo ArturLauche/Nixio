@@ -1,9 +1,18 @@
 import { imageMimeType, imageTypes } from "./io.js"
+import { serializeLayers, validateLayers } from "./layers.js"
+import { qaReviewEntryLimit, qaReviewVersion, validateQaReviewEntry } from "./qa-review.js"
 import { validateRetouchStroke } from "./retouch.js"
+import {
+  translationMemoryEntryLimit,
+  translationMemoryVersion,
+  validateTranslationMemoryEntry,
+} from "./translation-memory.js"
+import { normalizeStyleGuide } from "./style-guide.js"
+import { DEFAULT_EXPORT_PROFILE_ID } from "./export-presets.js"
 
 export const projectExtension = ".khungthoai"
 export const projectPageLimit = 50
-export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes", "translation-glossary"]
+export const projectSettingIds = ["script-text", "direction", "gemini-model", "source-language", "target-language", "translation-notes", "translation-glossary", "export-profile"]
 
 const encoder = new TextEncoder()
 // The header stores the UTF-8 manifest length. The original image bytes follow in page order.
@@ -51,7 +60,9 @@ export function projectStyle(style) {
     ...(uppercase && { uppercase }),
     ...(vertical && { vertical }),
     ...(bubbleFit && { bubbleFit }),
-    ...(warp !== "none" && warpAmount !== 0 && { warp, warpAmount }),
+    // A warp mode survives even at zero bend: the box is "curved" and the slider has somewhere to
+    // go, whereas dropping the pair silently turned it back into plain text after a save.
+    ...(warp !== "none" && { warp, warpAmount }),
     ...(lineHeight !== 1.15 && { lineHeight }),
     ...(strokeWidth > 0 && { strokeWidth, strokeColor }),
     ...(shadowBlur > 0 && { shadowBlur, shadowColor }),
@@ -67,11 +78,27 @@ function projectStroke(stroke) {
   return { mode: stroke.mode, size: stroke.size, points: stroke.points.map(({ x, y }) => ({ x, y })) }
 }
 
+// The stamp an incremental box job leaves behind: which source line the text came from, which
+// glossary pairs applied, and the digest of every other input. It has to survive a save exactly,
+// because the next run compares against it to decide what is stale. Only the shapes are checked —
+// a long line or a large glossary must never make an otherwise valid project unsavable.
+function projectStamp(stamp) {
+  if (stamp === undefined) return undefined
+  if (!isText(stamp?.hash) || !/^[0-9a-f]{8,32}$/.test(stamp.hash) ||
+      !isText(stamp.source) || !isText(stamp.output) ||
+      !Array.isArray(stamp.terms) ||
+      !stamp.terms.every((pair) => Array.isArray(pair) && pair.length === 2 && pair.every(isText))) {
+    throw invalidProject()
+  }
+  return { hash: stamp.hash, source: stamp.source, output: stamp.output, terms: stamp.terms.map((pair) => [pair[0], pair[1]]) }
+}
+
 function projectBox(box) {
-  const { text, cleanup = false, cleanupMode = "auto", originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0 } = box ?? {}
+  const { text, cleanup = false, cleanupMode = "auto", originalBox, cleanupRect, cleanupStrokes, cleanupExpand = 0, translationStamp } = box ?? {}
   if (!isText(text) || typeof cleanup !== "boolean" || !["auto", "content-aware"].includes(cleanupMode) ||
       !Number.isInteger(cleanupExpand) || Math.abs(cleanupExpand) > 8 ||
       (cleanupStrokes !== undefined && !Array.isArray(cleanupStrokes))) throw invalidProject()
+  const stamp = projectStamp(translationStamp)
   return {
     ...rectangle(box), ...projectStyle(box), text, cleanup,
     ...(cleanupMode !== "auto" && { cleanupMode }),
@@ -79,6 +106,7 @@ function projectBox(box) {
     ...(cleanupRect && { cleanupRect: rectangle(cleanupRect) }),
     ...(cleanupExpand !== 0 && { cleanupExpand }),
     ...(cleanupStrokes && { cleanupStrokes: cleanupStrokes.map(projectStroke) }),
+    ...(stamp && { translationStamp: stamp }),
   }
 }
 
@@ -110,18 +138,70 @@ function projectContext(context) {
   return { signature: context.signature, lines: context.lines.map(({ source, text }) => ({ source, text })) }
 }
 
+// The translation memory is a project-level record: a file without one (version 1 and 2) opens with
+// an empty store, and one invalid pair rejects the file instead of silently losing pairs.
+function projectTranslationMemory(memory) {
+  if (memory === undefined) return undefined
+  if (memory?.version !== translationMemoryVersion ||
+      !Array.isArray(memory.entries) || memory.entries.length > translationMemoryEntryLimit) {
+    throw invalidProject()
+  }
+  return {
+    version: memory.version,
+    entries: memory.entries.map((entry) => {
+      const valid = validateTranslationMemoryEntry(entry)
+      if (!valid) throw invalidProject()
+      return valid
+    }),
+  }
+}
+
+// The triage decisions are a project-level record like the memory: a file without one (version 1
+// to 3) opens with an empty board, and one invalid decision rejects the file instead of silently
+// dropping a review the user took.
+function projectQaReview(review) {
+  if (review === undefined) return undefined
+  if (review?.version !== qaReviewVersion ||
+      !Array.isArray(review.entries) || review.entries.length > qaReviewEntryLimit) {
+    throw invalidProject()
+  }
+  const entries = review.entries.map((entry) => {
+    const valid = validateQaReviewEntry(entry)
+    if (!valid) throw invalidProject()
+    return valid
+  })
+  if (new Set(entries.map(({ id }) => id)).size !== entries.length) throw invalidProject()
+  return { version: review.version, entries }
+}
+
+// A stroke keeps the layer it was painted into only when that layer is written too: the default
+// stack has one retouch layer, which every stroke belongs to when no id is stored.
+function strokeForLayer(stroke, stack) {
+  if (!stroke.layerId) return stroke
+  const known = stack?.some((layer) => layer.kind === "retouch" && layer.id === stroke.layerId)
+  if (known) return stroke
+  const { layerId, ...rest } = stroke
+  return rest
+}
+
 function projectPage(page) {
-  const { name, type, size, boxes, unplaced, retouchStrokes, translationContext, translationJob } = page ?? {}
+  const { name, type, size, boxes, unplaced, retouchStrokes, layers, translationContext, translationJob } = page ?? {}
   if (!isText(name) || !name || !imageTypes.has(type) || !Number.isSafeInteger(size) || size <= 0 ||
       !Array.isArray(boxes) || !Array.isArray(unplaced) ||
       (retouchStrokes !== undefined && !Array.isArray(retouchStrokes))) {
     throw invalidProject()
   }
+  const validLayers = validateLayers(layers)
+  if (validLayers === null) throw invalidProject()
+  // A stack that says nothing beyond the default is not written, so a project that never touched
+  // the layers keeps claiming the version every build can read. Reading expands it again, which is
+  // why the page carries the full stack and the manifest is compacted on the way out.
+  const stack = serializeLayers(validLayers)
   const cleanedRetouch = retouchStrokes?.length
     ? retouchStrokes.map((stroke) => {
       const valid = validateRetouchStroke(stroke)
       if (!valid) throw invalidProject()
-      return valid
+      return strokeForLayer(valid, stack)
     })
     : undefined
   return {
@@ -129,14 +209,26 @@ function projectPage(page) {
     boxes: boxes.map(projectBox),
     unplaced: unplaced.map(projectLine),
     ...(cleanedRetouch && { retouchStrokes: cleanedRetouch }),
+    ...(validLayers && { layers: validLayers }),
     translationContext: projectContext(translationContext),
     translationJob: projectJob(translationJob),
   }
 }
 
-function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId }) {
+function projectStyleGuide(raw) {
+  if (raw === undefined) return undefined
+  try {
+    return normalizeStyleGuide(raw, { strict: true }) ?? undefined
+  } catch {
+    throw invalidProject()
+  }
+}
+
+function projectData({ pages, queue, settings, currentPage, fit, presets = [], projectId, templateId, defaultFont, translationMemory, styleGuide, qaReview }) {
   if (projectId !== undefined && (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId))) throw invalidProject()
-  settings = { "translation-glossary": "", ...settings }
+  if (templateId !== undefined && (typeof templateId !== "string" || !templateId.trim() || templateId.length > 100)) throw invalidProject()
+  if (defaultFont !== undefined && (typeof defaultFont !== "string" || !defaultFont.trim() || defaultFont.length > 100)) throw invalidProject()
+  settings = { "translation-glossary": "", "export-profile": DEFAULT_EXPORT_PROFILE_ID, ...settings }
   if (!Array.isArray(pages) || pages.length > projectPageLimit ||
       !Array.isArray(queue) || !queue.every(isText) || !projectSettingIds.every((id) => isText(settings?.[id])) ||
       !Number.isInteger(currentPage) || (pages.length ? currentPage < 0 || currentPage >= pages.length : currentPage !== -1) ||
@@ -144,24 +236,68 @@ function projectData({ pages, queue, settings, currentPage, fit, presets = [], p
       !presets.every((preset) => isText(preset?.name) && preset.name.trim())) {
     throw invalidProject()
   }
+  const memory = projectTranslationMemory(translationMemory)
+  const guide = projectStyleGuide(styleGuide)
+  const review = projectQaReview(qaReview)
   return { pages: pages.map(projectPage), queue, settings: Object.fromEntries(projectSettingIds.map((id) => [id, settings[id]])), currentPage, fit,
     ...(projectId && { projectId }),
+    ...(templateId && { templateId }),
+    ...(defaultFont && { defaultFont: defaultFont.trim() }),
+    ...(memory && { translationMemory: memory }),
+    ...(guide && { styleGuide: guide }),
+    ...(review && { qaReview: review }),
     presets: presets.map(({ name, style }) => ({ name, style: projectStyle(style) })),
   }
 }
 
 export function writeProject(project) {
-  const pages = project.pages.map(({ file, name, boxes, unplaced, retouchStrokes, translationContext, translationJob }) => ({
+  const pages = project.pages.map(({ file, name, boxes, unplaced, retouchStrokes, layers, translationContext, translationJob }) => ({
     name, type: imageMimeType(name, file.type), size: file.size, boxes, unplaced,
     ...(retouchStrokes?.length && { retouchStrokes }),
+    ...(layers?.length && { layers }),
     translationContext, translationJob,
   }))
-  const manifest = encoder.encode(JSON.stringify({ version: 2, ...projectData({ ...project, pages }) }))
+  const data = projectData({ ...project, pages })
+  // Only what differs from the default stack is written, so a page that never touched a layer name,
+  // opacity or order keeps the shortest manifest — and a build that predates layers ignores nothing.
+  const written = data.pages.map(({ layers, ...page }) => {
+    const stack = layers && serializeLayers(layers)
+    return stack ? { ...page, layers: stack } : page
+  })
+  // A file only claims the version it needs: triage decisions and layer stacks share version 4,
+  // remembered pairs claim 3, and a project that used neither stays readable by builds predating both.
+  const manifest = encoder.encode(JSON.stringify({
+    version: data.qaReview?.entries.length || written.some((page) => page.layers?.length) ? 4
+      : data.translationMemory?.entries.length || data.templateId ? 3 : 2,
+    ...data,
+    pages: written,
+  }))
   if (manifest.length > manifestLimit) throw new Error("Dữ liệu biên tập của dự án vượt quá 16 MB.")
   const header = new Uint8Array(headerSize)
   header.set(magic)
   new DataView(header.buffer).setUint32(magic.length, manifest.length, true)
   return new Blob([header, manifest, ...project.pages.map(({ file }) => file)], { type: "application/octet-stream" })
+}
+
+// Reads only the header and manifest so recovery snapshots can be identified
+// without decoding image payloads.
+export async function readProjectIdentity(source) {
+  try {
+    if (!source || typeof source.size !== "number" || source.size < headerSize) return null
+    const header = new Uint8Array(await source.slice(0, headerSize).arrayBuffer())
+    if (header.length !== headerSize || !magic.every((byte, index) => header[index] === byte)) return null
+    const length = new DataView(header.buffer).getUint32(magic.length, true)
+    if (!length || length > manifestLimit || headerSize + length > source.size) return null
+    const manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await source.slice(headerSize, headerSize + length).arrayBuffer()))
+    const projectId = typeof manifest?.projectId === "string" && /^[0-9a-f-]{36}$/i.test(manifest.projectId) ? manifest.projectId : null
+    return {
+      projectId,
+      version: Number.isInteger(manifest?.version) ? manifest.version : 0,
+      pageCount: Array.isArray(manifest?.pages) ? manifest.pages.length : 0,
+    }
+  } catch {
+    return null
+  }
 }
 
 export async function readProject(file) {
@@ -179,7 +315,7 @@ export async function readProject(file) {
     throw invalidProject()
   }
   if (!Number.isInteger(manifest?.version) || manifest.version < 1) throw invalidProject()
-  if (![1, 2].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
+  if (![1, 2, 3, 4].includes(manifest.version)) throw new Error("Phiên bản tệp dự án này chưa được hỗ trợ.")
   const project = projectData(manifest)
   if (project.pages.reduce((total, page) => total + page.size, offset) !== file.size) throw invalidProject()
   const pages = project.pages.map(({ name, type, size, ...page }) => {

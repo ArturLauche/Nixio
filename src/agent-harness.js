@@ -10,50 +10,13 @@ import {
   retainHeadTailText,
 } from "./agent-context.js"
 import { RepeatToolGuard } from "./agent-guards.js"
-import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
-import { validateEndpointUrl } from "./openai-compat.js"
+import { withLlmRetry } from "./llm-retry.js"
+import { providerRegistry } from "./provider-registry.js"
+import { countCall, emptyTotals, estimatePromptChars, normalizeUsage } from "./token-accounting.js"
 
-export async function readSseEvents(body, onData) {
-  const reader = body.getReader()
-  const decoder = new TextDecoder("utf-8")
-  let buffer = ""
-  let dataLines = []
-  const flush = () => {
-    if (!dataLines.length) return
-    const payload = dataLines.join("\n").trim()
-    dataLines = []
-    if (payload && payload !== "[DONE]") onData(payload)
-  }
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split(/\r?\n/)
-      buffer = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.trim()) {
-          flush()
-          continue
-        }
-        if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trimStart())
-        }
-      }
-    }
-    buffer += decoder.decode()
-    if (buffer.startsWith("data:")) dataLines.push(buffer.slice(5).trimStart())
-    flush()
-  } finally {
-    reader.releaseLock?.()
-  }
-}
-
-const geminiModelOptions = {
-  auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
-  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite"],
-  "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite"],
-}
+// The wire encodings live with their provider now, and these stay exported here because this module
+// was already the public name for them.
+export { parseTextToolCalls, readSseEvents } from "./provider-registry.js"
 
 export function buildSystemPrompt({
   allowEdits = true,
@@ -87,271 +50,22 @@ export function stripReasoning(raw) {
   return { thought: thoughts.join("\n\n"), answer: cleaned }
 }
 
-export function parseTextToolCalls(text) {
-  const calls = []
-  const pattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi
-  let match
-  while ((match = pattern.exec(String(text || ""))) !== null) {
-    try {
-      const parsed = JSON.parse(match[1])
-      if (parsed && typeof parsed.name === "string") {
-        calls.push({
-          id: "tc_" + (calls.length + 1),
-          name: parsed.name,
-          args: typeof parsed.arguments === "object" && parsed.arguments !== null ? parsed.arguments : {},
-        })
-      }
-    } catch {
-      // Ignore malformed inline tool_call blocks.
-    }
-  }
-  return calls
+// The thread owns which shape carries the prompt, so it also owns the estimated size: Gemini keeps the
+// system instruction outside `contents`, while OpenAI already carries it as the first message. The
+// estimate never sees the image bytes.
+function threadPromptChars(thread) {
+  const request = thread.request()
+  return estimatePromptChars(request.contents ?? request.messages ?? "") + (request.systemPrompt?.length ?? 0)
 }
 
-async function callGeminiStep({ settings, systemPrompt, contents, toolDefs, signal, stream = false, onDelta }) {
-  const key = String(settings.key || "").trim()
-  if (!key) throw new Error("Hãy nhập khóa API Gemini ở mục Dịch ảnh & LLM.")
-  const models = geminiModelOptions[settings.model] ?? geminiModelOptions.auto
-  const body = JSON.stringify({
-    systemInstruction: { parts: [{ text: systemPrompt }] },
-    contents,
-    ...(toolDefs.length && { tools: [{ functionDeclarations: toolDefs }] }),
-  })
-  let response
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i]
-    const timeoutSignal = AbortSignal.timeout(90000)
-    const endpoint = stream
-      ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`
-      : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
-    response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      credentials: "omit",
-      redirect: "error",
-      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-      body,
-    })
-    if (response.ok) {
-      const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
-      const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
-      const parts = []
-      const textParts = []
-      const thoughtParts = []
-      const toolCalls = []
-      let usage = null
-
-      const ingestPayload = (payload) => {
-        const meta = payload?.usageMetadata
-        if (meta && (meta.promptTokenCount || meta.totalTokenCount)) {
-          usage = {
-            promptTokens: Number(meta.promptTokenCount || 0),
-            outputTokens: Number(meta.candidatesTokenCount || 0),
-            totalTokens: Number(meta.totalTokenCount || 0),
-          }
-        }
-        const chunkParts = payload?.candidates?.[0]?.content?.parts ?? []
-        for (const part of chunkParts) {
-          parts.push(part)
-          if (part.thought) {
-            if (typeof part.text === "string" && part.text) {
-              thoughtParts.push(part.text)
-              onDelta?.({ text: "", thought: part.text })
-            }
-            continue
-          }
-          if (typeof part.text === "string" && part.text) {
-            textParts.push(part.text)
-            onDelta?.({ text: part.text, thought: "" })
-          }
-          if (part.functionCall?.name) {
-            toolCalls.push({
-              id: "gem_" + (toolCalls.length + 1) + "_" + Date.now(),
-              name: part.functionCall.name,
-              args: part.functionCall.args ?? {},
-            })
-          }
-        }
-      }
-
-      if (isSse) {
-        await readSseEvents(response.body, (raw) => {
-          try {
-            ingestPayload(JSON.parse(raw))
-          } catch {
-            // Ignore partial or non-JSON SSE keepalive frames.
-          }
-        })
-      } else {
-        ingestPayload(await response.json())
-      }
-
-      return {
-        rawModelContent: { role: "model", parts },
-        text: textParts.join(isSse ? "" : "\n").trim(),
-        thought: thoughtParts.join("").trim(),
-        toolCalls,
-        usage,
-      }
-    }
-    const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && i + 1 < models.length
-    if (!canFallback) break
-  }
-  const err = new Error(`Gemini trả lỗi ${response.status}. Kiểm tra khóa API và hạn mức.`)
-  err.status = response.status
-  err.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
-  throw err
-}
-
-async function callOpenAiStep({ settings, messages, toolDefs, signal, stream = false, onDelta }) {
-  const endpoint = validateEndpointUrl(settings.baseUrl) + "/chat/completions"
-  const model = String(settings.llmModel || "").trim()
-  if (!model) throw new Error("Hãy nhập tên Model LLM ở mục Dịch ảnh & LLM.")
-  const headers = { "Content-Type": "application/json" }
-  if (settings.apiKey) headers.Authorization = "Bearer " + settings.apiKey
-
-  const body = {
-    model,
-    temperature: 0.3,
-    messages,
-    ...(stream && { stream: true, stream_options: { include_usage: true } }),
-    ...(toolDefs.length && {
-      tools: toolDefs.map((def) => ({
-        type: "function",
-        function: { name: def.name, description: def.description, parameters: def.parameters },
-      })),
-      tool_choice: "auto",
-    }),
-  }
-
-  const timeoutSignal = AbortSignal.timeout(120000)
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    credentials: "omit",
-    redirect: "error",
-    signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const err = new Error(`LLM trả lỗi ${response.status}. Kiểm tra Base URL, tên model và API key.`)
-    err.status = response.status
-    err.retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after"))
-    throw err
-  }
-
-  const contentType = String(response.headers?.get?.("content-type") || "").toLowerCase()
-  const isSse = stream && contentType.includes("text/event-stream") && typeof response.body?.getReader === "function"
-
-  if (isSse) {
-    let rawText = ""
-    let rawReasoning = ""
-    let usage = null
-    const toolMap = new Map()
-    await readSseEvents(response.body, (raw) => {
-      let chunk
-      try {
-        chunk = JSON.parse(raw)
-      } catch {
-        return
-      }
-      if (chunk?.usage && (chunk.usage.prompt_tokens || chunk.usage.total_tokens)) {
-        usage = {
-          promptTokens: Number(chunk.usage.prompt_tokens || 0),
-          outputTokens: Number(chunk.usage.completion_tokens || 0),
-          totalTokens: Number(chunk.usage.total_tokens || 0),
-        }
-      }
-      const delta = chunk?.choices?.[0]?.delta
-      if (!delta) return
-      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
-        rawReasoning += delta.reasoning_content
-        onDelta?.({ text: "", thought: delta.reasoning_content })
-      }
-      if (typeof delta.content === "string" && delta.content) {
-        rawText += delta.content
-        onDelta?.({ text: delta.content, thought: "" })
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const item of delta.tool_calls) {
-          const idx = Number.isInteger(item.index) ? item.index : toolMap.size
-          const prev = toolMap.get(idx) ?? { id: "", name: "", argumentsText: "" }
-          if (item.id) prev.id = item.id
-          if (item.function?.name) prev.name += item.function.name
-          if (typeof item.function?.arguments === "string") prev.argumentsText += item.function.arguments
-          toolMap.set(idx, prev)
-        }
-      }
-    })
-    let toolCalls = [...toolMap.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([, item], index) => {
-        let args = {}
-        try {
-          args = JSON.parse(item.argumentsText || "{}")
-        } catch {
-          args = {}
-        }
-        return { id: item.id || "call_" + (index + 1), name: item.name, args }
-      })
-      .filter((tc) => tc.name)
-    if (!toolCalls.length && rawText.includes("<tool_call>")) {
-      toolCalls = parseTextToolCalls(rawText)
-    }
-    return {
-      rawMessage: { role: "assistant", content: rawText },
-      text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
-      thought: rawReasoning.trim(),
-      toolCalls,
-      usage,
-    }
-  }
-
-  const payload = await response.json()
-  const usage = payload?.usage && (payload.usage.prompt_tokens || payload.usage.total_tokens)
-    ? {
-      promptTokens: Number(payload.usage.prompt_tokens || 0),
-      outputTokens: Number(payload.usage.completion_tokens || 0),
-      totalTokens: Number(payload.usage.total_tokens || 0),
-    }
-    : null
-  const message = payload.choices?.[0]?.message ?? {}
-  const rawText = Array.isArray(message.content)
-    ? message.content.filter((p) => p?.type === "text" && p.text).map((p) => p.text).join("\n")
-    : String(message.content ?? "")
-  const rawReasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : ""
-
-  let toolCalls = []
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
-    toolCalls = message.tool_calls.map((tc, index) => {
-      let args = {}
-      try {
-        args = typeof tc.function?.arguments === "string"
-          ? JSON.parse(tc.function.arguments || "{}")
-          : (tc.function?.arguments ?? {})
-      } catch {
-        args = {}
-      }
-      return {
-        id: tc.id || "call_" + (index + 1),
-        name: tc.function?.name || "",
-        args,
-      }
-    }).filter((tc) => tc.name)
-  } else if (rawText.includes("<tool_call>")) {
-    toolCalls = parseTextToolCalls(rawText)
-  }
-
-  return {
-    rawMessage: message,
-    text: rawText.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "").trim(),
-    thought: rawReasoning,
-    toolCalls,
-    usage,
-  }
-}
-
-export async function summarizeHistoryWithLlm({ history = [], settings, keepRecentMessages = 4, signal } = {}) {
+export async function summarizeHistoryWithLlm({
+  history = [],
+  settings,
+  keepRecentMessages = 4,
+  signal,
+  providers = providerRegistry,
+  accounting = null,
+} = {}) {
   const list = Array.isArray(history) ? history.filter((m) => m && typeof m.text === "string" && m.text.trim()) : []
   if (list.length <= keepRecentMessages + 1) {
     return compactChatHistory(list, { keepRecentMessages, force: true })
@@ -368,33 +82,30 @@ export async function summarizeHistoryWithLlm({ history = [], settings, keepRece
     "Chỉ xuất nội dung tóm tắt, không gọi công cụ.",
   ].join("\n")
 
-  const isOpenAi = settings?.provider === "openai"
-  const reply = isOpenAi
-    ? await withLlmRetry(
-      () => callOpenAiStep({
-        settings,
-        messages: [
-          { role: "system", content: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio." },
-          { role: "user", content: `${transcript}\n\n---\n${directive}` },
-        ],
-        toolDefs: [],
-        signal,
-      }),
-      { maxRetries: 1, signal },
-    )
-    : await withLlmRetry(
-      () => callGeminiStep({
-        settings,
-        systemPrompt: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio.",
-        contents: [{ role: "user", parts: [{ text: `${transcript}\n\n---\n${directive}` }] }],
-        toolDefs: [],
-        signal,
-      }),
-      { maxRetries: 1, signal },
-    )
+  const provider = providers.resolve(settings)
+  const thread = provider.conversation.createThread({
+    history: [],
+    systemPrompt: "Bạn là bộ nén ngữ cảnh cho trình biên tập truyện tranh Nixio.",
+    userText: `${transcript}\n\n---\n${directive}`,
+  })
+  const reply = await withLlmRetry(
+    () => provider.callStep({ settings, thread, toolDefs: [], signal }),
+    { maxRetries: 1, signal },
+  )
 
   const summary = stripReasoning(reply.text).answer.trim()
-  if (!summary) return compactChatHistory(list, { keepRecentMessages, force: true })
+  // The compaction call is a paid call like any step, so it enters the same ledger.
+  const usage = accounting?.record?.({
+    provider: provider.id,
+    model: provider.models.resolve(settings)[0],
+    kind: "summary",
+    tokens: normalizeUsage({
+      usage: reply.usage,
+      promptChars: threadPromptChars(thread),
+      completionChars: reply.text.length,
+    }),
+  }) ?? null
+  if (!summary) return { ...compactChatHistory(list, { keepRecentMessages, force: true }), usage }
   const checkpointMessage = {
     role: "assistant",
     compacted: true,
@@ -408,6 +119,7 @@ export async function summarizeHistoryWithLlm({ history = [], settings, keepRece
     llmSummarized: true,
     foldedMessages: older.length,
     charsSaved: Math.max(0, totalChars - nextChars),
+    usage,
   }
 }
 
@@ -425,17 +137,32 @@ export async function runAgentTurn({
   maxRetries = 2,
   stream = false,
   signal,
+  providers = providerRegistry,
   onEvent = () => {},
+  // Injected by the editor: `record(call)` books a paid call in the project ledger and `gate()` reads
+  // the soft budget. Absent in an offline run, where the turn still reports its own token totals.
+  accounting = null,
+  // A `createTurnRecorder()` from agent-replay. It receives the same events as the panel plus every
+  // model decision and tool outcome, so the run can be exported and replayed without the provider.
+  recorder = null,
 }) {
   const promptText = String(userMessage || "").trim()
   if (!promptText) throw new Error("Hãy nhập câu hỏi hoặc yêu cầu cho Trợ lý AI.")
 
   const turnStart = performance.now()
+  // Everything the UI sees also reaches the transcript, so a recorded turn and a live one never drift
+  // apart in what they count as an event.
+  const emit = recorder
+    ? (event) => {
+      recorder.event(event)
+      onEvent(event)
+    }
+    : onEvent
   const effectiveAllowEdits = Boolean(allowEdits) && !planMode
   const compacted = compactChatHistory(history)
   const workingHistory = compacted.history
   if (compacted.compacted) {
-    onEvent({
+    emit({
       type: "compacted",
       foldedMessages: compacted.foldedMessages,
       charsSaved: compacted.charsSaved,
@@ -451,9 +178,8 @@ export async function runAgentTurn({
     direction: settings.direction,
     skillPrompt,
   })
-  const providerLabel = settings.provider === "openai"
-    ? (settings.llmModel || "OpenAI/Local")
-    : `Gemini (${settings.model || "auto"})`
+  const provider = providers.resolve(settings)
+  const providerLabel = provider.labels.agent(settings)
   const runtimeReminder = buildRuntimeContextReminder({
     snapshot: tools.getRuntimeSnapshot?.() ?? {},
     allowEdits: effectiveAllowEdits,
@@ -461,8 +187,10 @@ export async function runAgentTurn({
     planMode,
     providerLabel,
   })
-  const toolDefs = tools.definitions({ allowEdits: effectiveAllowEdits, allowWebSearch, planMode })
-  const isOpenAi = settings.provider === "openai"
+  const toolDefs = provider.capabilities.tools
+    ? tools.definitions({ allowEdits: effectiveAllowEdits, allowWebSearch, planMode })
+    : []
+  const streaming = stream && provider.capabilities.stream
   const toolTrace = []
   const thoughts = []
   const repeatGuard = new RepeatToolGuard()
@@ -473,95 +201,131 @@ export async function runAgentTurn({
   // every write is gated behind an explicit human approval, whatever confirmBulkEdits says.
   let webContentSeen = false
 
-  // Build provider-specific message thread from clean chat history ({ role: "user"|"assistant", text }).
-  const geminiContents = workingHistory.map((msg) => ({
-    role: msg.role === "assistant" ? "model" : "user",
-    parts: [{ text: msg.text }],
-  }))
-  geminiContents.push({
-    role: "user",
-    parts: [{ text: `${runtimeReminder}\n\n${promptText}` }],
+  // The provider owns the message shape; the harness only knows clean chat history
+  // ({ role: "user"|"assistant", text }) and the text of this turn.
+  const thread = provider.conversation.createThread({
+    history: workingHistory,
+    systemPrompt,
+    userText: `${runtimeReminder}\n\n${promptText}`,
   })
-
-  const openAiMessages = [
-    { role: "system", content: systemPrompt },
-    ...workingHistory.map((msg) => ({ role: msg.role, content: msg.text })),
-    { role: "user", content: `${runtimeReminder}\n\n${promptText}` },
-  ]
 
   let finalAnswer = ""
   let stepsUsed = 0
   let latestUsage = null
   let contextBudget = null
+  let turnUsage = emptyTotals()
+  let budgetStopped = false
+  let stepLimitHit = false
+
+  // The transcript opens with what the model was actually asked: a hash of the whole prompt (so two
+  // turns with the same prompt are recognisable) and the reminder text, which is the part that
+  // changes with the project state and therefore the part worth replaying.
+  recorder?.begin({
+    provider: provider.id,
+    model: provider.models.resolve(settings)[0],
+    systemPrompt,
+    runtimeReminder,
+    userMessage: promptText,
+    flags: { allowEdits: effectiveAllowEdits, allowWebSearch, planMode, confirmBulkEdits, maxSteps },
+  })
 
   for (let step = 1; step <= maxSteps; step++) {
     signal?.throwIfAborted()
+
+    // The soft budget is a pre-flight gate, checked before every call: a turn that has already spent
+    // the project limit stops cleanly instead of paying for one more step.
+    const gate = accounting?.gate?.()
+    if (gate?.blocked) {
+      budgetStopped = true
+      finalAnswer = gate.message
+      emit({ type: "budget", message: gate.message, ...gate.status })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      break
+    }
     stepsUsed = step
 
     // Replay-safe old tool-result pruning between steps (inspired by DeepSeek Harness).
     if (step > 2) {
-      const pruned = pruneOldToolResults(isOpenAi ? openAiMessages : geminiContents, {
-        provider: isOpenAi ? "openai" : "gemini",
+      const pruned = pruneOldToolResults(thread.messages, {
+        provider: provider.conversation.pruneShape,
       })
       if (pruned.charsSaved > 0) {
         totalPrunedChars += pruned.charsSaved
-        onEvent({ type: "pruned", prunedCount: pruned.prunedCount, charsSaved: pruned.charsSaved })
+        emit({ type: "pruned", prunedCount: pruned.prunedCount, charsSaved: pruned.charsSaved })
       }
     }
 
-    onEvent({ type: "step", step, maxSteps })
+    emit({ type: "step", step, maxSteps })
 
-    const onDelta = stream
-      ? (delta) => onEvent({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
+    const onDelta = streaming
+      ? (delta) => emit({ type: "delta", step, text: delta.text || "", thought: delta.thought || "" })
       : undefined
-    const reply = await withLlmRetry(
-      () => (isOpenAi
-        ? callOpenAiStep({ settings, messages: openAiMessages, toolDefs, signal, stream, onDelta })
-        : callGeminiStep({ settings, systemPrompt, contents: geminiContents, toolDefs, signal, stream, onDelta })),
-      {
-        maxRetries,
-        signal,
-        onRetry({ attempt, maxRetries: limit, delayMs }) {
-          retriesUsed++
-          onEvent({ type: "retry", attempt, maxRetries: limit, delayMs })
+    let reply
+    try {
+      reply = await withLlmRetry(
+        () => provider.callStep({ settings, thread, toolDefs, signal, stream: streaming, onDelta }),
+        {
+          maxRetries,
+          signal,
+          onRetry({ attempt, maxRetries: limit, delayMs }) {
+            retriesUsed++
+            emit({ type: "retry", attempt, maxRetries: limit, delayMs })
+          },
         },
-      },
-    )
+      )
+    } catch (error) {
+      // A failed step is part of the transcript: the replay has to show where the turn gave up.
+      recorder?.error(error?.message || String(error))
+      throw error
+    }
 
     signal?.throwIfAborted()
     if (reply.usage) latestUsage = reply.usage
-    const fallbackChars = systemPrompt.length + JSON.stringify(isOpenAi ? openAiMessages : geminiContents).length
+    // The thread owns which shape carries the system prompt, so it also owns the estimated size.
     contextBudget = computeContextBudget({
       promptTokens: latestUsage?.promptTokens || 0,
-      fallbackChars,
-      provider: isOpenAi ? "openai" : "gemini",
-      model: isOpenAi ? settings.llmModel : settings.model,
+      fallbackChars: thread.fallbackChars(),
+      provider: provider.id,
+      model: provider.models.resolve(settings)[0],
     })
-    onEvent({ type: "usage", usage: latestUsage, budget: contextBudget })
+    // Tokens come from the provider answer when it reported them; only a missing count is estimated
+    // from the text size.
+    const call = accounting?.record?.({
+      provider: provider.id,
+      model: provider.models.resolve(settings)[0],
+      kind: "chat",
+      tokens: normalizeUsage({
+        usage: reply.usage,
+        promptChars: threadPromptChars(thread),
+        completionChars: reply.text.length,
+      }),
+    }) ?? null
+    if (call) turnUsage = countCall(turnUsage, call)
+    emit({
+      type: "usage",
+      usage: latestUsage,
+      budget: contextBudget,
+      accounting: call ? { call, turn: turnUsage } : null,
+    })
 
     const { thought, answer } = stripReasoning(reply.text)
     if (reply.thought) thoughts.push(reply.thought)
     if (thought) thoughts.push(thought)
+    recorder?.step({
+      step,
+      text: answer,
+      thought: reply.thought || thought,
+      usage: latestUsage,
+      toolCalls: reply.toolCalls,
+    })
 
     if (!reply.toolCalls.length) {
       finalAnswer = answer || "Đã hoàn tất yêu cầu."
-      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
       break
     }
 
-    if (isOpenAi) {
-      openAiMessages.push({
-        role: "assistant",
-        content: reply.text || null,
-        tool_calls: reply.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-        })),
-      })
-    } else {
-      geminiContents.push(reply.rawModelContent)
-    }
+    thread.appendAssistant(reply)
 
     // A batch that itself reads the web must not be allowed to mutate in the same step.
     const batchReadsWeb = reply.toolCalls.some((call) => tools.categoryOf?.(call.name) === "web")
@@ -574,20 +338,22 @@ export async function runAgentTurn({
       forceWriteApproval: webContentSeen || batchReadsWeb,
       maxParallel: 4,
       signal,
-      onEvent,
+      onEvent: emit,
     })
 
-    const geminiResponses = []
-    const openAiAttachments = []
     const guardReminders = []
+    const resolved = []
     for (const entry of settled) {
       toolTrace.push(entry)
+      // The outcome, its approval decision and its row in the file are recorded before the model is
+      // even told about it, so a transcript cannot show a call it never actually made.
+      recorder?.tool({ step, entry })
       if (entry.ok && entry.category === "web") webContentSeen = true
       if (entry.ok && entry.category === "write") editsMade++
       const guardHit = repeatGuard.observe(entry.name, entry.args)
       if (guardHit) {
         guardReminders.push(guardHit.reminder)
-        onEvent({ type: "guard", toolName: guardHit.toolName, count: guardHit.count, level: guardHit.level })
+        emit({ type: "guard", toolName: guardHit.toolName, count: guardHit.count, level: guardHit.level })
       }
 
       const rawModelPayload = entry.ok
@@ -599,60 +365,14 @@ export async function runAgentTurn({
         tailChars: 2400,
       })
       if (retained.truncated) totalPrunedChars += retained.omittedChars
-
-      if (isOpenAi) {
-        openAiMessages.push({ role: "tool", tool_call_id: entry.id, content: retained.text })
-        if (entry.ok && entry.attachment?.base64) {
-          openAiAttachments.push({
-            summary: entry.summary,
-            mimeType: entry.attachment.mimeType || "image/jpeg",
-            base64: entry.attachment.base64,
-          })
-        }
-      } else {
-        geminiResponses.push({
-          functionResponse: {
-            name: entry.name,
-            response: entry.ok
-              ? (entry.modelText || retained.truncated
-                ? { ok: true, summary: entry.summary, content: retained.text }
-                : { ok: true, summary: entry.summary, data: entry.data })
-              : { ok: false, error: entry.error, ...(entry.code && { code: entry.code }) },
-          },
-        })
-        if (entry.ok && entry.attachment?.base64) {
-          geminiResponses.push({
-            inlineData: {
-              mimeType: entry.attachment.mimeType || "image/jpeg",
-              data: entry.attachment.base64,
-            },
-          })
-        }
-      }
+      resolved.push({ ...entry, retained })
     }
-    if (isOpenAi) {
-      for (const att of openAiAttachments) {
-        openAiMessages.push({
-          role: "user",
-          content: [
-            { type: "text", text: `[Ảnh đính kèm từ inspect_page_image: ${att.summary}]` },
-            { type: "image_url", image_url: { url: `data:${att.mimeType};base64,${att.base64}` } },
-          ],
-        })
-      }
-      for (const reminder of guardReminders) {
-        openAiMessages.push({ role: "user", content: reminder })
-      }
-    } else {
-      for (const reminder of guardReminders) {
-        geminiResponses.push({ text: reminder })
-      }
-      geminiContents.push({ role: "user", parts: geminiResponses })
-    }
+    thread.appendToolResults({ entries: resolved, reminders: guardReminders })
 
     if (step === maxSteps) {
+      stepLimitHit = true
       finalAnswer = answer || `Đã thực hiện ${toolTrace.length} bước công cụ (đạt giới hạn ${maxSteps} bước). Bạn có thể nhắn tiếp để AI tiếp tục.`
-      onEvent({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
+      emit({ type: "assistant", text: finalAnswer, thought: thoughts.join("\n\n") })
     }
   }
 
@@ -661,6 +381,12 @@ export async function runAgentTurn({
     { role: "user", text: promptText },
     { role: "assistant", text: finalAnswer },
   ].slice(-20)
+
+  const elapsedMs = Math.round(performance.now() - turnStart)
+  // A turn that ran out of steps is not the same as a finished one: the replay has to say which.
+  const status = budgetStopped ? "budget" : (stepLimitHit ? "capped" : "completed")
+  recorder?.usage(turnUsage)
+  recorder?.finish({ status, elapsedMs })
 
   return {
     answer: finalAnswer,
@@ -671,10 +397,13 @@ export async function runAgentTurn({
     editsMade,
     retriesUsed,
     prunedChars: totalPrunedChars,
-    elapsedMs: Math.round(performance.now() - turnStart),
+    elapsedMs,
     usage: latestUsage,
+    usageTotals: turnUsage,
+    budgetBlocked: budgetStopped,
     contextBudget,
     todos: tools.getTodos?.() ?? [],
     plan: tools.getPlan?.() ?? null,
+    turnRecord: recorder?.snapshot() ?? null,
   }
 }

@@ -1,9 +1,14 @@
 import { clamp } from "../canvas.js"
 import { detectBubbleOnImage } from "../bubble.js"
+import { addStroke } from "../layers.js"
 import { prepareNativeClone, prepareNativeInpaint, samplePixelColor } from "../retouch.js"
 import { resizeBox, rotateBox, snapBox } from "../tools.js"
+import { resizeGroup } from "../selection.js"
 
 const zoomSteps = [.25, .5, .75, 1, 1.25, 1.5, 2, 3, 4]
+const MIN_ZOOM = .1
+const MAX_ZOOM = 4
+const ZOOM_FACTOR = 1.15
 
 export function setupGestures({
   state,
@@ -77,7 +82,7 @@ export function setupGestures({
   }
 
   function updateZoomDisplay() {
-    byId("zoom-level").textContent = state.zoom ? Math.round(state.zoom * 100) + "%" : (state.fit ? "Vừa trang" : "100%")
+    byId("zoom-level").textContent = Math.round((state.zoom ?? currentScale()) * 100) + "%"
   }
 
   function currentScale() {
@@ -88,32 +93,50 @@ export function setupGestures({
     return rendered > 0 ? rendered / page.image.naturalWidth : 1
   }
 
-  function setZoom(nextZoom) {
-    const page = selectedPage()
-    if (!page) return
-    state.zoom = clamp(Math.round(nextZoom * 100) / 100, .25, 4)
-    state.fit = false
-    byId("fit-page").textContent = "Kích thước gốc"
-    updateZoomDisplay()
-    renderCanvas()
+  // Steps follow the scale the page really renders at, so leaving a small Fit zooms out instead of
+  // jumping up to the first preset step.
+  function nextZoomStep(direction) {
+    const cur = currentScale()
+    const step = direction > 0
+      ? zoomSteps.find((value) => value > cur + .02)
+      : [...zoomSteps].reverse().find((value) => value < cur - .02)
+    return clamp(step ?? cur * (direction > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR), MIN_ZOOM, MAX_ZOOM)
   }
 
-  byId("zoom-in").onclick = () => {
-    const cur = currentScale()
-    const next = zoomSteps.find((step) => step > cur + .02) ?? 4
-    setZoom(next)
+  function viewportCenter() {
+    const area = viewport.getBoundingClientRect()
+    return { clientX: area.left + area.width / 2, clientY: area.top + area.height / 2 }
   }
-  byId("zoom-out").onclick = () => {
-    const cur = currentScale()
-    const next = [...zoomSteps].reverse().find((step) => step < cur - .02) ?? .25
-    setZoom(next)
+
+  // Re-scroll so the image point that sat under the anchor stays there after the stage is resized.
+  function restoreAnchor(focus, anchor) {
+    const area = pageCanvas.getBoundingClientRect()
+    if (!area.width || !area.height) return
+    viewport.scrollLeft += area.left + focus.x * area.width - anchor.clientX
+    viewport.scrollTop += area.top + focus.y * area.height - anchor.clientY
   }
+
+  function setZoom(nextZoom, anchorAt) {
+    const page = selectedPage()
+    if (!page) return
+    const next = clamp(Math.round(nextZoom * 100) / 100, MIN_ZOOM, MAX_ZOOM)
+    if (next === state.zoom) return
+    const anchor = anchorAt ?? viewportCenter()
+    const focus = point(anchor)
+    state.zoom = next
+    state.fit = false
+    byId("fit-page").textContent = "Kích thước gốc"
+    renderCanvas()
+    restoreAnchor(focus, anchor)
+  }
+
+  byId("zoom-in").onclick = () => setZoom(nextZoomStep(1))
+  byId("zoom-out").onclick = () => setZoom(nextZoomStep(-1))
   viewport.addEventListener("wheel", (event) => {
     if (!(event.ctrlKey || event.metaKey) || !selectedPage()) return
     event.preventDefault()
-    const cur = currentScale()
-    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15
-    setZoom(cur * factor)
+    const factor = event.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR
+    setZoom(currentScale() * factor, event)
   }, { passive: false })
 
   function drawInpaintPreview(stroke) {
@@ -180,7 +203,7 @@ export function setupGestures({
       readout.textContent = color.toUpperCase()
       readout.hidden = false
       if (selectedBox() && event.shiftKey) {
-        checkpoint()
+        checkpoint(undefined, { label: "Đổi màu chữ từ hút màu", kind: "form" })
         selectedBox().color = color
         byId("box-color").value = color
         renderCanvas()
@@ -241,8 +264,7 @@ export function setupGestures({
         gesture = { kind: "inpaint-preview", pointer: event.pointerId, stroke, before }
         drawInpaintPreview(stroke)
       } else {
-        page.retouchStrokes ??= []
-        page.retouchStrokes.push(stroke)
+        addStroke(page, stroke, state.layerId)
         gesture = { kind: "retouch", pointer: event.pointerId, stroke, before }
         paintPreview(page)
       }
@@ -263,7 +285,7 @@ export function setupGestures({
       return
     }
 
-    // Resize handle on active box.
+    // Resize handle on the primary box; the rest of a multi-selection follows its delta.
     const handleEl = event.target.closest?.(".resize-handle")
     if (tool === "text" && !state.placing && handleEl) {
       const box = selectedBox()
@@ -272,6 +294,10 @@ export function setupGestures({
       stage.setPointerCapture(event.pointerId)
       const before = editorSnapshot()
       if (box.cleanup) freezeCleanup(box)
+      const group = state.selectedBoxIds.size > 1
+        ? page.boxes.filter((item) => state.selectedBoxIds.has(item.id))
+        : []
+      if (!group.includes(box)) group.push(box)
       gesture = {
         kind: "resize",
         pointer: event.pointerId,
@@ -279,6 +305,8 @@ export function setupGestures({
         handle: handleEl.dataset.handle,
         origin,
         start: { x: box.x, y: box.y, w: box.w, h: box.h },
+        starts: new Map(group.map((item) => [item.id, { x: item.x, y: item.y, w: item.w, h: item.h }])),
+        boxes: new Map(group.map((item) => [item.id, item])),
         before,
       }
       return
@@ -389,9 +417,12 @@ export function setupGestures({
         { x: cursor.x - gesture.origin.x, y: cursor.y - gesture.origin.y },
         { rotation: gesture.box.rotation ?? 0, aspect },
       )
-      Object.assign(gesture.box, next)
-      const outline = overlays.querySelector('[aria-current="true"]')
-      if (outline) rectStyle(outline, gesture.box)
+      for (const [id, rect] of resizeGroup(gesture.starts, gesture.box.id, next)) {
+        const item = gesture.boxes.get(id)
+        Object.assign(item, rect)
+        const outline = overlays.querySelector(`[data-box="${id}"]`)
+        if (outline) rectStyle(outline, item)
+      }
       schedulePaint()
       return
     }
@@ -456,9 +487,8 @@ export function setupGestures({
     if (completed.kind === "inpaint-preview") {
       const page = selectedPage()
       if (page) {
-        page.retouchStrokes ??= []
-        page.retouchStrokes.push(completed.stroke)
-        checkpoint(completed.before)
+        addStroke(page, completed.stroke, state.layerId)
+        checkpoint(completed.before, { label: "Tẩy chữ và tái tạo nền (Inpaint)", kind: "retouch" })
         prepareNativeInpaint(page, completed.stroke).then((usedNative) => {
           if (usedNative && selectedPage() === page) {
             paintPreview(page)
@@ -472,7 +502,7 @@ export function setupGestures({
     }
     if (completed.kind === "retouch") {
       const page = selectedPage()
-      checkpoint(completed.before)
+      checkpoint(completed.before, { label: "Nét vẽ tay trên trang", kind: "retouch" })
       if (page && completed.stroke?.mode === "clone" && completed.stroke.seamless) {
         prepareNativeClone(page, completed.stroke).then((usedNative) => {
           if (usedNative && selectedPage() === page) {
@@ -485,30 +515,44 @@ export function setupGestures({
       return
     }
     if (completed.kind === "rotate") {
-      if (completed.box.rotation !== completed.startRotation) checkpoint(completed.before)
+      if (completed.box.rotation !== completed.startRotation) {
+        checkpoint(completed.before, { label: "Xoay khung thoại", kind: "gesture" })
+      }
       render()
       return
     }
     if (completed.kind === "resize") {
-      const b = completed.box
-      const s = completed.start
-      if (b.x !== s.x || b.y !== s.y || b.w !== s.w || b.h !== s.h) checkpoint(completed.before)
+      const resized = [...completed.boxes.values()].some((item) => {
+        const start = completed.starts.get(item.id)
+        return item.x !== start.x || item.y !== start.y || item.w !== start.w || item.h !== start.h
+      })
+      if (resized) {
+        checkpoint(completed.before, {
+          label: completed.boxes.size > 1
+            ? `Đổi kích thước ${completed.boxes.size} khung`
+            : "Đổi kích thước khung",
+          kind: "gesture",
+        })
+      }
       render()
       return
     }
     if (completed.kind === "move") {
-      if (completed.moved) checkpoint(completed.before)
+      if (completed.moved) checkpoint(completed.before, { label: "Di chuyển khung", kind: "gesture" })
       else if (completed.collapseOnClick) selectBox(completed.box)
       render()
       return
     }
     if (completed.kind === "cleanup-stroke") {
-      checkpoint(completed.before)
+      checkpoint(completed.before, { label: "Tô vùng xoá nền", kind: "cleanup" })
       render()
       return
     }
     if (completed.kind === "draft") {
-      checkpoint(completed.before)
+      checkpoint(completed.before, {
+        label: completed.cleanupBox ? "Khoanh vùng xoá nền" : "Vẽ khung thoại mới",
+        kind: "gesture",
+      })
       if (completed.cleanupBox) {
         completed.cleanupBox.cleanupRect = placement(completed.origin, point(event))
         completed.cleanupBox.cleanupStrokes = []
@@ -550,6 +594,49 @@ export function setupGestures({
       event.preventDefault()
     }
   })
+
+  const splitHandle = byId("split-handle")
+  if (splitHandle) {
+    let draggingSplit = false
+    const applySplitPos = (value) => {
+      state.splitPos = clamp(Math.round(value), 0, 100)
+      stage.style.setProperty("--split-pos", `${state.splitPos}%`)
+      splitHandle.setAttribute("aria-valuenow", String(state.splitPos))
+      splitHandle.setAttribute("aria-valuetext", `Rèm ở ${state.splitPos}%`)
+    }
+    const updateSplitFromClientX = (clientX) => {
+      const rect = stage.getBoundingClientRect()
+      if (!rect.width) return
+      applySplitPos(((clientX - rect.left) / rect.width) * 100)
+    }
+    splitHandle.addEventListener("pointerdown", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      draggingSplit = true
+      splitHandle.focus?.({ preventScroll: true })
+      splitHandle.setPointerCapture?.(event.pointerId)
+      updateSplitFromClientX(event.clientX)
+    })
+    splitHandle.addEventListener("pointermove", (event) => {
+      if (!draggingSplit) return
+      event.preventDefault()
+      updateSplitFromClientX(event.clientX)
+    })
+    const stopSplit = () => { draggingSplit = false }
+    splitHandle.addEventListener("pointerup", stopSplit)
+    splitHandle.addEventListener("pointercancel", stopSplit)
+    splitHandle.addEventListener("keydown", (event) => {
+      const key = event.key
+      const arrow = key === "ArrowLeft" || key === "ArrowUp" || key === "ArrowRight" || key === "ArrowDown"
+      if (!arrow && key !== "Home" && key !== "End") return
+      event.preventDefault()
+      event.stopPropagation()
+      if (key === "Home") return applySplitPos(0)
+      if (key === "End") return applySplitPos(100)
+      const step = event.shiftKey ? 10 : 2
+      applySplitPos(state.splitPos + ((key === "ArrowRight" || key === "ArrowDown") ? step : -step))
+    })
+  }
 
   return {
     hasGesture: () => Boolean(gesture),

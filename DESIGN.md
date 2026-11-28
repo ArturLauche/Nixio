@@ -23,4 +23,4 @@
 | Chữ, chữ phụ và viền | `#25352D`, `#56675D` và `#D6DFD3` |
 | Kiểu chữ | Inter nếu hệ thống đã cài, sau đó dùng font hệ thống |
 
-Trên desktop, danh sách và kịch bản ở bên trái, ảnh ở giữa, bộ điều khiển khung ở bên phải. Thư viện chương mở ở một màn hình riêng. Dưới 950 px, bộ chỉnh khung chuyển xuống dưới. Dưới 610 px, các bảng xếp dọc. Trang dùng trạng thái tiêu điểm rõ cho bàn phím, thông báo động và nhãn riêng cho nút điều hướng. Nguồn triển khai nằm trong [index.html](index.html) và [src/style.css](src/style.css).
+Trên desktop, danh sách và kịch bản ở bên trái, ảnh ở giữa, bộ điều khiển khung ở bên phải. Thư viện chương mở ở một màn hình riêng. Dưới 950 px, bộ chỉnh khung chuyển xuống dưới. Dưới 610 px, các bảng xếp dọc. Trang dùng trạng thái tiêu điểm rõ cho bàn phím, thông báo động và nhãn riêng cho nút điều hướng. Nguồn triển khai nằm trong [index.html](index.html) và [src/style.css](src/style.css). Kiến trúc tiến trình, giao thức RPC và ranh giới tin cậy giữa renderer, Electron và worker C# được mô tả trong [docs/architecture.md](docs/architecture.md).

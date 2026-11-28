@@ -2,6 +2,7 @@ import { imagePixels, runNativeTask } from "../native.js"
 import { makeBox } from "../canvas.js"
 import { overlapScore, toCoordinates, toRectangle } from "../placement.js"
 import { groupOcrLines, mapOcrBox } from "../ocr.js"
+import { announce } from "../live-region.js"
 
 export function setupOcr({
   state,
@@ -59,6 +60,8 @@ export function setupOcr({
           )
         byId("ocr-preview").showModal()
         status("Đã tạo ảnh tiền xử lý.")
+        // Nixio #107: the modal makes the status line inert, so the result is announced separately.
+        announce("Đã tạo ảnh tiền xử lý OCR.")
       } else {
         const lines = result.lines.map((line) => ({
           ...line,
@@ -117,6 +120,13 @@ export function setupOcr({
           ? "Sửa nội dung trước khi đặt. Xóa nội dung để bỏ qua vùng."
           : "Không tìm được chữ trong vùng này."
         dialog.showModal()
+        // Nixio #107: the review dialog takes the rest of the page inert, so the count is announced
+        // here instead of only on the status line behind the dialog.
+        announce(
+          review.lines.length
+            ? `Đã nhận dạng ${review.lines.length} vùng chữ trên máy. Sửa nội dung trước khi đặt lên trang.`
+            : "Không tìm thấy chữ trong vùng này.",
+        )
       }
     } catch (error) {
       status(error.message, true)
@@ -128,7 +138,7 @@ export function setupOcr({
 
   byId("apply-ocr").onclick = () => {
     if (!review || projectBusy() || !state.pages.includes(review.page)) return
-    checkpoint()
+    checkpoint(undefined, { label: `Đặt ${review.lines.length} dòng OCR lên trang`, kind: "ocr" })
     let applied = 0
     for (const line of review.lines) {
       line.text = line.text.trim()
@@ -143,7 +153,7 @@ export function setupOcr({
         )
           review.page.unplaced.push(line)
       } else {
-        const box = makeBox(review.page, toRectangle(line.box), line.text)
+        const box = makeBox(review.page, toRectangle(line.box), line.text, state.defaultFont)
         box.fill = false
         review.page.boxes.push(box)
       }

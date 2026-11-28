@@ -49,9 +49,24 @@ function truncateSafe(text, maxChars) {
   return s.slice(0, end)
 }
 
-function isPrivateIp(host) {
-  const clean = String(host || "").replace(/^\[|\]$/g, "").toLowerCase()
+/**
+ * Canonicalize an address so a range check cannot be dodged by an alternate spelling.
+ * IPv6 goes through the WHATWG URL parser (lowercase, leading zeros dropped, longest zero
+ * run compressed); anything it refuses — zone ids included — is reported as unusable.
+ */
+function normalizeIp(host) {
+  const clean = String(host || "").replace(/^\[|\]$/g, "").toLowerCase().trim()
   const version = net.isIP(clean)
+  if (version !== 6) return { version, clean }
+  try {
+    return { version, clean: new URL(`https://[${clean}]/`).hostname.slice(1, -1) }
+  } catch {
+    return { version, clean: null }
+  }
+}
+
+function isPrivateIp(host) {
+  const { version, clean } = normalizeIp(host)
   if (version === 4) {
     const parts = clean.split(".").map(Number)
     const [a, b, c] = parts
@@ -70,13 +85,15 @@ function isPrivateIp(host) {
     return false
   }
   if (version === 6) {
-    // Global unicast only lives in 2000::/3. Everything below is loopback, IPv4-mapped /
-    // IPv4-compatible ("::"), ULA, link-local, site-local or multicast space.
-    if (clean.startsWith("::")) return true
-    if (/^(fe|fc|fd|ff)/.test(clean)) return true
-    if (clean.startsWith("2001:db8")) return true
-    // NAT64 well-known prefix can embed arbitrary IPv4 targets.
-    if (clean.startsWith("64:ff9b")) return true
+    if (!clean) return true
+    const [first, second] = clean.split(":", 2).map((group) => parseInt(group || "0", 16))
+    // IANA's global unicast assignments are in 2000::/3. This also excludes ULA,
+    // scoped addresses, translation prefixes, and IPv4-mapped addresses.
+    if ((first & 0xe000) !== 0x2000) return true
+    if (first === 0x2001 && second === 0x0db8) return true // documentation
+    if (first === 0x3fff && (second & 0xf000) === 0) return true // documentation
+    if (first === 0x2002) return true // 6to4
+    if (first === 0x2001 && second === 0) return true // Teredo
     return false
   }
   return false
@@ -147,24 +164,77 @@ function decodeHtmlEntities(text) {
     })
 }
 
+const SKIP_SUBTREES = new Set(["script", "style", "noscript", "template", "iframe", "object", "svg"])
+const BLOCK_END = new Set(["p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article"])
+
+// An element is hidden only when its own attributes say so. Searching the tag for the word anywhere
+// also matched a URL such as href="/hidden/page" and deleted text the reader can see.
+function hiddenByAttributes(attributes) {
+  // Only an attribute name can hide an element: a quoted value may contain the word itself
+  // (title="a hidden b"), and dropping that text would delete something the reader can see.
+  const bare = attributes.replace(/"[^"]*"|'[^']*'/g, '""')
+  if (/(^|\s)hidden(\s|=|\/|$)/i.test(bare)) return true
+  if (/aria-hidden\s*=\s*["']?true["']?/i.test(attributes)) return true
+  return /style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*["']/i.test(attributes)
+}
+
+// Walks the markup as a token stream so a hidden subtree ends where its own element ends: matching
+// `<tag ...hidden...>` up to the first `</tag>` cut a nested block in half and let the rest of the
+// hidden text through.
+function visibleHtmlText(html) {
+  const source = String(html || "")
+  const stack = []
+  let hidden = 0
+  let output = ""
+  let pos = 0
+  while (pos < source.length) {
+    const start = source.indexOf("<", pos)
+    if (start < 0) {
+      if (!hidden) output += source.slice(pos)
+      break
+    }
+    if (start > pos && !hidden) output += source.slice(pos, start)
+    if (source.startsWith("<!--", start)) {
+      const end = source.indexOf("-->", start + 4)
+      pos = end < 0 ? source.length : end + 3
+      continue
+    }
+    const end = source.indexOf(">", start + 1)
+    if (end < 0) {
+      if (!hidden) output += source.slice(start)
+      break
+    }
+    const raw = source.slice(start + 1, end).trim()
+    pos = end + 1
+    const closing = raw.startsWith("/")
+    const name = (closing ? raw.slice(1) : raw).split(/[\s/]/, 1)[0].toLowerCase()
+    if (!raw || raw.startsWith("!") || raw.startsWith("?") || !name) {
+      if (!hidden) output += " "
+      continue
+    }
+    if (!hidden) output += name === "br" || (closing && BLOCK_END.has(name)) ? "\n" : " "
+    if (closing) {
+      // Pop to the matching open element, releasing whatever hidden subtrees were opened inside it.
+      let at = -1
+      for (let i = stack.length - 1; i >= 0; i--) if (stack[i].name === name) { at = i; break }
+      if (at >= 0) {
+        for (let i = stack.length - 1; i >= at; i--) if (stack[i].hidden) hidden--
+        stack.length = at
+      }
+      continue
+    }
+    if (VOID_TAGS.has(name) || raw.endsWith("/")) continue
+    const isHidden = SKIP_SUBTREES.has(name) || hiddenByAttributes(raw)
+    stack.push({ name, hidden: isHidden })
+    if (isHidden) hidden++
+  }
+  return output
+}
+
 function stripHtmlToText(html, maxChars = 8000) {
   const raw = String(html || "")
   if (exceedsHtmlDepth(raw)) return "[Nội dung HTML quá sâu — đã bỏ qua để đảm bảo an toàn.]"
-  const cleaned = raw
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, " ")
-    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, " ")
-    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, " ")
-    .replace(/<embed\b[^>]*>/gi, " ")
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ")
-    // Strip hidden elements that can smuggle hidden prompt-injection instructions.
-    .replace(/<([a-z0-9-]+)\b[^>]*(?:\bhidden\b|aria-hidden\s*=\s*["']?true["']?|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*["'])[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<\/(p|div|li|tr|h[1-6]|br|section|article)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-  const text = decodeHtmlEntities(cleaned)
+  const text = decodeHtmlEntities(visibleHtmlText(raw))
     .replace(/[ \t\r\f\v]+/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -345,10 +415,10 @@ async function fetchTextLimited(rawUrl, { headers = {}, maxBytes = MAX_FETCH_BYT
   throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
 }
 
-async function searchWikipedia(query, lang, limit) {
+async function searchWikipedia(query, lang, limit, signal) {
   const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=${limit}&format=json`
   try {
-    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024 })
+    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024, signal })
     const data = JSON.parse(text)
     return (data?.query?.search ?? []).map((item) => ({
       title: item.title,
@@ -361,10 +431,10 @@ async function searchWikipedia(query, lang, limit) {
   }
 }
 
-async function searchJisho(query, limit) {
+async function searchJisho(query, limit, signal) {
   const url = `https://jisho.org/api/v1/search/words?keyword=${encodeURIComponent(query)}`
   try {
-    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024 })
+    const { text } = await fetchTextLimited(url, { maxBytes: 128 * 1024, signal })
     const data = JSON.parse(text)
     return (data?.data ?? []).slice(0, limit).map((entry) => {
       const jp = entry.japanese?.[0] ?? {}
@@ -390,6 +460,8 @@ async function searchJisho(query, limit) {
 async function webSearch(query, options = {}) {
   const clean = String(query || "").trim().slice(0, 240)
   if (!clean) throw new Error("Hãy nhập từ khóa tìm kiếm.")
+  const { signal } = options
+  if (signal?.aborted) throw new Error("Đã hủy yêu cầu tìm kiếm.")
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5))
   const results = []
   const hasJapanese = /[\u3040-\u30ff\u4e00-\u9faf]/.test(clean)
@@ -397,6 +469,7 @@ async function webSearch(query, options = {}) {
   try {
     const { text } = await fetchTextLimited(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(clean)}`, {
       maxBytes: 256 * 1024,
+      signal,
     })
     results.push(...parseDuckDuckGoHtml(text, limit))
   } catch {
@@ -404,13 +477,13 @@ async function webSearch(query, options = {}) {
   }
 
   if (hasJapanese) {
-    const jisho = await searchJisho(clean, Math.min(3, limit))
+    const jisho = await searchJisho(clean, Math.min(3, limit), signal)
     results.push(...jisho)
   }
 
   if (results.length < Math.min(3, limit)) {
     const langs = hasJapanese ? ["ja", "en", "vi"] : ["vi", "en"]
-    const wikiGroups = await Promise.all(langs.map((lang) => searchWikipedia(clean, lang, 3)))
+    const wikiGroups = await Promise.all(langs.map((lang) => searchWikipedia(clean, lang, 3, signal)))
     for (const group of wikiGroups) results.push(...group)
   }
 
@@ -427,7 +500,7 @@ async function webSearch(query, options = {}) {
 
 async function fetchUrl(rawUrl, options = {}) {
   const maxChars = Math.max(500, Math.min(16000, Number(options.maxChars) || 8000))
-  const { url, text: raw } = await fetchTextLimited(rawUrl)
+  const { url, text: raw } = await fetchTextLimited(rawUrl, { signal: options.signal })
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(raw)
   const title = titleMatch ? stripHtmlToText(titleMatch[1], 200).replace(/\s+/g, " ") : ""
   return { url, title, text: stripHtmlToText(raw, maxChars) }
@@ -436,6 +509,7 @@ async function fetchUrl(rawUrl, options = {}) {
 module.exports = {
   isSafePublicHttpsUrl,
   resolvePublicAddress,
+  requestOnce,
   fetchTextLimited,
   decodeBody,
   stripHtmlToText,

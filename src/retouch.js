@@ -1,4 +1,5 @@
 import { inpaintRegion } from "./inpaint.js"
+import { isLayerId, strokeVisible } from "./layers.js"
 import { desktop } from "./native.js"
 
 const nativeInpaintCache = new WeakMap()
@@ -40,20 +41,25 @@ export function validateRetouchStroke(stroke) {
       !stroke.points.every((point) => isFraction(point?.x) && isFraction(point.y))) {
     return null
   }
+  if (stroke.hidden !== undefined && typeof stroke.hidden !== "boolean") return null
+  if (stroke.layerId !== undefined && !isLayerId(stroke.layerId)) return null
+  // The layer the stroke paints into and the per-stroke visibility travel with the stroke, so a
+  // single stroke can be hidden, deleted or moved while the rest of the page keeps its layers.
+  const marks = { ...(stroke.hidden && { hidden: true }), ...(stroke.layerId && { layerId: stroke.layerId }) }
   const points = stroke.points.map(({ x, y }) => ({ x, y }))
   if (stroke.mode === "paint") {
     if (typeof stroke.color !== "string" || !hexColor.test(stroke.color)) return null
-    return { mode: "paint", size: stroke.size, color: stroke.color, ...(opacity !== 1 && { opacity }), points }
+    return { mode: "paint", size: stroke.size, color: stroke.color, ...(opacity !== 1 && { opacity }), ...marks, points }
   }
   if (stroke.mode === "inpaint" || stroke.mode === "erase") {
-    return { mode: stroke.mode, size: stroke.size, ...(opacity !== 1 && { opacity }), points }
+    return { mode: stroke.mode, size: stroke.size, ...(opacity !== 1 && { opacity }), ...marks, points }
   }
   if (!inRange(stroke.offsetX, -1, 1) || !inRange(stroke.offsetY, -1, 1)) return null
   if (stroke.seamless !== undefined && typeof stroke.seamless !== "boolean") return null
   return {
     mode: "clone", size: stroke.size, offsetX: stroke.offsetX, offsetY: stroke.offsetY,
     ...(stroke.seamless && { seamless: true }),
-    ...(opacity !== 1 && { opacity }), points,
+    ...(opacity !== 1 && { opacity }), ...marks, points,
   }
 }
 
@@ -86,8 +92,8 @@ function drawStrokePath(context, points, width, height, left = 0, top = 0) {
 
 const retouchCache = new WeakMap()
 
-function retouchSignature(strokes, width, height) {
-  return JSON.stringify([width, height, strokes])
+function retouchSignature(strokes, width, height, opacity = 1) {
+  return JSON.stringify([width, height, opacity, strokes])
 }
 
 function renderRetouchStrokes(context, page, width, height) {
@@ -214,7 +220,9 @@ function renderRetouchStrokes(context, page, width, height) {
       const maskRgba = maskCtx.getImageData(0, 0, bw, bh).data
       const mask = new Uint8Array(bw * bh)
       for (let i = 0; i < mask.length; i++) {
-        if (maskRgba[i * 4 + 3] >= 32) mask[i] = 1
+        // Any coverage counts. An antialiased edge pixel left outside the mask keeps the old ink and
+        // reads as a dark rim around the area the user cleaned.
+        if (maskRgba[i * 4 + 3] > 0) mask[i] = 1
       }
 
       const patchCanvas = document.createElement("canvas")
@@ -226,7 +234,9 @@ function renderRetouchStrokes(context, page, width, height) {
       const imageData = patchCtx.getImageData(0, 0, bw, bh)
       if (!inpaintRegion(imageData.data, bw, bh, mask)) continue
       for (let i = 0; i < mask.length; i++) {
-        imageData.data[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
+        // The patch replaces the letters, so it is written opaque: reusing the mask's fractional
+        // alpha blended the old text back in (0.5 inpainted + 0.5 letter) and left the halo.
+        imageData.data[i * 4 + 3] = mask[i] ? 255 : 0
       }
       patchCtx.putImageData(imageData, 0, 0)
       context.save()
@@ -301,7 +311,7 @@ async function buildNativeInpaintPatch(page, stroke) {
   const mask = new Uint8Array(bw * bh)
   let any = false
   for (let i = 0; i < mask.length; i++) {
-    if (maskRgba[i * 4 + 3] >= 32) {
+    if (maskRgba[i * 4 + 3] > 0) {
       mask[i] = 1
       any = true
     }
@@ -321,8 +331,10 @@ async function buildNativeInpaintPatch(page, stroke) {
   const response = await desktop.native("inpaint", { width: bw, height: bh, patchRadius: 3, colorAdapt: true }, payload)
   const out = new Uint8ClampedArray(response.data)
   if (out.length !== rgba.length) return null
+  // Opaque inside the stroke, nothing outside it: a fractional mask alpha would blend the clean
+  // patch with the letters it is meant to erase.
   for (let i = 0; i < mask.length; i++) {
-    out[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
+    out[i * 4 + 3] = mask[i] ? 255 : 0
   }
   patchCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
   return { canvas: patchCanvas, left, top, width, height }
@@ -385,7 +397,7 @@ async function buildNativeSeamlessClonePatch(page, stroke, bridge) {
   const mask = new Uint8Array(bw * bh)
   let any = false
   for (let i = 0; i < mask.length; i++) {
-    if (maskRgba[i * 4 + 3] >= 32) {
+    if (maskRgba[i * 4 + 3] > 0) {
       mask[i] = 1
       any = true
     }
@@ -414,31 +426,49 @@ async function buildNativeSeamlessClonePatch(page, stroke, bridge) {
   const response = await bridge.native("seamless_clone", { width: bw, height: bh }, payload)
   const out = new Uint8ClampedArray(response.data)
   if (out.length !== dstRgba.length) return null
+  // Same rule as the inpaint patch: the cloned pixels replace what is under the stroke.
   for (let i = 0; i < mask.length; i++) {
-    out[i * 4 + 3] = mask[i] ? maskRgba[i * 4 + 3] : 0
+    out[i * 4 + 3] = mask[i] ? 255 : 0
   }
   dstCtx.putImageData(new ImageData(out, bw, bh), 0, 0)
   return { canvas: dstCanvas, left, top, width, height }
 }
 
-export function paintRetouchStrokes(canvas, page) {
-  const strokes = page.retouchStrokes
-  if (!strokes?.length) return false
+// One cache entry per layer key, so a page that paints three retouch layers keeps three rendered
+// layers instead of rebuilding the whole stack on every stroke of every layer.
+export function paintRetouchStrokes(canvas, page, { strokes, opacity = 1, key = "page" } = {}) {
+  const list = (strokes ?? page.retouchStrokes)?.filter(strokeVisible)
+  if (!list?.length || opacity <= 0) return false
   const width = canvas.width
   const height = canvas.height
   if (typeof document !== "undefined" && page.image && typeof page.image === "object") {
-    const signature = retouchSignature(strokes, width, height)
-    let entry = retouchCache.get(page.image)
+    const signature = retouchSignature(list, width, height, opacity)
+    let cache = retouchCache.get(page.image)
+    if (!cache) {
+      cache = new Map()
+      retouchCache.set(page.image, cache)
+    }
+    let entry = cache.get(key)
     if (!entry || entry.signature !== signature) {
       const layer = document.createElement("canvas")
       layer.width = width
       layer.height = height
-      const painted = renderRetouchStrokes(layer.getContext("2d"), page, width, height)
+      const painted = renderRetouchStrokes(layer.getContext("2d"), { ...page, retouchStrokes: list }, width, height)
       entry = { signature, layer, painted }
-      retouchCache.set(page.image, entry)
+      cache.set(key, entry)
     }
-    if (entry.painted) canvas.getContext("2d").drawImage(entry.layer, 0, 0)
+    if (entry.painted) {
+      const context = canvas.getContext("2d")
+      if (opacity < 1) {
+        context.save()
+        context.globalAlpha = opacity
+        context.drawImage(entry.layer, 0, 0)
+        context.restore()
+      } else {
+        context.drawImage(entry.layer, 0, 0)
+      }
+    }
     return entry.painted
   }
-  return renderRetouchStrokes(canvas.getContext("2d"), page, width, height)
+  return renderRetouchStrokes(canvas.getContext("2d"), { ...page, retouchStrokes: list }, width, height)
 }

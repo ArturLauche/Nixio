@@ -1,3 +1,5 @@
+import { createTranslator, DEFAULT_LOCALE, formatTime } from "./i18n.js"
+
 const VALID_KINDS = new Set(["info", "success", "warning", "error", "update"])
 const DEFAULT_DURATIONS = {
   info: 5000,
@@ -58,6 +60,7 @@ export class NotificationStore {
         existing.actions = cleanActions
         existing.durationMs = resolvedDuration
         existing.createdAt = Date.now()
+        existing.revision = (existing.revision ?? 0) + 1
         existing.read = false
         this.items = [existing, ...this.items.filter((i) => i.id !== existing.id)]
         if (!silentToast) {
@@ -77,6 +80,7 @@ export class NotificationStore {
       actions: cleanActions,
       durationMs: resolvedDuration,
       createdAt: Date.now(),
+      revision: 0,
       read: false,
     }
     this.items.unshift(item)
@@ -149,15 +153,16 @@ const KIND_ICONS = {
   update: "↑",
 }
 
-function formatShortTime(ts) {
-  try {
-    return new Date(ts).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
-  } catch {
-    return ""
-  }
+function formatShortTime(ts, locale = DEFAULT_LOCALE) {
+  return formatTime(locale, ts, { hour: "2-digit", minute: "2-digit" })
 }
 
-export function createNotificationCenter({ byId, store = new NotificationStore() }) {
+export function createNotificationCenter({
+  byId,
+  store = new NotificationStore(),
+  locale = () => DEFAULT_LOCALE,
+  t = createTranslator(DEFAULT_LOCALE).t,
+}) {
   const toastContainer = byId("toast-container")
   const panel = byId("notifications-panel")
   const listEl = byId("notifications-list")
@@ -169,6 +174,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
 
   const timers = new Map()
   const paused = new Set()
+  const scheduledRevision = new Map()
 
   function clearTimer(id) {
     const handle = timers.get(id)
@@ -176,13 +182,16 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
       clearTimeout(handle)
       timers.delete(id)
     }
+    scheduledRevision.delete(id)
   }
 
   function scheduleDismiss(item) {
     clearTimer(item.id)
+    scheduledRevision.set(item.id, item.revision ?? 0)
     if (!item.durationMs || paused.has(item.id)) return
     const handle = setTimeout(() => {
       timers.delete(item.id)
+      scheduledRevision.delete(item.id)
       store.dismissToast(item.id)
     }, item.durationMs)
     timers.set(item.id, handle)
@@ -217,6 +226,10 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
     for (const id of [...timers.keys()]) {
       if (!activeIds.has(id)) clearTimer(id)
     }
+    for (const id of [...paused]) {
+      if (!activeIds.has(id)) paused.delete(id)
+    }
+    const cards = []
     toastContainer.replaceChildren(
       ...visible.map((item) => {
         const card = document.createElement("div")
@@ -254,7 +267,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         const close = document.createElement("button")
         close.type = "button"
         close.className = "toast-close"
-        close.setAttribute("aria-label", "Đóng thông báo")
+        close.setAttribute("aria-label", t("notifications.itemClose"))
         close.textContent = "×"
         close.onclick = () => {
           paused.delete(item.id)
@@ -264,10 +277,22 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         }
 
         card.append(icon, body, close)
-        if (!timers.has(item.id) && !paused.has(item.id)) scheduleDismiss(item)
+        cards.push(card)
         return card
       }),
     )
+    // The render replaces every card, so a toast under the pointer never sees a mouseleave. The
+    // mounted cards are the only hover truth, and a keyed update restarts its timer through the
+    // revision bump, so a reused key cannot inherit the previous lifetime.
+    visible.forEach((item, index) => {
+      if (cards[index].matches?.(":hover")) {
+        paused.add(item.id)
+        clearTimer(item.id)
+        return
+      }
+      paused.delete(item.id)
+      if (scheduledRevision.get(item.id) !== (item.revision ?? 0)) scheduleDismiss(item)
+    })
   }
 
   function renderHistory(items, unread) {
@@ -288,10 +313,10 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
         badge.className = "notif-item-icon"
         badge.textContent = KIND_ICONS[item.kind] ?? "ℹ"
         const title = document.createElement("strong")
-        title.textContent = item.title || "Thông báo"
+        title.textContent = item.title || t("notifications.title")
         const time = document.createElement("span")
         time.className = "notif-time"
-        time.textContent = formatShortTime(item.createdAt)
+        time.textContent = formatShortTime(item.createdAt, locale())
         head.append(badge, title, time)
 
         li.append(head)
@@ -340,6 +365,7 @@ export function createNotificationCenter({ byId, store = new NotificationStore()
 
   return {
     store,
+    render: () => renderSnapshot(store.snapshot()),
     notify(options) {
       return store.add(options)
     },

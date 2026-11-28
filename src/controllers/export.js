@@ -1,9 +1,32 @@
 import { copyEditor } from "../history.js"
+import { layersNativeFriendly } from "../layers.js"
 import { exportPage, nativePageLayers, textOverflows } from "../canvas.js"
 import { filenameStem, saveFile } from "../io.js"
 import { translationSignature } from "../translation.js"
 import { exportDialogueScript } from "../tools.js"
 import { lintChapter } from "../linter.js"
+import {
+  buildQaBoard,
+  filterQaFindings,
+  qaBlockingFindings,
+  qaExportOverrideNote,
+  qaFindingBox,
+  qaReviewSeverityLabels,
+  qaReviewStates,
+  qaReviewStateLabels,
+  qaReviewSummary,
+} from "../qa-review.js"
+import {
+  describeExportProfile,
+  exportArchiveDate,
+  exportManifest,
+  exportManifestFileName,
+  loadGlobalExportProfileId,
+  planExportSlices,
+  resolveExportProfile,
+  serializeExportManifest,
+} from "../export-presets.js"
+import { renderExportSlices } from "../webtoon.js"
 import { desktop } from "../native.js"
 
 export function setupExports({
@@ -19,11 +42,76 @@ export function setupExports({
   readTranslationSettings,
   isNativeReady,
   commitLiveForm,
+  checkpoint,
+  render,
+  changed,
+  qaReview,
   notify,
 }) {
   const exportButtons = [...document.querySelectorAll("[data-export]")]
   function extensionFor(format) {
     return format === "png" ? "png" : "psd"
+  }
+
+  const profileSelect = byId("export-profile")
+  function activeProfile() {
+    return resolveExportProfile(profileSelect?.value || loadGlobalExportProfileId())
+  }
+  function syncProfileSummary() {
+    const summary = byId("export-profile-summary")
+    if (!summary) return
+    try {
+      summary.textContent = describeExportProfile(activeProfile())
+    } catch (error) {
+      summary.textContent = error.message
+    }
+  }
+  profileSelect?.addEventListener("change", syncProfileSummary)
+  syncProfileSummary()
+
+  // A composed page has to come back as an image before the profile can scale and cut it. The
+  // message names the reason instead of failing on an undefined global.
+  async function decodePageImage(blob) {
+    if (typeof createImageBitmap !== "function") {
+      throw new Error("Trình duyệt này không giải mã được ảnh để chia mảnh theo hồ sơ.")
+    }
+    return createImageBitmap(blob)
+  }
+
+  async function exportProfileZip(pages, profile) {
+    const { default: JSZip } = await import("jszip")
+    const zip = new JSZip()
+    const plans = []
+    let order = 1
+    for (const [index, page] of pages.entries()) {
+      status(`Đang xuất trang ${index + 1}/${pages.length} theo hồ sơ ${profile.name}…`)
+      const bitmap = await decodePageImage(await exportPage(page, "png"))
+      try {
+        const plan = planExportSlices(profile, {
+          width: bitmap.width,
+          height: bitmap.height,
+          order,
+          pageName: page.name,
+        })
+        const files = await renderExportSlices(bitmap, plan, {
+          onSlice: ({ index: sliceIndex, total, fileName, width, height }) => {
+            status(`Trang ${index + 1}/${pages.length} · mảnh ${sliceIndex}/${total}: ${fileName} (${width}×${height} px).`)
+          },
+        })
+        for (const file of files) zip.file(file.name, file, { date: exportArchiveDate })
+        plans.push({ pageName: page.name, plan })
+        order += files.length
+      } finally {
+        bitmap.close?.()
+      }
+    }
+    zip.file(
+      exportManifestFileName,
+      serializeExportManifest(exportManifest({ profile, plans })),
+      { date: exportArchiveDate },
+    )
+    saveFile(await zip.generateAsync({ type: "blob" }), `khung-thoai-${profile.id}.zip`)
+    return plans.reduce((total, { plan }) => total + plan.slices.length, 0)
   }
 
   async function performExport(action, summaryLabel) {
@@ -33,12 +121,13 @@ export function setupExports({
     try {
       const outcome = await action()
       if (outcome === false) return
+      const label = typeof summaryLabel === "function" ? summaryLabel() : summaryLabel
       status("Đã tạo tệp xuất.")
-      if (summaryLabel) {
+      if (label) {
         notify?.({
           kind: "success",
           title: "Xuất tệp hoàn tất",
-          message: summaryLabel,
+          message: label,
           key: "export-done",
         })
       }
@@ -58,7 +147,9 @@ export function setupExports({
 
   const preflightDialog = byId("preflight-dialog")
   let pendingExport
-  function exportIssues(pages) {
+  // Everything an export needs that is not a linter finding: unplaced lines, translation jobs and
+  // overflowing boxes. They carry no review state because the fix is an edit, not a decision.
+  function collectPageIssues(pages) {
     const issues = []
     const settings = readTranslationSettings()
     const signature = translationSignature(settings)
@@ -97,65 +188,228 @@ export function setupExports({
           })
       }
     }
-    const qa = lintChapter(pages, {
-      glossaryText: settings.glossary ?? "",
-      sourceLanguage: settings.source ?? "Japanese",
-      targetLanguage: settings.target ?? "Vietnamese",
-      maxIssues: 40,
-    })
-    for (const item of qa.issues) {
-      if (item.severity !== "warning") continue
-      const page = pages[item.pageIndex - 1]
-      const box = page?.boxes.find((b) => b.id === item.boxId)
-      issues.push({
-        page,
-        box,
-        text: `${item.pageName} · QA: ${item.message}`,
-      })
-    }
     return issues
   }
 
-  function showPreflight(issues, action) {
-    pendingExport = action
-    byId("continue-export").hidden = !action
-    byId("preflight-summary").textContent = issues.length
-      ? `Có ${issues.length} mục cần kiểm tra.`
-      : "Các trang đã sẵn sàng để xuất."
+  function lintPages(pages) {
+    const settings = readTranslationSettings()
+    return lintChapter(pages, {
+      glossaryText: settings.glossary ?? "",
+      sourceLanguage: settings.source ?? "Japanese",
+      targetLanguage: settings.target ?? "Vietnamese",
+      maxIssues: 200,
+    })
+  }
+
+  // --- QA triage board -------------------------------------------------------------------------
+  // The board is the linter's output joined with the review decisions stored on the project. The
+  // linter only runs when the box text can have changed; a decision re-renders the same run.
+  const filters = { state: "all", severity: "all", page: "all", type: "all" }
+  let boardLint = { total: 0, byType: {}, issues: [] }
+  let board = buildQaBoard(boardLint)
+  let boardPages = []
+  let pageIssues = []
+
+  function prepareBoard(pages) {
+    commitLiveForm?.()
+    const lint = lintPages(pages)
+    // Re-running the linter is the only thing that expires a decision, and a capped run proves
+    // nothing about the rows it did not list, so `reconcileQaReview` keeps them.
+    qaReview?.reconcile?.(lint)
+    return { lint, issues: collectPageIssues(pages), board: buildQaBoard(lint, qaReview?.review?.()) }
+  }
+
+  function preflightText() {
+    if (pageIssues.length) return `Có ${pageIssues.length} mục cần kiểm tra ngoài QA.`
+    if (board.counts.total) return "Không có lỗi trang, câu chưa đặt hay chữ tràn khung."
+    return "Các trang đã sẵn sàng để xuất."
+  }
+
+  function paintBoard() {
+    board = buildQaBoard(boardLint, qaReview?.review?.())
+    renderFilters()
+    renderRows()
+    const continueButton = byId("continue-export")
+    continueButton.hidden = !pendingExport
+    continueButton.textContent = board.counts.blocking ? "Duyệt cảnh báo & xuất" : "Vẫn xuất"
+  }
+
+  function renderFilters() {
+    const selects = [
+      ["qa-filter-state", "state", "Mọi trạng thái", board.options.states],
+      ["qa-filter-severity", "severity", "Mọi mức độ", board.options.severities],
+      ["qa-filter-page", "page", "Mọi trang", board.options.pages],
+      ["qa-filter-type", "type", "Mọi loại", board.options.types],
+    ]
+    for (const [id, key, allLabel, options] of selects) {
+      const choices = [{ value: "all", label: allLabel }, ...options]
+      const select = byId(id)
+      select.replaceChildren(
+        ...choices.map(({ value, label }) => {
+          const option = document.createElement("option")
+          option.value = String(value)
+          option.textContent = label
+          return option
+        }),
+      )
+      // A filter whose value no longer exists in the chapter falls back to "all", so the board can
+      // never be left showing nothing without a reason.
+      if (!choices.some(({ value }) => String(value) === String(filters[key]))) filters[key] = "all"
+      select.value = String(filters[key])
+      select.onchange = () => {
+        filters[key] = select.value
+        renderRows()
+      }
+    }
+  }
+
+  function renderRows() {
+    const visible = filterQaFindings(board.findings, filters)
+    byId("preflight-summary").textContent = preflightText()
+    byId("qa-summary").textContent = qaReviewSummary(board.counts, visible.length)
     byId("preflight-issues").replaceChildren(
-      ...issues.map((issue) => {
-        const li = document.createElement("li")
-        li.append(
-          listButton(issue.text, () => {
-            preflightDialog.close()
-            location.hash = "editor"
-            if (issue.page) selectPage(issue.page)
-            if (issue.box) selectBox(issue.box)
-            if (!issue.page)
-              byId("queue-section").scrollIntoView({ block: "nearest" })
-            status(issue.text)
-          }),
-        )
-        return li
+      ...pageIssues.map(pageIssueRow),
+      ...visible.map(qaFindingRow),
+    )
+  }
+
+  function pageIssueRow(issue) {
+    const li = document.createElement("li")
+    li.append(
+      listButton(issue.text, () => {
+        preflightDialog.close()
+        location.hash = "editor"
+        if (issue.page) selectPage(issue.page)
+        if (issue.box) selectBox(issue.box)
+        if (!issue.page)
+          byId("queue-section").scrollIntoView({ block: "nearest" })
+        status(issue.text)
       }),
     )
+    return li
+  }
+
+  function revealFinding(finding) {
+    preflightDialog.close()
+    location.hash = "editor"
+    const page = boardPages[finding.pageIndex - 1]
+    if (page) selectPage(page)
+    const box = qaFindingBox(boardPages, finding)
+    if (box) selectBox(box)
+    status(finding.message)
+  }
+
+  function qaFindingRow(finding) {
+    const row = document.createElement("li")
+    row.className = "qa-finding"
+    row.dataset.state = finding.state
+    const severity = qaReviewSeverityLabels[finding.severity] ?? finding.severity
+    row.append(
+      listButton(
+        `${finding.pageName ?? `Trang ${finding.pageIndex}`} · ${severity} — ${finding.message}`,
+        () => revealFinding(finding),
+      ),
+    )
+    const stateSelect = document.createElement("select")
+    stateSelect.dataset.qaFinding = finding.id
+    stateSelect.setAttribute("aria-label", `Trạng thái rà soát: ${finding.message}`)
+    for (const state of qaReviewStates) {
+      const option = document.createElement("option")
+      option.value = state
+      option.textContent = qaReviewStateLabels[state]
+      stateSelect.append(option)
+    }
+    stateSelect.value = finding.state
+    const noteInput = document.createElement("input")
+    noteInput.type = "text"
+    noteInput.value = finding.note
+    noteInput.placeholder = "Lý do hoặc ghi chú…"
+    noteInput.dataset.qaFinding = finding.id
+    noteInput.setAttribute("aria-label", `Ghi chú rà soát: ${finding.message}`)
+    const error = document.createElement("p")
+    error.className = "qa-error"
+    error.setAttribute("role", "alert")
+    const save = () => {
+      const result = qaReview?.set?.(finding.id, {
+        state: stateSelect.value,
+        note: noteInput.value,
+        boxStamp: finding.boxStamp,
+      })
+      if (result?.error) {
+        error.textContent = result.error
+        return
+      }
+      error.textContent = ""
+      row.dataset.state = stateSelect.value
+      // A decision is project data like any other: without this the file never turns dirty, so
+      // autosave and the close guard both skip it and the triage is lost.
+      changed?.()
+      // The board re-renders every row, so the control the user just used is put back under the
+      // caret instead of dropping focus to the document.
+      const tag = document.activeElement === stateSelect ? "select" : "input"
+      paintBoard()
+      const control = [...byId("preflight-issues").querySelectorAll(`[data-qa-finding="${finding.id}"]`)]
+        .find((element) => element.tagName.toLowerCase() === tag)
+      control?.focus()
+    }
+    stateSelect.onchange = save
+    noteInput.onchange = save
+    const controls = document.createElement("div")
+    controls.className = "qa-finding-controls"
+    controls.append(stateSelect, noteInput)
+    if (finding.suggestion) {
+      controls.append(
+        listButton("Áp dụng & tiếp", () => applySuggestion(finding), `Áp dụng gợi ý: ${finding.message}`),
+      )
+    }
+    row.append(controls, error)
+    return row
+  }
+
+  function applySuggestion(finding) {
+    if (projectBusy()) return status("Hãy chờ tác vụ hiện tại hoàn tất.", true)
+    const box = qaFindingBox(boardPages, finding)
+    if (!box || typeof finding.suggestion !== "string" || finding.suggestion === box.text) return
+    commitLiveForm?.()
+    checkpoint(undefined, { label: "Áp gợi ý QA", kind: "qa" })
+    box.text = finding.suggestion
+    qaReview?.set?.(finding.id, { state: "fixed", note: finding.note, boxStamp: finding.boxStamp })
+    render()
+    changed?.()
+    // The box is fixed, so the next run no longer reports it: re-linting retires the row instead
+    // of leaving a decision on screen for a finding that is gone.
+    boardLint = lintPages(boardPages)
+    qaReview?.reconcile?.(boardLint)
+    paintBoard()
+    status("Đã sửa khung và đánh dấu mục QA là đã xử lý.")
+  }
+
+  function showBoard(pages, prepared, action) {
+    boardPages = pages
+    pageIssues = prepared.issues
+    boardLint = prepared.lint
+    pendingExport = action ?? null
+    paintBoard()
     preflightDialog.showModal()
   }
 
   function requestExport(pages, action) {
     if (projectBusy()) return
-    commitLiveForm?.()
-    const issues = exportIssues(pages)
-    if (issues.length) showPreflight(issues, action)
+    const prepared = prepareBoard(pages)
+    if (prepared.issues.length || prepared.board.blocking.length) showBoard(pages, prepared, action)
     else action()
   }
   byId("check-export").onclick = () => {
-    commitLiveForm?.()
-    showPreflight(exportIssues(state.pages))
+    showBoard(state.pages, prepareBoard(state.pages), null)
   }
   byId("close-preflight").onclick = () => preflightDialog.close()
   byId("continue-export").onclick = () => {
     const action = pendingExport
+    // An export that goes ahead with open warnings records the decision on those rows, so the
+    // override is a note on the board and not a dismissed dialog.
+    for (const finding of qaBlockingFindings(board.findings)) {
+      qaReview?.set?.(finding.id, { state: "accepted", note: qaExportOverrideNote, boxStamp: finding.boxStamp })
+    }
     preflightDialog.close()
     action?.()
   }
@@ -182,64 +436,103 @@ export function setupExports({
   }
 
   const zipDialog = byId("zip-dialog")
-  byId("export-all").onclick = () => {
+  // The dialog snapshots its page list when it opens: the bulk bar's subset stays fixed even if
+  // the selection changes while the user picks a format, and "Xuất tất cả" keeps meaning the whole
+  // chapter at close time.
+  let zipPages = null
+  function openZipExport(pages = null) {
+    zipPages = pages ? [...pages] : null
+    byId("zip-name").value = ""
+    byId("zip-dialog-title").textContent = pages?.length
+      ? `Xuất ${pages.length} trang đã chọn`
+      : "Xuất toàn bộ trang"
     zipDialog.returnValue = ""
+    syncProfileSummary()
     zipDialog.showModal()
   }
+  byId("export-all").onclick = () => openZipExport()
   zipDialog.addEventListener("close", () => {
-    if (zipDialog.returnValue !== "export") return
+    if (zipDialog.returnValue !== "export") {
+      zipPages = null
+      return
+    }
     const format = byId("zip-format").value
-    requestExport(state.pages, () =>
-      performExport(async () => {
-        const pages = copyEditor({ pages: state.pages }).pages
-        if (format === "png" && isNativeReady()) {
-          const transfer = await desktop.projectBegin(
-            "zip",
-            "khung-thoai-png.zip",
-          )
-          if (!transfer) return false
-          try {
-            for (const [index, page] of pages.entries()) {
-              status(`Đang xuất PNG bằng C# ${index + 1}/${pages.length}…`)
-              const { options, data } = await nativePageLayers(page)
-              const name =
-                String(index + 1).padStart(2, "0") +
-                "-" +
-                filenameStem(page.name) +
-                ".png"
-              await desktop.projectWrite(
-                transfer.id,
-                "zipPage",
-                { ...options, name },
-                data,
-              )
-            }
-            await desktop.projectWrite(transfer.id, "fileCommit")
-          } catch (error) {
-            await desktop
-              .projectWrite(transfer.id, "fileCancel")
-              .catch(() => {})
-            throw error
+    const pages = zipPages ?? state.pages
+    zipPages = null
+    const customName = byId("zip-name").value.trim()
+    const zipName = `${customName ? filenameStem(customName) : "khung-thoai"}-${format}.zip`
+    let profile
+    try {
+      profile = activeProfile()
+    } catch (error) {
+      return status(error.message, true)
+    }
+    let sliceCount = 0
+    const run = () =>
+      performExport(
+        async () => {
+          const snapshot = copyEditor({ pages }).pages
+          if (format === "profile") {
+            sliceCount = await exportProfileZip(snapshot, profile)
+            return
           }
-          return
-        }
-        const { default: JSZip } = await import("jszip")
-        const zip = new JSZip()
-        for (const [index, page] of pages.entries()) {
-          status(`Đang xuất trang ${index + 1} / ${pages.length}…`)
-          const name =
-            String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
-          zip.file(
-            name + "." + extensionFor(format),
-            await exportPage(page, format),
+          // The native path composites one fixed order, so a stack with a reordered or translucent
+          // layer is exported by the renderer instead, exactly as the canvas shows it.
+          if (format === "png" && isNativeReady() && snapshot.every(layersNativeFriendly)) {
+            const transfer = await desktop.projectBegin(
+              "zip",
+              zipName,
+            )
+            if (!transfer) return false
+            try {
+              for (const [index, page] of snapshot.entries()) {
+                status(`Đang xuất PNG bằng C# ${index + 1}/${snapshot.length}…`)
+                const { options, data } = await nativePageLayers(page)
+                const name =
+                  String(index + 1).padStart(2, "0") +
+                  "-" +
+                  filenameStem(page.name) +
+                  ".png"
+                await desktop.projectWrite(
+                  transfer.id,
+                  "zipPage",
+                  { ...options, name },
+                  data,
+                )
+              }
+              await desktop.projectWrite(transfer.id, "fileCommit")
+            } catch (error) {
+              await desktop
+                .projectWrite(transfer.id, "fileCancel")
+                .catch(() => {})
+              throw error
+            }
+            return
+          }
+          const { default: JSZip } = await import("jszip")
+          const zip = new JSZip()
+          for (const [index, page] of snapshot.entries()) {
+            status(`Đang xuất trang ${index + 1} / ${snapshot.length}…`)
+            const name =
+              String(index + 1).padStart(2, "0") + "-" + filenameStem(page.name)
+            zip.file(
+              name + "." + extensionFor(format),
+              await exportPage(page, format),
+            )
+          }
+          saveFile(
+            await zip.generateAsync({ type: "blob" }),
+            zipName,
           )
-        }
-        saveFile(
-          await zip.generateAsync({ type: "blob" }),
-          "khung-thoai-" + format + ".zip",
-        )
-      }, `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${state.pages.length} trang.`),
-    )
+        },
+        () =>
+          format === "profile"
+            ? `Đã xuất ${sliceCount} mảnh theo hồ sơ ${profile.name}.`
+            : `Đã xuất gói ZIP ${format.toUpperCase()} gồm ${pages.length} trang.`,
+      )
+    // The profile decides whether the preflight report runs before the archive is built.
+    if (profile.preflight) requestExport(pages, run)
+    else run()
   })
 
   const exportScriptBtn = byId("export-script")
@@ -261,4 +554,6 @@ export function setupExports({
       status(`Đã xuất kịch bản (${format.toUpperCase()}).`)
     }
   }
+
+  return { openZipExport }
 }

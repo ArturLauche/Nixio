@@ -1,0 +1,19 @@
+{
+  "series": [
+    {
+      "title": "Nhà kính",
+      "aliases": ["Greenhouse"],
+      "chapters": [
+        { "title": "Chương 1", "pages": ["/visual-fixtures/page-01.png"] },
+        { "title": "Chương 2", "pages": ["/visual-fixtures/page-01.png"] }
+      ]
+    },
+    {
+      "title": "Chấm sáng",
+      "aliases": ["Halftone"],
+      "chapters": [
+        { "title": "Chương 1", "pages": ["/visual-fixtures/page-01.png"] }
+      ]
+    }
+  ]
+}

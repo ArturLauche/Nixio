@@ -9,7 +9,13 @@ import JSZip from "jszip"
 const require = createRequire(import.meta.url)
 const root = path.resolve(import.meta.dirname, "..")
 const packaged = process.argv.includes("--packaged")
-const executablePath = packaged ? path.join(root, "desktop-dist", "Khung-Thoai-" + process.platform + "-" + process.arch, "Khung-Thoai" + (process.platform === "win32" ? ".exe" : "")) : require("electron")
+// @electron/packager wraps the macOS build in a bundle; Linux and Windows run the binary directly.
+function packagedExecutable() {
+  const bundle = path.join(root, "desktop-dist", "Khung-Thoai-" + process.platform + "-" + process.arch)
+  if (process.platform === "darwin") return path.join(bundle, "Khung-Thoai.app", "Contents", "MacOS", "Khung-Thoai")
+  return path.join(bundle, "Khung-Thoai" + (process.platform === "win32" ? ".exe" : ""))
+}
+const executablePath = packaged ? packagedExecutable() : require("electron")
 const directory = await mkdtemp(path.join(os.tmpdir(), "khung-thoai-smoke-"))
 const environment = { ...process.env }
 delete environment.ELECTRON_RUN_AS_NODE
@@ -18,6 +24,11 @@ if (process.platform === "linux" && !process.env.DISPLAY) args.push("--ozone-pla
 if (!packaged) args.push(root)
 const app = await _electron.launch({ executablePath, args, env: environment, timeout: 30000 })
 const errors = []
+// The renderer evaluates its entry script while the window is being created, so a listener attached
+// after firstWindow() resolves would miss exactly the startup exception this test exists to catch.
+app.on("window", (window) => {
+  window.on("pageerror", (error) => errors.push(error.message))
+})
 let page
 async function waitForArtifact(read, description) {
   const deadline = Date.now() + 20000
@@ -28,10 +39,17 @@ async function waitForArtifact(read, description) {
   }
   throw new Error("Timed out waiting for " + description)
 }
+// Playwright bounds locators and navigation but not app.evaluate or a page.evaluate that awaits the
+// app, so one stuck call could hold the job until its own timeout with no output. The watchdog turns
+// that into a bounded failure, and the teardown below owns the successful exit.
+const watchdog = setTimeout(() => {
+  console.error("The desktop smoke test did not finish in time; see artifacts/desktop-failure.json.")
+  process.exit(1)
+}, Number(process.env.DESKTOP_SMOKE_TIMEOUT_MS ?? 6 * 60 * 1000))
+watchdog.unref()
 try {
   page = await app.firstWindow()
   page.setDefaultTimeout(20000)
-  page.on("pageerror", (error) => errors.push(error.message))
   await app.evaluate(({ dialog, session }, directory) => {
     globalThis.downloads = []
     dialog.showSaveDialog = async (_window, options) => ({
@@ -82,13 +100,13 @@ try {
   await page.locator("#zip-dialog button[value=export]").click()
   if (await page.locator("#preflight-dialog").isVisible()) await page.locator("#continue-export").click()
   await page.getByText("Đã tạo tệp xuất.").waitFor()
-  const zipPath = path.join(directory, "chapter.zip")
-  await waitForArtifact(async () => {
-    const info = await stat(zipPath).catch(() => null)
-    return info?.size > 0
-  }, "atomic ZIP commit")
+  const zipPath = await waitForArtifact(
+    () => app.evaluate(() => globalThis.downloads[1] ?? null),
+    "profile ZIP download",
+  )
+  assert.match(zipPath, /khung-thoai-goc\.zip$/)
   const zip = await JSZip.loadAsync(await readFile(zipPath))
-  assert.deepEqual(Object.keys(zip.files), ["01-01.png"])
+  assert.deepEqual(Object.keys(zip.files), ["01-01.png", "manifest.json"])
   await page.locator("#box-text").fill("Recover this latest edit")
   await page.locator("#box-form button[type=submit]").click()
   // The timer makes a project-specific snapshot, then the library opens it through the normal path.
@@ -116,4 +134,19 @@ try {
   }, null, 2))
   if (page) await page.screenshot({ path: path.join(artifacts, "desktop-failure.png"), timeout: 3000 }).catch(() => {})
   throw error
-} finally { await app.close() }
+} finally {
+  // On macOS the app keeps running after a successful run — closing the last window does not quit
+  // there — so a green artifact was written while the step itself stayed alive until the job
+  // timeout. The close is bounded and the child is killed if quitting did not happen.
+  const application = app.process()
+  const closed = await Promise.race([
+    app.close().then(() => true, () => false),
+    new Promise((resolve) => setTimeout(() => resolve(false), 15000)),
+  ])
+  if (!closed || application.exitCode === null) application.kill("SIGKILL")
+  clearTimeout(watchdog)
+}
+// Nothing follows the smoke, and a surviving Electron child keeps this process alive, so the
+// successful exit is explicit instead of left to the event loop draining.
+await new Promise((resolve) => process.stdout.write("", resolve))
+process.exit(0)

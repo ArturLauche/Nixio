@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell } = require("electron")
+const { app, BrowserWindow, ipcMain, net, protocol, session, dialog, shell, safeStorage, webContents } = require("electron")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const { NativeWorker } = require("./native-worker.cjs")
@@ -6,6 +6,9 @@ const { TaskQueue } = require("./task-queue.cjs")
 const { ProjectFiles } = require("./project-files.cjs")
 const { webSearch, fetchUrl, isSafePublicHttpsUrl } = require("./web-search.cjs")
 const { checkForUpdates } = require("./updater.cjs")
+const { CredentialStore } = require("./credential-store.cjs")
+const { CREDENTIAL_CHANNELS, CredentialService, sanitizeCredentialError, trustedChannel } = require("./credential-ipc.cjs")
+const { PROVIDER_CHANNELS, ProviderTransport, providerChannel, sanitizeProviderError } = require("./provider-transport.cjs")
 
 const origin = "app://khung-thoai"
 const entry = origin + "/index.html"
@@ -37,6 +40,7 @@ let worker
 let imageWorker
 let tasks
 let projects
+let providerTransport
 let mainWindow
 let closeApproved = false
 
@@ -68,18 +72,22 @@ function createWindow() {
     },
   })
 
-  const { webContents } = mainWindow
-  webContents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => { if (isMainFrame) { tasks?.close(); projects?.cancelAll().catch(() => {}) } })
-  webContents.setWindowOpenHandler(() => ({ action: "deny" }))
-  webContents.on("will-navigate", (event) => event.preventDefault())
-  webContents.on("will-attach-webview", (event) => event.preventDefault())
+  const contents = mainWindow.webContents
+  // Hash navigation between #editor and #library is an in-place navigation: it must not tear
+  // down queued native work or an open project session. Real navigations are blocked below.
+  contents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace && url !== entry) { tasks?.close(); providerTransport?.cancelAll(); projects?.cancelAll().catch(() => {}) }
+  })
+  contents.setWindowOpenHandler(() => ({ action: "deny" }))
+  contents.on("will-navigate", (event) => event.preventDefault())
+  contents.on("will-attach-webview", (event) => event.preventDefault())
   mainWindow.on("close", (event) => {
     if (closeApproved || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isCrashed()) return
     event.preventDefault()
     mainWindow.webContents.send("khung-thoai:closing")
   })
   mainWindow.once("ready-to-show", () => mainWindow.show())
-  mainWindow.on("closed", () => { mainWindow = null })
+  mainWindow.on("closed", () => { providerTransport?.cancelAll(); mainWindow = null })
   mainWindow.loadURL(entry)
 }
 
@@ -92,11 +100,29 @@ app.whenReady().then(() => {
   projects = new ProjectFiles(worker, app.getPath("userData"), () => mainWindow, dialog, (options, data) => tasks.submit(require("node:crypto").randomUUID(), "png", options, data))
   const trusted = (event) => event.sender === mainWindow?.webContents && !event.senderFrame?.parent &&
     event.senderFrame?.url.split("#", 1)[0] === entry
-  const handle = (channel, action) => ipcMain.handle(channel, async (event, ...args) => {
-    if (!trusted(event)) return { error: "Untrusted desktop frame." }
-    try { return { value: await action(...args) } }
-    catch (error) { return { error: error.message } }
+  const handle = (channel, action, onError) => ipcMain.handle(channel, trustedChannel(trusted, action, onError))
+  // API keys live in the OS vault under userData and never reach the renderer: these channels only
+  // accept a newly typed key and return status plus opaque handles.
+  const credentialStore = new CredentialStore({ userData: app.getPath("userData"), safeStorage, platform: process.platform })
+  const credentials = new CredentialService({ store: credentialStore })
+  // Provider traffic is built in main from a provider name and an operation, so a selected-provider
+  // call is never a generic privileged fetch. Frames reach only the window that opened the stream.
+  providerTransport = new ProviderTransport({
+    credentials: credentialStore,
+    emit: (senderKey, payload) => {
+      const id = Number(senderKey.slice(1))
+      const contents = Number.isInteger(id) ? webContents.fromId(id) : null
+      if (contents && !contents.isDestroyed()) contents.send(PROVIDER_CHANNELS.event, payload)
+    },
   })
+  handle(CREDENTIAL_CHANNELS.status, (provider, endpoint) => credentials.status(provider, endpoint), sanitizeCredentialError)
+  handle(CREDENTIAL_CHANNELS.save, (provider, endpoint, secret) => credentials.save(provider, endpoint, secret), sanitizeCredentialError)
+  handle(CREDENTIAL_CHANNELS.remove, (provider, endpoint) => credentials.remove(provider, endpoint), sanitizeCredentialError)
+  const provider = (channel, action) => ipcMain.handle(channel, providerChannel(trusted, action, sanitizeProviderError))
+  provider(PROVIDER_CHANNELS.request, (senderKey, request) => providerTransport.execute(senderKey, request))
+  provider(PROVIDER_CHANNELS.stream, (senderKey, request) => providerTransport.stream(senderKey, request))
+  provider(PROVIDER_CHANNELS.activate, (senderKey, ticket) => providerTransport.activate(senderKey, ticket))
+  provider(PROVIDER_CHANNELS.cancel, (senderKey, target) => providerTransport.cancel(senderKey, target))
   handle("khung-thoai:redraw-texture", (input) => imageWorker.available ? imageWorker.redraw(input) : undefined)
   handle("khung-thoai:native", (operation, options, data, taskId) => {
     if (!["capabilities", "mask", "inpaint", "content_aware_cleanup", "seamless_clone", "clean_raw", "preprocess", "ocr", "png"].includes(operation)) throw new Error("Unknown renderer operation.")
@@ -117,8 +143,19 @@ app.whenReady().then(() => {
     return projects.begin(mode, name, projectId)
   })
   handle("khung-thoai:project-write", (id, operation, options, data) => projects.write(id, operation, options, data))
-  handle("khung-thoai:web-search", (query, options) => webSearch(query, options))
-  handle("khung-thoai:fetch-url", (url, options) => fetchUrl(url, options))
+  // An AbortSignal cannot travel through IPC, so the renderer sends a request id and aborts
+  // the in-flight desktop request by that id when the agent turn is cancelled.
+  const egressRequests = new Map()
+  const cancelable = (options, run) => {
+    const id = typeof options?.id === "string" ? options.id : ""
+    if (!id) return run(undefined)
+    const controller = new AbortController()
+    egressRequests.set(id, controller)
+    return run(controller.signal).finally(() => { egressRequests.delete(id) })
+  }
+  handle("khung-thoai:web-search", (query, options) => cancelable(options, (signal) => webSearch(query, { ...options, signal })))
+  handle("khung-thoai:fetch-url", (url, options) => cancelable(options, (signal) => fetchUrl(url, { ...options, signal })))
+  handle("khung-thoai:abort-request", (id) => { egressRequests.get(id)?.abort(); return true })
   handle("khung-thoai:app-info", () => ({
     version: app.getVersion(),
     platform: process.platform,

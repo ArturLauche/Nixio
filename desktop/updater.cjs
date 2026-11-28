@@ -1,9 +1,15 @@
-const { isSafePublicHttpsUrl } = require("./web-search.cjs")
+const { isSafePublicHttpsUrl, requestOnce, resolvePublicAddress } = require("./web-search.cjs")
 
 const REPO_SLUG = "wiothemilo-lang/Nixio"
 const RELEASES_API_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`
 const RELEASES_PAGE_URL = `https://github.com/${REPO_SLUG}/releases`
 const TIMEOUT_MS = 10000
+const MAX_REDIRECTS = 5
+const MAX_PAYLOAD_BYTES = 512 * 1024
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+// The updater only ever needs the release API host. A redirect or an injected apiUrl that
+// leaves this set is refused instead of followed.
+const TRUSTED_RELEASE_ORIGIN = new URL(RELEASES_API_URL).origin
 
 function parseSemver(raw) {
   const cleaned = String(raw || "").trim().replace(/^v/i, "")
@@ -47,13 +53,45 @@ function compareSemver(a, b) {
 }
 
 function safeGitHubUrl(rawUrl, fallback = RELEASES_PAGE_URL) {
-  const safe = isSafePublicHttpsUrl(rawUrl)
-  if (!safe) return fallback
-  const host = safe.hostname.toLowerCase()
+  // isSafePublicHttpsUrl returns an href string, so the host has to be re-read from a URL.
+  const safeHref = isSafePublicHttpsUrl(rawUrl)
+  if (!safeHref) return fallback
+  const { hostname: host, port, username, password } = new URL(safeHref)
+  if (port || username || password) return fallback
   if (host === "github.com" || host.endsWith(".github.com") || host.endsWith(".githubusercontent.com")) {
-    return safe.toString()
+    return safeHref
   }
   return fallback
+}
+
+function trustedReleaseUrl(rawUrl) {
+  const safeHref = isSafePublicHttpsUrl(rawUrl)
+  if (!safeHref) return null
+  const url = new URL(safeHref)
+  return url.origin === TRUSTED_RELEASE_ORIGIN && !url.username && !url.password ? url : null
+}
+
+async function fetchReleasePayload(rawUrl, { version, request, lookup, signal }) {
+  let current = trustedReleaseUrl(rawUrl)
+  if (!current) throw new Error("URL kiểm tra cập nhật không hợp lệ.")
+  const headers = { Accept: "application/vnd.github+json", "User-Agent": `KhungThoai/${version}` }
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    signal.throwIfAborted()
+    const address = await resolvePublicAddress(current.hostname, { lookup })
+    signal.throwIfAborted()
+    const response = await request(current.href, { address, headers, maxBytes: MAX_PAYLOAD_BYTES, signal })
+    signal.throwIfAborted()
+    if (!REDIRECT_STATUSES.has(response.status)) {
+      return { status: response.status, text: String(response.text ?? "") }
+    }
+    if (hop === MAX_REDIRECTS) throw new Error("Đã vượt quá số lần chuyển hướng cho phép.")
+    try {
+      current = response.location && trustedReleaseUrl(new URL(response.location, current))
+    } catch {
+      current = null
+    }
+    if (!current) throw new Error("Đường dẫn chuyển hướng không hợp lệ hoặc không an toàn.")
+  }
 }
 
 function normalizeReleasePayload(payload, currentVersion) {
@@ -94,23 +132,28 @@ function normalizeReleasePayload(payload, currentVersion) {
   }
 }
 
-async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = RELEASES_API_URL, timeoutMs = TIMEOUT_MS } = {}) {
+async function checkForUpdates(currentVersion, {
+  request = requestOnce,
+  lookup,
+  apiUrl = RELEASES_API_URL,
+  timeoutMs = TIMEOUT_MS,
+} = {}) {
   const checkedAt = new Date().toISOString()
   const version = String(currentVersion || "1.0.0")
+  const controller = new AbortController()
+  let timer
   try {
-    const safeApi = isSafePublicHttpsUrl(apiUrl)
-    if (!safeApi) {
-      return { ok: false, currentVersion: version, error: "URL kiểm tra cập nhật không hợp lệ.", checkedAt }
-    }
-    const response = await fetchImpl(safeApi.toString(), {
-      method: "GET",
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": `KhungThoai/${version}`,
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(timeoutMs),
+    const expired = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new DOMException("Update request timed out.", "TimeoutError")
+        controller.abort(error)
+        reject(error)
+      }, timeoutMs)
     })
+    const response = await Promise.race([
+      expired,
+      fetchReleasePayload(apiUrl, { version, request, lookup, signal: controller.signal }),
+    ])
     if (response.status === 404) {
       return {
         ok: true,
@@ -128,7 +171,7 @@ async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = REL
         checkedAt,
       }
     }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       return {
         ok: false,
         currentVersion: version,
@@ -139,17 +182,24 @@ async function checkForUpdates(currentVersion, { fetchImpl = fetch, apiUrl = REL
         checkedAt,
       }
     }
-    const payload = await response.json()
+    let payload
+    try {
+      payload = JSON.parse(response.text)
+    } catch {
+      return { ok: false, currentVersion: version, error: "Phản hồi cập nhật không hợp lệ.", checkedAt }
+    }
     return normalizeReleasePayload(payload, version)
   } catch (error) {
     return {
       ok: false,
       currentVersion: version,
-      error: error?.name === "TimeoutError"
+      error: error?.name === "TimeoutError" || error?.name === "AbortError"
         ? "Hết thời gian kết nối tới máy chủ cập nhật."
         : (error?.message || "Không thể kết nối máy chủ cập nhật."),
       checkedAt,
     }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

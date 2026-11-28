@@ -118,6 +118,61 @@ test("desktop fetch pins resolved IPs, rejects internal DNS answers and re-check
   await assert.rejects(desktopSearch.resolvePublicAddress("nip.example.com", { lookup }), /IP nội bộ/)
 })
 
+test("desktop egress policy denies IPv6 transition networks for literals and DNS answers", async () => {
+  const guard = desktopSearch.isSafePublicHttpsUrl
+  // 6to4 (2002::/16) and Teredo (2001::/32) encapsulate an arbitrary IPv4 destination, so
+  // the whole class is refused. Alternate spellings must not slip past the prefix check.
+  for (const url of [
+    "https://[2002::1]/",
+    "https://[2002:0000:0000:0000:0000:0000:0000:0001]/",
+    "https://[2001::1]/",
+    "https://[2001:0:0:0:0:0:0:1]/",
+    "https://[64:ff9b:1::1]/",
+    "https://[fe00::1]/",
+    "https://[3fff::1]/",
+    "https://[100::1]/",
+  ]) {
+    assert.equal(guard(url), null, url)
+  }
+  // Legitimate global IPv6 literals stay usable.
+  assert.equal(guard("https://[2606:4700:4700::1111]/"), "https://[2606:4700:4700::1111]/")
+  assert.equal(guard("https://[2a02:26f0:1::1]/"), "https://[2a02:26f0:1::1]/")
+
+  const lookup = async (hostname) => {
+    if (hostname === "six-to-four.example.com") return [{ address: "2002:0000:0:0:0:0:0:1", family: 6 }]
+    if (hostname === "teredo.example.com") return [{ address: "2001:0:0:0:0:0:0:1", family: 6 }]
+    if (hostname === "global.example.com") return [{ address: "2606:4700:4700::1111", family: 6 }]
+    if (hostname === "mixed.example.com") {
+      return [{ address: "2606:4700:4700::1111", family: 6 }, { address: "2002:0:0:0:0:0:0:1", family: 6 }]
+    }
+    return [{ address: "93.184.216.34", family: 4 }]
+  }
+  const requests = []
+  const request = async (url, { address }) => {
+    requests.push({ url, address })
+    return { status: 200, location: null, text: "Nội dung công khai" }
+  }
+
+  await assert.rejects(desktopSearch.resolvePublicAddress("six-to-four.example.com", { lookup }), /IP nội bộ/)
+  await assert.rejects(desktopSearch.resolvePublicAddress("teredo.example.com", { lookup }), /IP nội bộ/)
+  // A mixed answer set still fails closed when any record is a transition address.
+  await assert.rejects(desktopSearch.resolvePublicAddress("mixed.example.com", { lookup }), /IP nội bộ/)
+  assert.equal(await desktopSearch.resolvePublicAddress("global.example.com", { lookup }), "2606:4700:4700::1111")
+
+  // No request is sent when the resolved answer lands in a transition range.
+  await assert.rejects(
+    desktopSearch.fetchTextLimited("https://six-to-four.example.com/page", { lookup, request }),
+    /IP nội bộ/,
+  )
+  assert.equal(requests.length, 0)
+
+  assert.deepEqual(
+    await desktopSearch.fetchTextLimited("https://global.example.com/page", { lookup, request }),
+    { url: "https://global.example.com/page", text: "Nội dung công khai" },
+  )
+  assert.deepEqual(requests, [{ url: "https://global.example.com/page", address: "2606:4700:4700::1111" }])
+})
+
 test("decodeBody handles gzip/deflate/brotli bodies and refuses decompression bombs", () => {
   const text = "Nội dung tiếng Việt ".repeat(60)
   assert.equal(desktopSearch.decodeBody(zlib.gzipSync(text), "gzip").toString("utf8"), text)
@@ -234,4 +289,217 @@ test("fetchWebPage and searchWeb enforce redirect: error on external fetches", a
   await fetchWebPage("https://example.org/article")
   await searchWeb("test", { provider: "searxng", searchUrl: "http://localhost:8080" })
   assert.deepEqual(seenRedirects, ["error", "error"])
+})
+
+test("desktop search and fetch abort through the bridge instead of resolving late results", async (t) => {
+  const calls = []
+  const aborts = []
+  let resolveSearch
+  let resolveFetch
+  const bridge = {
+    webSearch: (query, options) => {
+      calls.push({ method: "webSearch", target: query, options })
+      return new Promise((resolve) => { resolveSearch = resolve })
+    },
+    fetchUrl: (url, options) => {
+      calls.push({ method: "fetchUrl", target: url, options })
+      return new Promise((resolve) => { resolveFetch = resolve })
+    },
+    abortRequest: async (id) => { aborts.push(id); return true },
+  }
+  globalThis.khungThoaiDesktop = bridge
+  t.after(() => { delete globalThis.khungThoaiDesktop })
+
+  const { fetchWebPage } = await import("../src/web-search.js")
+  const controller = new AbortController()
+  const search = searchWeb("manga", { signal: controller.signal, limit: 3 })
+  const page = fetchWebPage("https://example.org/page", { signal: controller.signal })
+
+  // The signal itself cannot cross IPC; the renderer tags the request so main can abort it.
+  assert.equal(calls.length, 2)
+  for (const call of calls) assert.equal(typeof call.options.id, "string")
+  assert.equal(calls[0].options.limit, 3)
+  assert.equal(calls[1].options.maxChars, 8000)
+
+  controller.abort()
+  await assert.rejects(search, { name: "AbortError" })
+  await assert.rejects(page, { name: "AbortError" })
+  assert.deepEqual(aborts, [calls[0].options.id, calls[1].options.id])
+
+  // A late main-process reply must not resurrect a request the agent already cancelled.
+  resolveSearch({ results: [{ title: "Late", url: "https://example.org/late" }] })
+  resolveFetch({ url: "https://example.org/page", title: "Late", text: "late" })
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(search, { name: "AbortError" })
+  await assert.rejects(page, { name: "AbortError" })
+
+  // An already-aborted turn never reaches the bridge at all.
+  const cancelled = new AbortController()
+  cancelled.abort()
+  await assert.rejects(searchWeb("manga", { signal: cancelled.signal }), { name: "AbortError" })
+  assert.equal(calls.length, 2)
+
+  // Without a signal the bridge keeps its plain contract: no id, unchanged pass-through.
+  bridge.webSearch = async (query, options) => {
+    calls.push({ method: "webSearch", target: query, options })
+    return { results: [{ title: "Manga", url: "https://example.org/manga" }] }
+  }
+  bridge.fetchUrl = async (url, options) => {
+    calls.push({ method: "fetchUrl", target: url, options })
+    return { url, title: "Trang", text: "Nội dung" }
+  }
+  assert.deepEqual(await searchWeb("manga"), {
+    query: "manga",
+    provider: "desktop",
+    results: [{ title: "Manga", url: "https://example.org/manga" }],
+  })
+  assert.deepEqual(calls.at(-1).options, { limit: 5 })
+  const live = new AbortController()
+  assert.deepEqual(await fetchWebPage("https://example.org/page", { signal: live.signal, maxChars: 1200 }), {
+    url: "https://example.org/page",
+    title: "Trang",
+    text: "Nội dung",
+  })
+  assert.equal(calls.at(-1).options.maxChars, 1200)
+  assert.equal(typeof calls.at(-1).options.id, "string")
+})
+
+test("stripHtmlToText drops hidden subtrees by element, not by the word hidden anywhere in the tag", () => {
+  for (const strip of [stripHtmlToText, desktopSearch.stripHtmlToText]) {
+    // A nested element inside a hidden block: the closing tag that ends the hidden subtree is the
+    // outer one, so the paragraph after the inner block must not survive.
+    assert.equal(
+      strip("<div hidden><p>a</p><div><p>b</p></div><p>c</p></div><p>visible</p>"),
+      "visible",
+    )
+    // "hidden" inside an attribute value is part of a URL, not a reason to delete visible text.
+    assert.equal(strip('<a href="/hidden/page">QUAN TRONG</a>'), "QUAN TRONG")
+    // A quoted attribute value that happens to contain the word keeps its text: only an attribute
+    // name can hide an element.
+    assert.equal(strip('<div title="a hidden b">visible</div>'), "visible")
+    assert.equal(strip('<div class="hidden">x</div>'), "x")
+    // Void tags and hidden attributes in their own opening tags behave the same way.
+    assert.equal(strip('<p>a<br>b</p><img src="/hidden/x.png" alt="hidden"><p>c</p>'), "a\nb\nc")
+    // An unclosed hidden block keeps swallowing text: better a missing line than injected instructions.
+    assert.equal(strip("<p>one</p><div hidden>hidden<p>two"), "one")
+    // Content of skip tags, however deeply nested, never reaches the model.
+    assert.equal(
+      strip("<div><p>keep</p><script>var a = '<p>fake</p>'</script><style>.x{}</style></div>"),
+      "keep",
+    )
+  }
+})
+
+test("auto web search falls back to the CORS sources when the desktop bridge throws", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    delete globalThis.khungThoaiDesktop
+  })
+  globalThis.fetch = async (url) => {
+    assert.match(url, /wikipedia\.org/)
+    return {
+      ok: true,
+      json: async () => ({ query: { search: [{ title: "Manga", snippet: "<span>Truyện tranh</span>" }] } }),
+    }
+  }
+  const { searchWeb } = await import("../src/web-search.js")
+
+  // A bridge that rejects: the search used to reject with it instead of asking anyone else.
+  globalThis.khungThoaiDesktop = { webSearch: async () => { throw new Error("bridge exploded") } }
+  const threw = await searchWeb("manga")
+  assert.equal(threw.provider, "wikipedia-fallback")
+  assert.ok(threw.results.length > 0)
+  assert.match(threw.results[0].url, /wikipedia\.org\/wiki\/Manga$/)
+  assert.equal(threw.results[0].title, "Manga")
+
+  // A bridge that throws synchronously is just another broken bridge.
+  globalThis.khungThoaiDesktop = { webSearch: () => { throw new Error("no ipc") } }
+  assert.equal((await searchWeb("manga")).provider, "wikipedia-fallback")
+
+  // A cancelled turn is not a broken bridge: it must still reject.
+  const controller = new AbortController()
+  controller.abort()
+  globalThis.khungThoaiDesktop = { webSearch: async () => { throw new Error("bridge exploded") } }
+  await assert.rejects(searchWeb("manga", { signal: controller.signal }), { name: "AbortError" })
+})
+
+test("a malformed percent escape in a Wikipedia URL falls back instead of failing the fetch", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const requested = []
+  globalThis.fetch = async (url) => {
+    requested.push(String(url))
+    return {
+      ok: true,
+      text: async () => "<html><head><title>Trang wiki</title></head><body>Nội dung</body></html>",
+      json: async () => ({ query: { pages: {} } }),
+    }
+  }
+  const { fetchWebPage } = await import("../src/web-search.js")
+
+  // %E0 on its own is not a valid escape: decodeURIComponent used to throw a URIError out of the
+  // whole tool instead of letting the direct request try.
+  const page = await fetchWebPage("https://vi.wikipedia.org/wiki/%E0")
+  assert.equal(page.title, "Trang wiki")
+  assert.match(page.text, /Nội dung/)
+  assert.equal(requested.length, 1, "the API call is skipped, not repeated")
+  assert.equal(requested[0], "https://vi.wikipedia.org/wiki/%E0")
+})
+
+test("the web and desktop URL guards refuse the same reserved IPv4 ranges", () => {
+  const reserved = [
+    "192.0.0.5", "192.0.2.1", "198.18.0.1", "198.19.255.254",
+    "198.51.100.7", "203.0.113.9", "224.0.0.1", "239.255.255.250", "255.255.255.255",
+  ]
+  for (const host of reserved) {
+    const url = `https://${host}/x`
+    assert.equal(isSafePublicHttpsUrl(url), null, `${host} must be refused by the web guard`)
+    assert.equal(desktopSearch.isSafePublicHttpsUrl(url), null, `${host} must be refused by the desktop guard`)
+  }
+
+  // Both guards agree on every case, including the addresses that are fine.
+  for (const host of [...reserved, "93.184.216.34", "10.0.0.1", "172.20.0.1", "100.64.0.1", "example.org"]) {
+    const url = `https://${host}/x`
+    assert.equal(
+      isSafePublicHttpsUrl(url) === null,
+      desktopSearch.isSafePublicHttpsUrl(url) === null,
+      `${host} is classified differently by the two guards`,
+    )
+  }
+  assert.equal(isSafePublicHttpsUrl("https://93.184.216.34/x"), "https://93.184.216.34/x")
+})
+
+test("a broken desktop bridge still lets fetchWebPage read the page itself", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    delete globalThis.khungThoaiDesktop
+  })
+  const requested = []
+  globalThis.fetch = async (url) => {
+    requested.push(String(url))
+    return { ok: true, text: async () => "<html><head><title>Trang thử</title></head><body><p>Nội dung</p></body></html>" }
+  }
+  const { fetchWebPage } = await import("../src/web-search.js")
+
+  // The sibling of the search fallback: one broken IPC call must not cost the page.
+  for (const bridge of [
+    { fetchUrl: async () => { throw new Error("bridge exploded") } },
+    { fetchUrl: () => { throw new Error("no ipc") } },
+  ]) {
+    requested.length = 0
+    globalThis.khungThoaiDesktop = bridge
+    const page = await fetchWebPage("https://example.org/page")
+    assert.equal(page.url, "https://example.org/page")
+    assert.equal(page.title, "Trang thử")
+    assert.match(page.text, /Nội dung/)
+    assert.deepEqual(requested, ["https://example.org/page"])
+  }
+
+  // A cancelled read is not a broken bridge: it still rejects.
+  const controller = new AbortController()
+  controller.abort()
+  globalThis.khungThoaiDesktop = { fetchUrl: async () => { throw new Error("bridge exploded") } }
+  await assert.rejects(fetchWebPage("https://example.org/page", { signal: controller.signal }), { name: "AbortError" })
 })

@@ -78,16 +78,22 @@ class TextureWorker {
     }
   }
 
+  // Settle the pending request without touching the process. A reply that names another protocol is
+  // complete, so the exchange can end while the worker keeps the file handles it was given.
+  settlePending(error) {
+    const pending = this.requestInFlight
+    if (!pending) return false
+    this.requestInFlight = null
+    clearTimeout(pending.deadline)
+    pending.reject(error)
+    return true
+  }
+
   stop(error = new Error("Texture worker stopped.")) {
     const child = this.child
     this.child = null
     child?.kill()
-    const pending = this.requestInFlight
-    if (pending) {
-      this.requestInFlight = null
-      clearTimeout(pending.deadline)
-      pending.reject(error)
-    }
+    this.settlePending(error)
   }
 
   close() {

@@ -45,10 +45,25 @@ export function cancellableDelay(delayMs, signal) {
   })
 }
 
+// The provider answered, but the answer could not be read as the shape the caller asked for: the body
+// was not JSON, the model wrote prose instead of the object, a required line was missing, or a
+// requested translation came back empty. The next attempt usually differs, so these share the bounded
+// retry with a 5xx instead of ending a whole batch. Each throw site marks this explicitly; nothing is
+// inferred from a message.
+export function retryableContentError(message) {
+  const error = new Error(message)
+  error.retryable = true
+  return error
+}
+
 export function isRetryableError(error) {
   if (!error) return false
-  if (error.name === "AbortError") return false
+  // A cancellation is a decision, not a fault: it surfaces on the first attempt.
+  if (error.name === "AbortError" || error.aborted === true) return false
+  // A provider status is authoritative. An authentication, access, payload or quota refusal is
+  // deterministic, so it wins over the content flag below and is never retried.
   if (Number.isFinite(error.status)) return isRetryableStatus(error.status)
+  if (error.retryable === true) return true
   if (error.name === "TimeoutError" || error.name === "TypeError") return true
   const msg = String(error.message || "")
   return /network|failed to fetch|timeout|429|502|503|504/i.test(msg)

@@ -51,11 +51,20 @@ function isPrivateIpv4(host) {
   if (!match) return false
   const parts = match.slice(1).map(Number)
   if (parts.some((n) => n > 255)) return true
-  if (parts[0] === 10 || parts[0] === 127 || parts[0] === 0) return true
-  if (parts[0] === 169 && parts[1] === 254) return true
-  if (parts[0] === 192 && parts[1] === 168) return true
-  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
-  if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true
+  const [a, b, c] = parts
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 192 && b === 168) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  // The same reserved, documentation and benchmark blocks desktop/web-search.cjs refuses: leaving
+  // them out here let an address through in the browser that the desktop shell would never fetch.
+  if (a === 192 && b === 0) return true
+  if (a === 198 && (b === 18 || b === 19)) return true
+  if (a === 198 && b === 51 && c === 100) return true
+  if (a === 203 && b === 0 && c === 113) return true
+  // Multicast, reserved and broadcast space.
+  if (a >= 224) return true
   return false
 }
 
@@ -97,29 +106,83 @@ export function validateSearchEndpoint(rawUrl) {
   return parsed.href.replace(/\/+$/, "")
 }
 
+const SKIP_SUBTREES = new Set(["script", "style", "noscript", "template", "iframe", "object", "svg"])
+const BLOCK_END = new Set(["p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article"])
+
+// An element is hidden only when its own attributes say so. Searching the tag for the word anywhere
+// also matched a URL such as href="/hidden/page" and deleted text the reader can see.
+function hiddenByAttributes(attributes) {
+  // Only an attribute name can hide an element: a quoted value may contain the word itself
+  // (title="a hidden b"), and dropping that text would delete something the reader can see.
+  const bare = attributes.replace(/"[^"]*"|'[^']*'/g, '""')
+  if (/(^|\s)hidden(\s|=|\/|$)/i.test(bare)) return true
+  if (/aria-hidden\s*=\s*["']?true["']?/i.test(attributes)) return true
+  return /style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*["']/i.test(attributes)
+}
+
+// Walks the markup as a token stream so a hidden subtree ends where its own element ends: matching
+// `<tag ...hidden...>` up to the first `</tag>` cut a nested block in half and let the rest of the
+// hidden text through.
+function visibleHtmlText(html) {
+  const source = String(html || "")
+  const stack = []
+  let hidden = 0
+  let output = ""
+  let pos = 0
+  while (pos < source.length) {
+    const start = source.indexOf("<", pos)
+    if (start < 0) {
+      if (!hidden) output += source.slice(pos)
+      break
+    }
+    if (start > pos && !hidden) output += source.slice(pos, start)
+    if (source.startsWith("<!--", start)) {
+      const end = source.indexOf("-->", start + 4)
+      pos = end < 0 ? source.length : end + 3
+      continue
+    }
+    const end = source.indexOf(">", start + 1)
+    if (end < 0) {
+      if (!hidden) output += source.slice(start)
+      break
+    }
+    const raw = source.slice(start + 1, end).trim()
+    pos = end + 1
+    const closing = raw.startsWith("/")
+    const name = (closing ? raw.slice(1) : raw).split(/[\s/]/, 1)[0].toLowerCase()
+    if (!raw || raw.startsWith("!") || raw.startsWith("?") || !name) {
+      if (!hidden) output += " "
+      continue
+    }
+    if (!hidden) output += name === "br" || (closing && BLOCK_END.has(name)) ? "\n" : " "
+    if (closing) {
+      // Pop to the matching open element, releasing whatever hidden subtrees were opened inside it.
+      let at = -1
+      for (let i = stack.length - 1; i >= 0; i--) if (stack[i].name === name) { at = i; break }
+      if (at >= 0) {
+        for (let i = stack.length - 1; i >= at; i--) if (stack[i].hidden) hidden--
+        stack.length = at
+      }
+      continue
+    }
+    if (VOID_TAGS.has(name) || raw.endsWith("/")) continue
+    const isHidden = SKIP_SUBTREES.has(name) || hiddenByAttributes(raw)
+    stack.push({ name, hidden: isHidden })
+    if (isHidden) hidden++
+  }
+  return output
+}
+
 export function stripHtmlToText(html, maxChars = 8000) {
   const raw = String(html || "")
   if (exceedsHtmlDepth(raw)) return "[Nội dung HTML quá sâu — đã bỏ qua để đảm bảo an toàn.]"
-  const cleaned = raw
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, " ")
-    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, " ")
-    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, " ")
-    .replace(/<embed\b[^>]*>/gi, " ")
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<([a-z0-9-]+)\b[^>]*(?:\bhidden\b|aria-hidden\s*=\s*["']?true["']?|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*["'])[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<\/(p|div|li|tr|h[1-6]|br|section|article)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
+  const text = visibleHtmlText(raw)
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
     .replace(/&#39;|&apos;/gi, "'")
-  const text = cleaned
     .replace(/[ \t\r\f\v]+/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -193,6 +256,37 @@ async function searchSearxng(query, { limit, searchUrl, signal }) {
   }))
 }
 
+function abortError() {
+  return new DOMException("Đã hủy yêu cầu mạng.", "AbortError")
+}
+
+function abortable(promise, signal, onAbort) {
+  let detach = () => {}
+  const aborted = new Promise((_, reject) => {
+    const handler = () => {
+      onAbort()
+      reject(abortError())
+    }
+    signal.addEventListener("abort", handler, { once: true })
+    detach = () => signal.removeEventListener("abort", handler)
+  })
+  return Promise.race([promise, aborted]).finally(() => detach())
+}
+
+/**
+ * Desktop search/fetch run in the main process, and an AbortSignal cannot be cloned through
+ * IPC. The renderer therefore tags the request with an id, asks the main process to abort it,
+ * and stops waiting immediately instead of keeping a cancelled agent turn alive.
+ */
+async function desktopRequest(bridge, method, target, options, signal) {
+  if (!signal) return bridge[method](target, options)
+  if (signal.aborted) throw abortError()
+  const id = crypto.randomUUID()
+  return abortable(bridge[method](target, { ...options, id }), signal, () => {
+    bridge.abortRequest?.(id).catch(() => {})
+  })
+}
+
 export async function searchWeb(
   query,
   { limit = 5, provider = "auto", searchUrl = "", searchApiKey = "", signal } = {},
@@ -211,9 +305,19 @@ export async function searchWeb(
   }
 
   // Auto mode: prefer Electron main-process search (DuckDuckGo + Jisho + Wikipedia, no CORS limits).
-  if (desktop?.webSearch) {
-    const data = await desktop.webSearch(clean, { limit: capped })
-    return { query: clean, provider: "desktop", results: data?.results ?? [] }
+  const bridge = globalThis.khungThoaiDesktop ?? desktop
+  let bridgeFailed = false
+  if (bridge?.webSearch) {
+    try {
+      const data = await desktopRequest(bridge, "webSearch", clean, { limit: capped }, signal)
+      return { query: clean, provider: "desktop", results: data?.results ?? [] }
+    } catch (error) {
+      // A cancelled turn has to stay cancelled. Anything else — a crashed main process, a broken IPC
+      // channel, a bridge that throws synchronously — must not take the browser's own fallback with
+      // it, or one bad bridge call leaves the tool with no results at all.
+      if (signal?.aborted || error?.name === "AbortError") throw error
+      bridgeFailed = true
+    }
   }
 
   // Web browser fallback: CORS-friendly Wikipedia API (vi/en/ja).
@@ -231,40 +335,56 @@ export async function searchWeb(
     }
     if (results.length >= capped) break
   }
-  return { query: clean, provider: "wikipedia", results }
+  return { query: clean, provider: bridgeFailed ? "wikipedia-fallback" : "wikipedia", results }
 }
 
 export async function fetchWebPage(rawUrl, { maxChars = 8000, signal } = {}) {
   const safe = isSafePublicHttpsUrl(rawUrl)
   if (!safe) throw new Error("Chỉ cho phép đọc đường dẫn HTTPS công khai.")
 
-  if (desktop?.fetchUrl) {
-    return desktop.fetchUrl(safe, { maxChars })
+  const bridge = globalThis.khungThoaiDesktop ?? desktop
+  if (bridge?.fetchUrl) {
+    try {
+      return await desktopRequest(bridge, "fetchUrl", safe, { maxChars }, signal)
+    } catch (error) {
+      // A cancelled read stays cancelled; anything else is one broken IPC call, and the browser's
+      // own fetch below is still a chance to return the page.
+      if (signal?.aborted || error?.name === "AbortError") throw error
+    }
   }
 
   // On Web browser, use Wikipedia REST/Action API with origin=* for Wikipedia links.
   const wikiMatch = /^https:\/\/([a-z-]+)\.wikipedia\.org\/wiki\/(.+)$/i.exec(safe)
   if (wikiMatch) {
-    const lang = wikiMatch[1]
-    const title = decodeURIComponent(wikiMatch[2].split("#")[0])
-    const apiUrl =
-      `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1` +
-      `&titles=${encodeURIComponent(title)}&format=json&origin=*`
-    const response = await fetch(apiUrl, {
-      credentials: "omit",
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
-    })
-    if (response.ok) {
-      const data = await response.json()
-      const pages = Object.values(data?.query?.pages ?? {})
-      const extract = pages[0]?.extract ?? ""
-      if (extract) {
-        return {
-          url: safe,
-          title: pages[0].title || title,
-          text: extract.length > maxChars ? extract.slice(0, maxChars) + "\n…(đã rút gọn)" : extract,
+    try {
+      const lang = wikiMatch[1]
+      // A URL the model assembled by hand can carry a broken percent escape (%E0 on its own), and
+      // decodeURIComponent throws a URIError on it. That is a bad guess about a title, not a reason
+      // to fail the whole fetch: fall through to the direct request below.
+      const title = decodeURIComponent(wikiMatch[2].split("#")[0])
+      const apiUrl =
+        `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1` +
+        `&titles=${encodeURIComponent(title)}&format=json&origin=*`
+      const response = await fetch(apiUrl, {
+        credentials: "omit",
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
+      })
+      if (response.ok) {
+        const data = await response.json()
+        const pages = Object.values(data?.query?.pages ?? {})
+        const extract = pages[0]?.extract ?? ""
+        if (extract) {
+          return {
+            url: safe,
+            title: pages[0].title || title,
+            text: extract.length > maxChars ? extract.slice(0, maxChars) + "\n…(đã rút gọn)" : extract,
+          }
         }
       }
+    } catch (error) {
+      // A cancelled turn keeps its cancellation; everything else is the API path failing and the
+      // direct fetch below getting its chance.
+      if (signal?.aborted) throw error
     }
   }
 

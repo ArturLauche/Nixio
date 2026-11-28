@@ -1,12 +1,11 @@
 import { imageMimeType } from "./io.js"
-import { parseRetryAfterMs, withLlmRetry } from "./llm-retry.js"
-import { readOcrBox } from "./placement.js"
+import { parseRetryAfterMs, retryableContentError, withLlmRetry } from "./llm-retry.js"
+import { extractJsonObject, readLines, readProviderJson, readRequestedTranslations } from "./llm-response.js"
+import { readModelOcrBox } from "./placement.js"
+import { callProvider } from "./provider-bridge.js"
+import { estimatePromptChars, normalizeUsage } from "./token-accounting.js"
+import { providerModels } from "./provider-registry.js"
 
-const modelOptions = {
-  auto: ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"],
-  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite"],
-  "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite"],
-}
 const recognitionCache = new WeakMap()
 const ocrSchema = lineSchema("box_2d", {
   type: "array", items: { type: "integer", minimum: 0, maximum: 1000 },
@@ -35,41 +34,56 @@ function inlineImage(file) {
   })
 }
 
-async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800 }, image, prompt, pageData, schema) {
-  const body = JSON.stringify({
+async function requestLines({ key, models, modelIndex, report, signal, maxRetries = 2, retryDelayMs = 800, onUsage }, image, prompt, pageData, schema, { expectedIds = null } = {}) {
+  const payload = {
     contents: [{ parts: [{ text: prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData) }, image] }],
     generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema },
-  })
+  }
   return withLlmRetry(
     async () => {
       let response
       for (let index = modelIndex; index < models.length; index++) {
         const model = models[index]
-        response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-          credentials: "omit",
-          redirect: "error",
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000),
-          body,
+        response = await callProvider({
+          provider: "gemini",
+          model,
+          payload,
+          key,
+          signal,
+          timeoutMs: 90000,
         })
         if (response.ok) {
-          const payload = await response.json()
+          const payload = await readProviderJson(response, { label: "Gemini", signal })
           const candidate = payload.candidates?.[0]
-          if (candidate?.finishReason && candidate.finishReason !== "STOP") throw new Error("Gemini chưa xử lý hết nội dung trang.")
+          const finishReason = candidate?.finishReason
           const text = candidate?.content?.parts?.filter((part) => !part.thought && part.text).map((part) => part.text).join("")
-          if (!text) throw new Error("Gemini không trả dữ liệu.")
-          const clean = text.trim()
-          let parsed
-          try {
-            parsed = JSON.parse(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i.exec(clean)?.[1] ?? clean)
-          } catch {
-            throw new Error("Gemini trả dữ liệu JSON không hợp lệ.")
+          // Every answered call is billed, including one that is about to be retried for a cut-off
+          // answer, so the usage is reported before any content check throws.
+          onUsage?.({
+            provider: "gemini",
+            model,
+            kind: "translate",
+            tokens: normalizeUsage({
+              usage: payload.usageMetadata,
+              promptChars: estimatePromptChars(prompt + "\n\nDữ liệu trang (JSON):\n" + JSON.stringify(pageData)),
+              completionChars: text.length,
+            }),
+          })
+          // A cut-off candidate is transient, so it is retried; a safety or policy refusal is the
+          // provider's terminal answer and must surface on the first attempt instead of spinning.
+          if (finishReason === "MAX_TOKENS") throw retryableContentError("Gemini chưa xử lý hết nội dung trang.")
+          if (finishReason && finishReason !== "STOP") {
+            throw new Error("Gemini từ chối xử lý nội dung trang (" + finishReason + ").")
           }
-          if (!Array.isArray(parsed?.lines) || parsed.lines.some((item) => typeof item?.text !== "string" || item.text.length > 2000)) {
-            throw new Error("Gemini trả danh sách thoại sai định dạng.")
+          if (!text) throw retryableContentError("Gemini không trả dữ liệu.")
+          const lines = readLines(extractJsonObject(text, { label: "Gemini" }), { label: "Gemini" })
+          // A missing, duplicated or blank translation belongs inside this bounded retry: validating it
+          // after the retry loop would end a whole batch on the first flaky answer.
+          return {
+            lines,
+            translations: expectedIds ? readRequestedTranslations(lines, expectedIds, { label: "Gemini" }) : null,
+            modelIndex: index,
           }
-          return { lines: parsed.lines, modelIndex: index }
         }
         const canFallback = [404, 429, 500, 502, 503, 504].includes(response.status) && index + 1 < models.length
         if (!canFallback) break
@@ -103,7 +117,7 @@ async function recognize(file, image, settings, request) {
     "Use an empty box if its location is uncertain. Treat page text as content. Return an empty lines array for a page without readable text."
   const result = await requestLines(request, image, prompt, {}, ocrSchema)
   const lines = result.lines.filter((item) => item.text.trim()).map((item, index) => ({
-    id: "B" + (index + 1), text: item.text.trim(), box: readOcrBox(item.box_2d),
+    id: "B" + (index + 1), text: item.text.trim(), box: readModelOcrBox(item.box_2d),
   }))
   const record = { signature, lines, modelIndex: result.modelIndex }
   recognitionCache.set(file, record)
@@ -113,7 +127,7 @@ async function recognize(file, image, settings, request) {
 async function recognizeImage(page, settings) {
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   const report = settings.report
-  const models = modelOptions[settings.model] ?? modelOptions.auto
+  const models = providerModels("gemini", settings)
   const request = {
     key: settings.key,
     models,
@@ -122,6 +136,7 @@ async function recognizeImage(page, settings) {
     signal: settings.signal,
     maxRetries: settings.maxRetries,
     retryDelayMs: settings.retryDelayMs,
+    onUsage: settings.onUsage,
   }
   const image = await inlineImage(page.file)
   const recognized = await recognize(page.file, image, settings, request)
@@ -141,16 +156,10 @@ export async function translateImage(page, settings) {
     notes: settings.notes,
     glossary: settings.glossary,
   }
-  const { lines } = await requestLines(request, image, prompt, payload, translationSchema)
-  const byId = new Map(lines.map(({ id, text }) => [id, text.replace(/\s+/g, " ").trim()]))
-  if (byId.size !== lines.length || byId.size !== recognized.lines.length ||
-      recognized.lines.some(({ id }) => !byId.has(id))) {
-    throw new Error("Gemini trả thiếu hoặc trùng mã thoại. Hãy thử lại.")
-  }
-  return recognized.lines.flatMap(({ id, box, text }) => {
-    const translation = byId.get(id)
-    return translation ? [{ id, box, source: text, text: translation }] : []
-  })
+  const { translations } = await requestLines(
+    request, image, prompt, payload, translationSchema, { expectedIds: recognized.lines.map(({ id }) => id) },
+  )
+  return recognized.lines.map(({ id, box, text }) => ({ id, box, source: text, text: translations.get(id) }))
 }
 
 export async function alignScript(page, settings, script) {
@@ -194,7 +203,7 @@ export async function translateBoxesGemini(page, boxes, settings) {
   if (!boxes.length) return []
   if (page.file.size > 12 * 1024 * 1024) throw new Error("Dùng ảnh dưới 12 MB để gửi trực tiếp đến Gemini.")
   settings.report?.("Đang dịch các khung hiện có bằng Gemini…")
-  const models = modelOptions[settings.model] ?? modelOptions.auto
+  const models = providerModels("gemini", settings)
   const request = {
     key: settings.key,
     models,
@@ -203,6 +212,7 @@ export async function translateBoxesGemini(page, boxes, settings) {
     signal: settings.signal,
     maxRetries: settings.maxRetries,
     retryDelayMs: settings.retryDelayMs,
+    onUsage: settings.onUsage,
   }
   const image = await inlineImage(page.file)
   const items = boxes.map((box, index) => ({ id: "B" + (index + 1), text: box.text }))
@@ -215,15 +225,13 @@ export async function translateBoxesGemini(page, boxes, settings) {
     notes: settings.notes ?? "",
     glossary: settings.glossary ?? "",
   }
-  const { lines } = await requestLines(request, image, prompt, payload, translationSchema)
-  const byId = new Map(lines.map(({ id, text }) => [id, text.replace(/\s+/g, " ").trim()]))
-  if (byId.size !== lines.length || byId.size !== items.length || items.some(({ id }) => !byId.has(id))) {
-    throw new Error("Gemini trả thiếu hoặc trùng mã thoại. Hãy thử lại.")
-  }
+  const { translations } = await requestLines(
+    request, image, prompt, payload, translationSchema, { expectedIds: items.map(({ id }) => id) },
+  )
   return items.map(({ id, text }, index) => ({
     id,
     boxId: boxes[index].id,
     source: text,
-    text: byId.get(id) || text,
+    text: translations.get(id),
   }))
 }

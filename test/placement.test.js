@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { matchDialogue, overlapScore, readOcrBox } from "../src/placement.js"
+import { matchDialogue, overlapScore, readModelOcrBox, readOcrBox } from "../src/placement.js"
 
 const area = [100, 100, 300, 300]
 const next = [600, 300, 800, 470]
@@ -12,6 +12,31 @@ test("normalizes Gemini coordinates and rejects malformed rectangles", () => {
   for (const invalid of [[], [100, 200, 100, 300], [100, -1, 200, 300], [100, 200, 310.5, 400]]) {
     assert.equal(readOcrBox(invalid), null)
   }
+})
+
+test("rounds the decimals a vision model reports before the integer box invariants run (#23)", () => {
+  // The issue reproducer: every coordinate is finite and in range, only fractional. Dropping the box
+  // left the whole page in "Chưa đặt", so the coordinates are normalized and the box survives.
+  assert.deepEqual(readModelOcrBox([100.4, 200.6, 300.8, 400.2]), [201, 100, 400, 301])
+  assert.deepEqual(readModelOcrBox([100, 200, 350, 400]), [200, 100, 400, 350])
+  // A model that overshoots the range by a fraction still lands on a valid edge.
+  assert.deepEqual(readModelOcrBox([0.4, 0.4, 999.6, 999.6]), [0, 0, 1000, 1000])
+  // Normalizing the representation must not weaken the shape: the range, the ordering, the length and
+  // the numeric type are all still enforced, so an inverted or out-of-range rectangle stays unplaced.
+  for (const invalid of [
+    [100, 200, 100, 300], [100, -1.2, 200, 300], [100, 200, 300, 1000.6],
+    [100, 200, 300], [100, 200, 300, 400, 500], [100, "200", 300, 400],
+    [100, null, 300, 400], [100, Infinity, 300, 400], [100, NaN, 300, 400],
+    [], null, undefined, "100,200,300,400",
+  ]) {
+    assert.equal(readModelOcrBox(invalid), null, JSON.stringify(invalid))
+  }
+})
+
+test("a rounded model box places dialogue the strict reader could not", () => {
+  const lines = [line("B1", readModelOcrBox([100.2, 100.3, 300.4, 300.5]))]
+  assert.equal(readOcrBox([100.2, 100.3, 300.4, 300.5]), null)
+  assert.deepEqual(matchDialogue(lines, [region("x", area)]).placed.length, 1)
 })
 
 test("scores both overlap and relative coverage", () => {

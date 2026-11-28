@@ -1,6 +1,21 @@
+import { TOOL_APPROVAL_REJECTED, TOOL_APPROVAL_UNAVAILABLE } from "./agent-pipeline.js"
 import { autoFitBox as defaultAutoFitBox, clamp, makeBox as defaultMakeBox, textOverflows as defaultTextOverflows } from "./canvas.js"
+import { clonePagesForDraft, describeChange, diffGlossaryChange, diffPages, isRejectedChange } from "./agent-review.js"
 import { lintChapter } from "./linter.js"
+import {
+  findTerm,
+  formatTerminologyGraph,
+  glossaryStatusText,
+  mergeTerminology,
+  parseTerminologyGraph,
+  resolveTerms,
+  termSummary,
+} from "./terminology-graph.js"
+import { normalizeFontName } from "./fonts.js"
+import { PRESET_RESET_DEFAULTS } from "./presets.js"
+import { lintStyleGuide, normalizeStyleGuide } from "./style-guide.js"
 import { alignBoxes, distributeBoxes, findMatches, replaceMatches } from "./tools.js"
+import { createToolRegistry } from "./tool-registry.js"
 import { translationSignature } from "./translation.js"
 import {
   EXTERNAL_WEB_CONTENT_NOTICE,
@@ -54,6 +69,28 @@ function resolvePage(state, selectedPage, pageIndex) {
   return { page: current ?? null, index }
 }
 
+// A page-scoped read still reports project-wide page numbers. The offset is where the filtered
+// slice starts in the project, so a finding from a scoped lint never claims to be on page 1, and
+// an out-of-range page is an error instead of an empty scan dressed up as an empty project.
+function resolveTargetPages(state, selectedPage, pageIndex) {
+  if (!Number.isInteger(pageIndex)) return { pages: state.pages, offset: 0 }
+  const { page } = resolvePage(state, selectedPage, pageIndex)
+  if (!page) throw new Error(`Không tồn tại trang số ${pageIndex}.`)
+  return { pages: [page], offset: state.pages.indexOf(page) }
+}
+
+// alignBoxes/distributeBoxes ignore the ids they cannot find and report "nothing to do", which the
+// tools then read back to the model as a success. An id naming no box is the model's mistake, so it
+// has to be said out loud instead of silently aligning whatever subset happened to exist.
+function resolveBoxIds(page, rawIds) {
+  const ids = [...new Set((Array.isArray(rawIds) ? rawIds : []).map(String))]
+  const missing = ids.filter((id) => !page.boxes.some((box) => box.id === id))
+  if (missing.length) {
+    throw new Error(`Không tìm thấy khung ${missing.join(", ")} trên trang "${page.name}".`)
+  }
+  return ids
+}
+
 function defaultCapturePageImage(page, { box = null, maxDim = 768 } = {}) {
   const img = page?.image
   const natW = img?.naturalWidth ?? 0
@@ -101,16 +138,16 @@ function defaultCapturePageImage(page, { box = null, maxDim = 768 } = {}) {
 
 export function createAgentTools({
   state,
-  byId,
-  selectedPage,
-  selectedIndex,
+  byId: liveById,
+  selectedPage: liveSelectedPage,
+  selectedIndex = () => -1,
   selectPage,
-  checkpoint,
-  render,
-  commitLiveForm,
+  checkpoint: liveCheckpoint,
+  render: liveRender,
+  commitLiveForm: liveCommitLiveForm,
   readTranslationSettings,
   registerFontName,
-  renderFontOptions,
+  renderFontOptions: liveRenderFontOptions,
   onTodosChange,
   onPlanSubmit,
   onAskUser,
@@ -122,13 +159,38 @@ export function createAgentTools({
   autoFitBoxFn = defaultAutoFitBox,
   textOverflowsFn = defaultTextOverflows,
   capturePageImageFn = defaultCapturePageImage,
+  // Extra descriptors (a project catalogue, a future desktop-bridged tool) join the built-in ones
+  // before registration, so they are validated and dispatched on the same terms.
+  extraTools = [],
 }) {
   let currentTodos = []
   let currentPlan = null
+  let reviewSession = null
+  let reviewRejections = []
+  // Set while a write tool runs against a draft: nothing may reach the live editor or the history
+  // until the user accepts the change, so every mutating callback is muted.
+  let draft = null
+
+  const checkpoint = (...args) => {
+    if (!draft) liveCheckpoint?.(...args)
+  }
+  const render = (...args) => {
+    if (!draft) liveRender?.(...args)
+  }
+  const commitLiveForm = (...args) => {
+    if (!draft) liveCommitLiveForm?.(...args)
+  }
+  const renderFontOptions = (...args) => {
+    if (!draft) liveRenderFontOptions?.(...args)
+  }
+  const byId = (id) => (draft ? draft.fields.get(id) ?? null : liveById(id))
+  const selectedPage = () => (draft ? draft.pages[selectedIndex()] ?? null : liveSelectedPage?.() ?? null)
+
   const catalog = [
     {
       name: "web_search",
       category: "web",
+      sandbox: { network: true },
       isConcurrencySafe: true,
       timeoutMs: 18000,
       description:
@@ -142,7 +204,7 @@ export function createAgentTools({
             items: { type: "string" },
             description: "Danh sách tối đa 5 từ khóa cần tra song song trong một lượt.",
           },
-          limit: { type: "integer", description: "Số kết quả tối đa (1-8, mặc định 5)." },
+          limit: { type: "integer", description: "Tổng số kết quả tối đa cho cả lượt gọi (1-8, mặc định 5)." },
         },
       },
       async run(args, { signal }) {
@@ -154,18 +216,22 @@ export function createAgentTools({
         const queries = [...new Set(rawList.map((q) => String(q || "").trim()).filter(Boolean))].slice(0, 5)
         if (!queries.length) throw new Error("Hãy cung cấp query hoặc queries để tìm kiếm.")
 
-        const batches = await Promise.all(queries.map((q) => searchWebFn(q, { ...cfg, limit, signal })))
+        // `limit` is the budget for the whole call, so every query asks for a fair share of it
+        // instead of each one fetching the full amount and the merge silently keeping several
+        // times what the caller asked for.
+        const perQuery = clamp(Math.ceil(limit / queries.length), 1, limit)
+        const batches = await Promise.all(queries.map((q) => searchWebFn(q, { ...cfg, limit: perQuery, signal })))
         const seen = new Set()
         const merged = []
         let provider = "web"
-        for (const batch of batches) {
+        outer: for (const batch of batches) {
           if (batch?.provider) provider = batch.provider
           for (const item of batch?.results ?? []) {
+            if (merged.length >= limit) break outer
             if (!item?.url || seen.has(item.url)) continue
             seen.add(item.url)
             const snippet = truncateSafe(String(item.snippet || "").replace(/\s+/g, " ").trim(), 800)
             merged.push({ ...item, snippet })
-            if (merged.length >= Math.min(10, limit * queries.length)) break
           }
         }
         const sourcesMarkdown = merged.length
@@ -186,6 +252,7 @@ export function createAgentTools({
     {
       name: "fetch_url",
       category: "web",
+      sandbox: { network: true },
       isConcurrencySafe: true,
       timeoutMs: 18000,
       description:
@@ -251,6 +318,7 @@ export function createAgentTools({
     {
       name: "list_boxes",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 8000,
       description: "Liệt kê tất cả khung thoại trên trang hiện tại (hoặc trang chỉ định theo số thứ tự 1-based), kèm cờ tràn khung (overflow).",
@@ -316,13 +384,16 @@ export function createAgentTools({
         })
         return {
           summary: `Tìm thấy ${matches.length} khung khớp "${args?.query}"`,
-          data: { matches: matches.slice(0, 40) },
+          // findMatches indexes the pages array; every tool the model sees speaks 1-based page
+          // numbers, so a match is reported the same way navigate_page and list_boxes do.
+          data: { matches: matches.slice(0, 40).map((match) => ({ ...match, pageIndex: match.pageIndex + 1 })) },
         }
       },
     },
     {
       name: "update_box",
       category: "write",
+      sandbox: { dom: true },
       description: "Cập nhật nội dung hoặc kiểu chữ của một khung thoại cụ thể theo boxId (tự động tạo mốc Hoàn tác).",
       parameters: {
         type: "object",
@@ -355,7 +426,11 @@ export function createAgentTools({
       },
       async run(args) {
         const { page } = resolvePage(state, selectedPage, args?.pageIndex)
-        const targetPage = page ?? state.pages.find((p) => p.boxes.some((b) => b.id === args?.boxId))
+        // The current page is always truthy, so the lookup has to fall back when the id is not on
+        // it: a box the model just created (or read) may live on another page of the chapter.
+        const targetPage = page?.boxes.some((b) => b.id === args?.boxId)
+          ? page
+          : state.pages.find((p) => p.boxes.some((b) => b.id === args?.boxId))
         const box = targetPage?.boxes.find((b) => b.id === args?.boxId)
         if (!box) throw new Error("Không tìm thấy khung thoại với ID: " + args?.boxId)
 
@@ -364,7 +439,9 @@ export function createAgentTools({
         if (typeof args.text === "string" && args.text.trim()) box.text = args.text.trim()
         if (Number.isFinite(args.size)) box.size = clamp(Math.round(args.size), 8, 400)
         if (typeof args.font === "string" && args.font.trim()) {
-          const clean = registerFontName?.(args.font) ?? args.font.trim().slice(0, 80)
+          // A staged box is not in the project yet, so the review must not teach the font picker a
+          // family the user could still reject; the render that places the box registers it.
+          const clean = draft ? normalizeFontName(args.font) : registerFontName?.(args.font) ?? normalizeFontName(args.font)
           if (clean) {
             box.font = clean
             renderFontOptions?.()
@@ -398,6 +475,7 @@ export function createAgentTools({
     {
       name: "create_box",
       category: "write",
+      sandbox: { dom: true },
       description: "Tạo một khung thoại mới trên trang hiện tại (tọa độ chuẩn hóa 0..1).",
       parameters: {
         type: "object",
@@ -424,23 +502,33 @@ export function createAgentTools({
         const y = clamp(Number.isFinite(args?.y) ? args.y : .42, 0, Math.max(0, 1 - h))
         commitLiveForm?.()
         checkpoint()
-        const box = makeBoxFn(page, { x, y, w, h }, text)
+        const box = makeBoxFn(page, { x, y, w, h }, text, state.defaultFont)
         if (typeof args?.fill === "boolean") box.fill = args.fill
         if (typeof args?.cleanup === "boolean") box.cleanup = args.cleanup
         page.boxes.push(box)
+        // The box lands on the page the model named, so the editor follows it there: selecting an
+        // id that lives on a page nobody is looking at leaves the user staring at an unchanged
+        // page and the model chasing a box it cannot reach. A pending review keeps the live view
+        // alone, because none of its boxes are in the project yet.
+        if (!draft && page.id !== state.pageId) {
+          if (selectPage) selectPage(page)
+          else state.pageId = page.id
+        }
         state.boxId = box.id
         state.selectedBoxIds?.clear()
         state.selectedBoxIds?.add(box.id)
         render()
+        const pageIndex = state.pages.indexOf(page) + 1
         return {
-          summary: `Đã tạo khung mới "${text.slice(0, 40)}"`,
-          data: { id: box.id, x, y, w, h, text },
+          summary: `Đã tạo khung mới "${text.slice(0, 40)}" trên trang ${pageIndex} (${page.name})`,
+          data: { id: box.id, x, y, w, h, text, pageIndex, pageName: page.name },
         }
       },
     },
     {
       name: "delete_box",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: () => true,
       description: "Xóa một khung thoại theo boxId.",
       parameters: {
@@ -453,8 +541,10 @@ export function createAgentTools({
       },
       async run(args) {
         const { page } = resolvePage(state, selectedPage, args?.pageIndex)
-        const targetPage = page ?? state.pages.find((p) => p.boxes.some((b) => b.id === args?.boxId))
-        if (!targetPage || !targetPage.boxes.some((b) => b.id === args?.boxId)) {
+        const targetPage = page?.boxes.some((b) => b.id === args?.boxId)
+          ? page
+          : state.pages.find((p) => p.boxes.some((b) => b.id === args?.boxId))
+        if (!targetPage) {
           throw new Error("Không tìm thấy khung cần xóa.")
         }
         commitLiveForm?.()
@@ -469,6 +559,7 @@ export function createAgentTools({
     {
       name: "replace_chapter_text",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: () => true,
       description: "Tìm và thay thế hàng loạt lời thoại trên toàn chương (ví dụ sửa tên nhân vật hoặc cách xưng hô).",
       parameters: {
@@ -503,16 +594,74 @@ export function createAgentTools({
       },
     },
     {
+      name: "query_terminology",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 8000,
+      description:
+        "Tra Bảng thuật ngữ: nhập một dòng thoại để biết thuật ngữ nào áp dụng theo thứ tự ổn định (kèm lý do), hoặc một tên/thuật ngữ để xem alias, biến thể, dạng ưu tiên/dạng bị cấm, dạng từ và quan hệ (broader/narrower/related/conflict).",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "Dòng thoại hoặc văn bản cần tra thuật ngữ áp dụng." },
+          term: { type: "string", description: "Tên gốc, tên dịch hoặc alias cần xem chi tiết." },
+          limit: { type: "integer", description: "Số kết quả tối đa (1-40, mặc định 20)." },
+        },
+      },
+      async run(args) {
+        const settings = readTranslationSettings?.() ?? {}
+        const graph = parseTerminologyGraph(settings.glossary ?? "")
+        if (args?.term) {
+          const term = findTerm(graph, args.term)
+          if (!term) {
+            return {
+              summary: `Không có thuật ngữ nào khớp "${String(args.term).trim()}"`,
+              data: { total: graph.terms.length, term: null },
+            }
+          }
+          const summary = term.translate
+            ? `"${term.source}" → "${term.target}"${term.forbidden.length ? ` · cấm: ${term.forbidden.join(", ")}` : ""}`
+            : `"${term.source}" giữ nguyên, không dịch`
+          return { summary, data: { total: graph.terms.length, term: termSummary(term, graph) } }
+        }
+        const text = String(args?.text ?? "")
+        if (!text.trim()) {
+          return {
+            summary: glossaryStatusText(graph),
+            data: {
+              total: graph.terms.length,
+              terms: graph.terms.map((term) => termSummary(term, graph)),
+            },
+          }
+        }
+        const limit = clamp(Math.round(Number(args?.limit) || 20), 1, 40)
+        const matched = resolveTerms(graph, text, {
+          sourceLanguage: settings.source ?? "",
+          targetLanguage: settings.target ?? "",
+          limit,
+        })
+        return {
+          summary: matched.length
+            ? `Áp dụng ${matched.length} thuật ngữ cho dòng này: ${matched.map((hit) => `"${hit.target}"`).join(", ")}`
+            : `Dòng này không khớp thuật ngữ nào trong ${graph.terms.length} mục`,
+          data: { total: graph.terms.length, matched },
+        }
+      },
+    },
+    {
       name: "update_glossary",
       category: "write",
-      description: "Thêm hoặc cập nhật các cặp thuật ngữ / tên nhân vật (dạng 'từ gốc = từ dịch') vào Bảng thuật ngữ của dự án.",
+      sandbox: { dom: true },
+      description:
+        "Thêm hoặc cập nhật thuật ngữ / tên nhân vật trong Bảng thuật ngữ của dự án. Mỗi mục là dòng 'nguồn = dịch', có thể kèm chỉ thị thuộc đồ thị: @alias, @variant, @pos, @keep, @prefer, @forbid, @broader, @narrower, @related, @conflict.",
       parameters: {
         type: "object",
         properties: {
           entries: {
             type: "array",
             items: { type: "string" },
-            description: "Danh sách dòng dạng 'Tên gốc = Tên dịch' (ví dụ ['五条悟 = Gojo Satoru']).",
+            description:
+              "Danh sách mục, ví dụ ['五条悟 = Gojo Satoru', '先生 = Thầy\\n@pos honorific\\n@keep']. Mục trùng nguồn hoặc trùng alias được gộp vào mục đã có.",
           },
           mode: { type: "string", enum: ["append", "replace"], description: "append (mặc định) để thêm/gộp, replace để thay mới toàn bộ." },
         },
@@ -522,28 +671,31 @@ export function createAgentTools({
         const field = byId("translation-glossary")
         if (!field) throw new Error("Không tìm thấy trường Bảng thuật ngữ.")
         const rawEntries = Array.isArray(args?.entries) ? args.entries : []
-        const cleaned = rawEntries.map((line) => String(line || "").trim()).filter(Boolean)
+        const cleaned = rawEntries.filter((entry) => typeof entry === "string" ? entry.trim() : entry && typeof entry === "object")
         if (!cleaned.length) throw new Error("Danh sách thuật ngữ rỗng.")
         commitLiveForm?.()
         checkpoint()
         const mode = args?.mode === "replace" ? "replace" : "append"
-        const existingLines = mode === "replace" ? [] : field.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-        const keyOf = (line) => line.split("=")[0].trim().toLowerCase()
-        const merged = new Map()
-        for (const line of existingLines) merged.set(keyOf(line), line)
-        for (const line of cleaned) merged.set(keyOf(line), line)
-        field.value = [...merged.values()].join("\n")
+        const base = mode === "replace" ? { terms: [], problems: [] } : parseTerminologyGraph(field.value)
+        const merged = mergeTerminology(base, cleaned)
+        if (!merged.graph.terms.length) throw new Error("Danh sách thuật ngữ rỗng.")
+        field.value = formatTerminologyGraph(merged.graph)
         field.dispatchEvent?.(new Event("input"))
         render()
         return {
-          summary: `Đã cập nhật Bảng thuật ngữ (${cleaned.length} mục, tổng ${merged.size} mục)`,
-          data: { totalEntries: merged.size, addedOrUpdated: cleaned },
+          summary: `Đã cập nhật Bảng thuật ngữ (${merged.added.length + merged.updated.length} mục, tổng ${merged.graph.terms.length} mục)`,
+          data: {
+            totalEntries: merged.graph.terms.length,
+            added: merged.added,
+            updated: merged.updated,
+          },
         }
       },
     },
     {
       name: "autofit_page",
       category: "write",
+      sandbox: { dom: true },
       description: "Tự động chọn cỡ chữ lớn nhất không bị tràn khung cho tất cả các khung trên trang hiện tại (hoặc pageIndex).",
       parameters: {
         type: "object",
@@ -652,6 +804,7 @@ export function createAgentTools({
     {
       name: "check_export_preflight",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 10000,
       description:
@@ -663,9 +816,7 @@ export function createAgentTools({
         },
       },
       async run(args) {
-        const targetPages = Number.isInteger(args?.pageIndex)
-          ? [resolvePage(state, selectedPage, args.pageIndex).page].filter(Boolean)
-          : state.pages
+        const { pages: targetPages, offset } = resolveTargetPages(state, selectedPage, args?.pageIndex)
         if (!targetPages.length) {
           return { summary: "Chưa có trang nào trong dự án.", data: { totalIssues: 0, issues: [] } }
         }
@@ -717,7 +868,7 @@ export function createAgentTools({
           if (item.severity !== "warning") continue
           issues.push({
             type: item.type,
-            pageIndex: item.pageIndex,
+            pageIndex: item.pageIndex + offset,
             pageName: item.pageName,
             boxId: item.boxId,
             text: item.message,
@@ -745,9 +896,7 @@ export function createAgentTools({
         },
       },
       async run(args) {
-        const targetPages = Number.isInteger(args?.pageIndex)
-          ? [resolvePage(state, selectedPage, args.pageIndex).page].filter(Boolean)
-          : state.pages
+        const { pages: targetPages, offset } = resolveTargetPages(state, selectedPage, args?.pageIndex)
         if (!targetPages.length) {
           return { summary: "Không có trang nào để rà QA.", data: { total: 0, byType: {}, issues: [] } }
         }
@@ -761,13 +910,48 @@ export function createAgentTools({
           summary: qa.total
             ? `Phát hiện ${qa.total} lỗi QA (sót gốc: ${qa.byType.untranslated_source}, thuật ngữ: ${qa.byType.glossary_violation}, dấu câu: ${qa.byType.punctuation_spacing})`
             : `Không có lỗi QA nào trên ${targetPages.length} trang`,
-          data: qa,
+          data: { ...qa, issues: qa.issues.map((item) => ({ ...item, pageIndex: item.pageIndex + offset })) },
+        }
+      },
+    },
+    {
+      name: "check_style_guide",
+      category: "read",
+      isConcurrencySafe: true,
+      timeoutMs: 8000,
+      description:
+        "Rà ngay lập tức (0-token, không gọi LLM) toàn bộ chương hoặc một trang theo Hướng dẫn phong cách của dự án: dấu ngoặc kép, cách viết hoa và xử lý âm thanh/SFX. Nên chạy trước khi dịch hoặc chỉnh sửa hàng loạt để bắt lỗi theo trang/khung.",
+      parameters: {
+        type: "object",
+        properties: {
+          pageIndex: { type: "integer", description: "Số trang (1-based). Bỏ trống để quét cả chương." },
+        },
+      },
+      async run(args) {
+        const guide = normalizeStyleGuide(readTranslationSettings?.()?.styleGuide)
+        if (!guide) {
+          return {
+            summary: "Dự án chưa có Hướng dẫn phong cách; mở 'Hướng dẫn phong cách…' trong phần cài đặt dịch để tạo.",
+            data: { active: false, total: 0, byType: {}, issues: [] },
+          }
+        }
+        const { pages: targetPages, offset } = resolveTargetPages(state, selectedPage, args?.pageIndex)
+        if (!targetPages.length) {
+          return { summary: "Không có trang nào để rà phong cách.", data: { active: true, total: 0, byType: {}, issues: [] } }
+        }
+        const qa = lintStyleGuide(targetPages, guide)
+        return {
+          summary: qa.total
+            ? `Phát hiện ${qa.total} lỗi phong cách (ngoặc kép: ${qa.byType.quote_style}, viết hoa: ${qa.byType.casing}, SFX: ${qa.byType.sfx})`
+            : `Không có lỗi phong cách nào trên ${targetPages.length} trang`,
+          data: { active: true, ...qa, issues: qa.issues.map((item) => ({ ...item, pageIndex: item.pageIndex + offset })) },
         }
       },
     },
     {
       name: "inspect_page_image",
       category: "read",
+      sandbox: { dom: true },
       isConcurrencySafe: true,
       timeoutMs: 12000,
       description:
@@ -808,6 +992,7 @@ export function createAgentTools({
     {
       name: "navigate_page",
       category: "read",
+      sandbox: { dom: true },
       timeoutMs: 5000,
       description: "Chuyển trình biên tập sang trang chỉ định (1-based) để người dùng theo dõi trực tiếp.",
       parameters: {
@@ -836,6 +1021,7 @@ export function createAgentTools({
     {
       name: "align_boxes",
       category: "write",
+      sandbox: { dom: true },
       description: "Căn thẳng hàng từ 2 khung thoại trở lên theo mép hoặc trục giữa.",
       parameters: {
         type: "object",
@@ -853,7 +1039,7 @@ export function createAgentTools({
       async run(args) {
         const { page, index } = resolvePage(state, selectedPage, args?.pageIndex)
         if (!page) throw new Error("Không tìm thấy trang cần căn khung.")
-        const ids = Array.isArray(args?.boxIds) ? args.boxIds.map(String) : []
+        const ids = resolveBoxIds(page, args?.boxIds)
         if (ids.length < 2) throw new Error("Cần ít nhất 2 boxId để căn hàng.")
         commitLiveForm?.()
         checkpoint()
@@ -870,6 +1056,7 @@ export function createAgentTools({
     {
       name: "distribute_boxes",
       category: "write",
+      sandbox: { dom: true },
       description: "Chia đều khoảng cách ngang hoặc dọc cho từ 3 khung thoại trở lên.",
       parameters: {
         type: "object",
@@ -883,7 +1070,7 @@ export function createAgentTools({
       async run(args) {
         const { page, index } = resolvePage(state, selectedPage, args?.pageIndex)
         if (!page) throw new Error("Không tìm thấy trang cần chia đều.")
-        const ids = Array.isArray(args?.boxIds) ? args.boxIds.map(String) : []
+        const ids = resolveBoxIds(page, args?.boxIds)
         if (ids.length < 3) throw new Error("Cần ít nhất 3 boxId để chia đều khoảng cách.")
         commitLiveForm?.()
         checkpoint()
@@ -900,6 +1087,7 @@ export function createAgentTools({
     {
       name: "apply_style_preset",
       category: "write",
+      sandbox: { dom: true },
       requiresApproval: (args) => args?.scope === "chapter",
       description: "Áp dụng một Mẫu dàn chữ (Style Preset) đã lưu trong dự án lên khung, cả trang hoặc cả chương.",
       parameters: {
@@ -933,13 +1121,7 @@ export function createAgentTools({
         if (!boxes.length) throw new Error("Không có khung thoại nào trong phạm vi áp dụng.")
         commitLiveForm?.()
         checkpoint()
-        const defaults = {
-          bold: false, italic: false, uppercase: false, vertical: false,
-          lineHeight: 1.15, strokeWidth: 0, strokeColor: "#ffffff",
-          shadowBlur: 0, shadowColor: "#000000",
-          fillColor: "#ffffff", fillShape: "rect",
-        }
-        boxes.forEach((box) => Object.assign(box, defaults, preset.style))
+        boxes.forEach((box) => Object.assign(box, PRESET_RESET_DEFAULTS, preset.style))
         render()
         return {
           summary: `Đã áp dụng mẫu "${preset.name}" cho ${boxes.length} khung (${scope})`,
@@ -950,6 +1132,7 @@ export function createAgentTools({
     {
       name: "ask_user",
       category: "interaction",
+      sandbox: { host: ["askUser"] },
       timeoutMs: 0,
       description:
         "Đặt một câu hỏi trắc nghiệm ngắn cho người dùng ngay trong khung chat khi cần xác nhận cách dịch tên riêng, xưng hô hoặc phương án biên tập trước khi tiếp tục.",
@@ -1009,15 +1192,12 @@ export function createAgentTools({
     },
   ]
 
-  const byName = new Map(catalog.map((tool) => [tool.name, tool]))
-
-  function isEnabled(tool, { allowEdits = true, allowWebSearch = true, planMode = false } = {}) {
-    if (tool.category === "web" && !allowWebSearch) return false
-    if (tool.category === "write" && (!allowEdits || planMode)) return false
-    if (tool.category === "plan" && !planMode) return false
-    if (tool.category === "interaction" && !onAskUser) return false
-    return true
-  }
+  // The catalog above is the whole of what this module knows about a tool; permissions, timeouts and
+  // dispatch belong to the registry, which validates every entry as it is registered.
+  const registry = createToolRegistry(
+    [...catalog, ...(Array.isArray(extraTools) ? extraTools : [])],
+    { host: { askUser: Boolean(onAskUser) } },
+  )
 
   function getRuntimeSnapshot() {
     const settings = readTranslationSettings?.() ?? {}
@@ -1033,10 +1213,8 @@ export function createAgentTools({
         }
       }
     }
-    const glossaryLines = String(settings.glossary || "")
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
+    // Directives belong to a term, so the count the model sees is terms, not text lines.
+    const glossaryCount = parseTerminologyGraph(settings.glossary ?? "").terms.length
     return {
       pageCount: state.pages.length,
       currentPageIndex: currentIdx >= 0 ? currentIdx + 1 : null,
@@ -1048,33 +1226,93 @@ export function createAgentTools({
       overflowCount,
       unplacedCount: current?.unplaced?.length ?? 0,
       queueCount: state.queue?.length ?? 0,
-      glossaryCount: glossaryLines.length,
+      glossaryCount,
       presetNames: (state.presets ?? []).map((p) => p.name),
       notesPreview: String(settings.notes || "").replace(/\s+/g, " ").trim().slice(0, 160),
+      styleGuideActive: Boolean(normalizeStyleGuide(settings.styleGuide)),
+    }
+  }
+
+  // A write tool runs against a cloned draft while a review is open: the live pages, the live
+  // selection and the history stay untouched, and only the difference comes back as proposals.
+  async function runStagedReview(tool, args, { signal, callId = "" } = {}) {
+    liveCommitLiveForm?.()
+    const livePages = state.pages
+    const liveSelectedBoxIds = state.selectedBoxIds
+    const liveBoxId = state.boxId
+    const glossaryField = liveById("translation-glossary")
+    const draftField = glossaryField ? { value: String(glossaryField.value ?? ""), dispatchEvent() {} } : null
+    const fields = new Map()
+    if (draftField) fields.set("translation-glossary", draftField)
+
+    const working = { pages: clonePagesForDraft(livePages), fields }
+    draft = working
+    state.pages = working.pages
+    if (liveSelectedBoxIds) state.selectedBoxIds = new Set([...liveSelectedBoxIds])
+    let outcome
+    try {
+      outcome = await tool.run(args ?? {}, { signal })
+    } finally {
+      draft = null
+      state.pages = livePages
+      state.selectedBoxIds = liveSelectedBoxIds
+      state.boxId = liveBoxId
+    }
+
+    const changes = diffPages(livePages, working.pages, { toolName: tool.name, toolCallId: callId })
+    const glossaryChange = draftField ? diffGlossaryChange(glossaryField.value, draftField.value, { toolName: tool.name, toolCallId: callId }) : null
+    if (glossaryChange) changes.push(glossaryChange)
+    for (const change of changes) change.blocked = isRejectedChange(reviewRejections, change)
+    reviewSession?.add(changes)
+
+    if (!changes.length) {
+      return {
+        summary: outcome?.summary ?? "Không có thay đổi nào",
+        data: { ...(outcome?.data ?? {}), staged: true, changes: [] },
+      }
+    }
+
+    const blocked = changes.filter((change) => change.blocked)
+    const fresh = changes.filter((change) => !change.blocked)
+    const lines = [`Đã đề xuất ${changes.length} thay đổi và CHƯA áp dụng gì:`]
+    for (const change of changes.slice(0, 8)) lines.push(`- ${describeChange(change)}`)
+    if (blocked.length) {
+      lines.push(`${blocked.length} thay đổi trùng với thay đổi người dùng đã từ chối trước đây; chỉ được áp dụng nếu người dùng chọn lại.`)
+    }
+    lines.push("Người dùng sẽ tự chọn từng thay đổi để áp dụng, nên đừng coi chúng là đã xong.")
+    return {
+      summary: fresh.length
+        ? `Đã đề xuất ${changes.length} thay đổi, chờ duyệt`
+        : `Bỏ qua ${blocked.length} thay đổi đã bị từ chối trước đó`,
+      data: { staged: true, proposed: outcome?.data, blocked: blocked.length, changes },
+      modelText: lines.join("\n"),
     }
   }
 
   return {
     definitions(flags = {}) {
-      return catalog
-        .filter((tool) => isEnabled(tool, flags))
-        .map(({ name, description, parameters }) => ({ name, description, parameters }))
+      return registry.definitions(flags)
+    },
+    names() {
+      return registry.names()
     },
     isConcurrencySafe(name) {
-      return byName.get(name)?.isConcurrencySafe === true
+      return registry.isConcurrencySafe(name)
     },
     categoryOf(name) {
-      return byName.get(name)?.category ?? "read"
+      return registry.categoryOf(name)
     },
     timeoutMs(name) {
-      const val = byName.get(name)?.timeoutMs
-      return val !== undefined ? val : 12000
+      return registry.timeoutMs(name)
     },
     requiresApproval(name, args) {
-      return byName.get(name)?.requiresApproval?.(args) === true
+      return registry.requiresApproval(name, args)
+    },
+    sandboxOf(name) {
+      return registry.sandboxOf(name)
     },
     needsApproval(name, args, { confirmBulkEdits = false, forceWriteApproval = false } = {}) {
-      const tool = byName.get(name)
+      const tool = registry.get(name)
       if (!tool) return false
       // Once the model has read untrusted web content in this turn, every mutation needs a
       // human decision (prompt-injection containment), not just the bulk/destructive ones.
@@ -1096,18 +1334,25 @@ export function createAgentTools({
       currentTodos = []
       currentPlan = null
     },
-    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal } = {}) {
-      const tool = byName.get(name)
+    // Opens the review window for one turn. Until endReview() every write tool stages its effect
+    // instead of applying it; `rejections` is the project's memory of refused changes.
+    beginReview(session, { rejections = [] } = {}) {
+      reviewSession = session ?? null
+      reviewRejections = Array.isArray(rejections) ? rejections : []
+      return Boolean(reviewSession)
+    },
+    endReview() {
+      reviewSession = null
+      reviewRejections = []
+    },
+    isReviewing() {
+      return Boolean(reviewSession)
+    },
+    async execute(name, args, { allowEdits = true, allowWebSearch = true, planMode = false, confirmBulkEdits = false, forceWriteApproval = false, signal, callId = "" } = {}) {
+      const flags = { allowEdits, allowWebSearch, planMode }
+      const tool = registry.get(name)
       if (!tool) return { ok: false, error: `Công cụ không tồn tại: ${name}` }
-      if (!isEnabled(tool, { allowEdits, allowWebSearch, planMode })) {
-        return {
-          ok: false,
-          category: tool.category,
-          error: planMode && tool.category === "write"
-            ? `Công cụ "${name}" đang bị khóa trong Chế độ Kế hoạch (Plan Mode). Hãy dùng submit_plan trước.`
-            : `Công cụ "${name}" đang bị tắt bởi thiết lập quyền của người dùng.`,
-        }
-      }
+      if (!registry.isAvailable(tool, flags)) return registry.denial(tool, flags)
       const approvalRequired = (forceWriteApproval && tool.category === "write")
         || Boolean(confirmBulkEdits && tool.requiresApproval?.(args) === true)
       if (approvalRequired) {
@@ -1116,6 +1361,7 @@ export function createAgentTools({
           return {
             ok: false,
             category: tool.category,
+            code: TOOL_APPROVAL_UNAVAILABLE,
             error: `Cần người dùng phê duyệt thao tác "${name}" nhưng giao diện hiện không hỗ trợ hộp thoại duyệt.`,
           }
         }
@@ -1124,18 +1370,23 @@ export function createAgentTools({
           return {
             ok: false,
             category: tool.category,
+            code: TOOL_APPROVAL_REJECTED,
             error: decision?.reason
               ? `Người dùng từ chối thao tác "${name}": ${decision.reason}`
               : `Người dùng đã từ chối thực thi thao tác "${name}".`,
           }
         }
       }
-      try {
-        const result = await tool.run(args ?? {}, { signal })
-        return { ok: true, category: tool.category, ...result }
-      } catch (error) {
-        return { ok: false, category: tool.category, error: error?.message || String(error) }
-      }
+      // A write inside a review window runs against a draft and returns the changes it would make,
+      // so the registry still owns validation, timeout and error shaping on both paths.
+      const staged = Boolean(reviewSession) && tool.category === "write"
+      return registry.dispatch(name, args, {
+        flags,
+        signal,
+        ...(staged && {
+          run: (target, runArgs, context) => runStagedReview(target, runArgs, { ...context, callId }),
+        }),
+      })
     },
   }
 }

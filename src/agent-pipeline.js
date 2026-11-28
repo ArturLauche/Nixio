@@ -2,6 +2,10 @@
 // inspired by DeepSeek Harness (packages/core/tools/src/pipeline.ts & batch.ts).
 
 export const TOOL_ABORTED_BEFORE_DISPATCH = "TOOL_ABORTED_BEFORE_DISPATCH"
+// Approval outcomes are decisions of the turn, not failures of the tool: the codes let a transcript
+// say "the human refused this write" without matching on the Vietnamese message.
+export const TOOL_APPROVAL_REJECTED = "TOOL_APPROVAL_REJECTED"
+export const TOOL_APPROVAL_UNAVAILABLE = "TOOL_APPROVAL_UNAVAILABLE"
 
 export function deepFreezeSnapshot(value) {
   let cloned
@@ -69,7 +73,12 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
   const rawTimeout = tools.timeoutMs?.(call.name)
   const approvalRequired = tools.needsApproval
     ? tools.needsApproval(call.name, frozenArgs, { confirmBulkEdits, forceWriteApproval })
-    : Boolean(confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs) === true)
+    : // Hosts without needsApproval still owe the same two gates: an untrusted-read turn makes every
+      // write wait for a human, and the bulk switch waits on the tools the registry marks.
+      Boolean(
+        (forceWriteApproval && tools.categoryOf?.(call.name) === "write") ||
+          (confirmBulkEdits && tools.requiresApproval?.(call.name, frozenArgs) === true),
+      )
   const needsHumanWait = rawTimeout === 0 || approvalRequired
   const timeoutMs = needsHumanWait ? 0 : (rawTimeout ?? 15000)
   const execSignal = fuseSignals(signal, timeoutMs)
@@ -82,6 +91,7 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
       planMode,
       confirmBulkEdits,
       forceWriteApproval,
+      callId: call.id,
       signal: execSignal,
     })
   } catch (error) {
@@ -104,6 +114,10 @@ async function runSingleCall(call, { tools, allowEdits, allowWebSearch, planMode
     modelText: outcome?.modelText,
     attachment: outcome?.attachment,
     error: outcome?.error,
+    code: outcome?.code,
+    // Whether this call needed a human and what was decided. A replay reads the decision back from
+    // here instead of asking the user a second time.
+    approvalRequired,
     durationMs,
   }
   const { attachment: _omitted, ...publicEvent } = settled
