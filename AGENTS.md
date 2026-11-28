@@ -51,7 +51,7 @@ Node 22.12+, `node:test` + `node:assert/strict`; tên test là câu mô tả hà
 | Chạm vào | Chạy |
 |---|---|
 | `src/*.js`, `locales/`, `index.html` | `npm test` |
-| `src/controllers/**` | `npm test` + `npm run test:coverage` (sàn 25% dòng controller) |
+| `src/controllers/**` | `npm test` + `npm run test:coverage` (sàn 25% dòng cho toàn bộ controller và cho từng tệp) |
 | DOM/CSS/`index.html` | thêm `npm run test:visual` (chỉ nền tảng đã calibrate; không tự chạy `--update`) |
 | `desktop/**` | `npm test` + `npm run test:desktop` (cần build) |
 | `native/**` | `npm run desktop:native` rồi `REQUIRE_NATIVE=1 npm test`; máy thiếu .NET thì nêu rõ 27 test bị skip |
@@ -59,7 +59,7 @@ Node 22.12+, `node:test` + `node:assert/strict`; tên test là câu mô tả hà
 | pipeline ảnh | `npm run benchmark` |
 
 - Không sửa test để test xanh; không thêm skip trừ khi môi trường thiếu (ví dụ thiếu `dotnet`) và phải nêu trong báo cáo.
-- Trên máy không có .NET: `npm test` = 853 test, 826 pass, 27 skip, 0 fail.
+- Trên máy không có .NET: `npm test` = 867 test, 840 pass, 27 skip, 0 fail.
 
 ## 5. Commit & PR
 

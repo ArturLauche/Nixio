@@ -6,8 +6,8 @@ import { projectPageLimit as pageLimit, projectSettingIds, projectStyle } from "
 import {
   exportProfilePresets,
   loadGlobalExportProfileId,
+  rememberExportProfileId,
   resolveExportProfile,
-  saveGlobalExportProfileId,
 } from "./export-presets.js"
 import { detectAllBubblesOnImage } from "./bubble.js"
 import {
@@ -108,6 +108,7 @@ const exportProfileField = byId("export-profile")
 exportProfileField?.replaceChildren(...exportProfilePresets.map(({ id, name }) => new Option(name, id)))
 if (exportProfileField) exportProfileField.value = loadGlobalExportProfileId()
 const defaultProjectSettings = projectSettings.map(({ value }) => value)
+const exportProfileIndex = exportProfileField ? projectSettings.indexOf(exportProfileField) : -1
 // A settings edit is named by the visible label the user actually changed, so the timeline reads
 // "Đổi cài đặt Hướng đọc" instead of a generic name.
 const settingLabels = new Map(projectSettings.map((field) => [
@@ -117,6 +118,9 @@ const settingLabels = new Map(projectSettings.map((field) => [
 let previewRedraw
 let cleanRawController = null
 let syncLayers = () => {}
+// The export summary describes the selected profile; a project switch can change that selection
+// without a change event, so onProjectSwitch runs the summary refresh once the export UI exists.
+let syncExportProfileSummary = () => {}
 
 // #79: the interface locale is applied before any text is rendered. `t` is the only way a message
 // reaches the screen, and a switch re-renders the status line and the theme label in place.
@@ -573,9 +577,10 @@ for (const field of projectSettings) {
   })
 }
 
-// The project keeps its own profile, and the last choice becomes the default for new projects.
+// The project keeps its own profile, and the last choice becomes the default for new projects:
+// rememberExportProfileId also moves the snapshot startNewProject() resets the form from.
 byId("export-profile")?.addEventListener("change", (event) => {
-  saveGlobalExportProfileId(event.currentTarget.value)
+  rememberExportProfileId(event.currentTarget.value, defaultProjectSettings, exportProfileIndex)
 })
 
 let statusDescriptor = null
@@ -2196,7 +2201,7 @@ setupUsage({ byId, ledger: usageLedger, notify, pageId: () => state.pageId })
 // Turn transcripts belong to the project that was open when the turn ran, so the panel reads them the
 // same way the chat session is restored. A session with no file yet shares the "unsaved" bucket the
 // usage ledger already uses.
-const replay = setupReplay({ byId, projectId: () => state.projectId || "unsaved", notify })
+const replay = setupReplay({ byId, projectId: () => state.projectId || "unsaved", notify, t })
 replay.refresh()
 
 function notifyOverflowIfAny(page, sourceLabel = "") {
@@ -2427,6 +2432,7 @@ const projects = setupProjects({
   onProjectSwitch: () => {
     chat?.syncProjectSession()
     translation.refreshGlossaryStatus()
+    syncExportProfileSummary()
   },
 })
 const dialogs = setupDialogs({
@@ -2470,6 +2476,7 @@ const exportUi = setupExports({
   commitLiveForm: commitLiveFormCheckpoint,
   changed: () => projects.changed(),
 })
+syncExportProfileSummary = exportUi.syncProfileSummary
 chat = setupChat({
   ...shared,
   editorSnapshot,

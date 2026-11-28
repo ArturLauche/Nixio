@@ -10,6 +10,7 @@ import {
   boxStyleSignature,
   createTranslationMemoryStore,
   normalizeSourceText,
+  translationMemoryEntryLimit,
   translationMemoryScope,
 } from "../translation-memory.js"
 import {
@@ -25,6 +26,7 @@ import { glossaryStatusText, parseTerminologyGraph } from "../terminology-graph.
 import { groupDialogue } from "../io.js"
 import { createCredentialSettings } from "../credential-settings.js"
 import { PROVIDER_BRIDGE_CODES, providerCredentialsInMain } from "../provider-bridge.js"
+import { translate } from "../i18n.js"
 
 const llmStorageKey = "khung-thoai-llm-config"
 const llmPresets = {
@@ -53,6 +55,7 @@ export function setupTranslation({
   notifyOverflowIfAny,
   translationMemory,
   usageLedger,
+  t = (key, params) => translate("vi", key, params),
 }) {
   let translationController
   // The project owns the pairs; a caller that does not supply a store (tests, the browser panel
@@ -296,9 +299,13 @@ export function setupTranslation({
     const summary = memory.summary(memoryScope())
     const page = selectedPage()
     const suggestions = page ? pageMemoryPlan(page).suggestions.length : 0
+    // Reaching the cap is data loss the user did not ask for; say how many pairs the store dropped
+    // instead of letting the new count hide it behind a number that never changes.
+    const evicted = memory.evicted ?? 0
     byId("translation-memory-status").textContent = summary.total
       ? `Bộ nhớ dịch: ${summary.total} cặp đã lưu (${summary.reviewed} cặp đã duyệt)` +
-        (suggestions ? ` · ${suggestions} gợi ý từ bộ nhớ cho trang này.` : ".")
+        (suggestions ? ` · ${suggestions} gợi ý từ bộ nhớ cho trang này.` : ".") +
+        (evicted ? " " + t("translation.memory.evicted", { count: evicted, limit: translationMemoryEntryLimit }) : "")
       : "Bộ nhớ dịch: chưa có cặp nào trong dự án."
     const button = byId("use-approved-translation")
     button.disabled = !suggestions || projectBusy()
